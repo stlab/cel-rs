@@ -29,12 +29,12 @@ class = "identifier"
 "adam-web-ui/src/build.rs" = 1
 
 [[queries]]
-id = "ident-dynamic-sequence"
-query = "DynamicSequence"
+id = "ident-owned-value"
+query = "OwnedValue"
 class = "identifier"
 
-[judgments.ident-dynamic-sequence]
-"cel-runtime/src/dynamic_sequence.rs" = 3
+[judgments.ident-owned-value]
+"cel-runtime/src/owned_value.rs" = 3
 
 [[queries]]
 id = "ident-type-expr"

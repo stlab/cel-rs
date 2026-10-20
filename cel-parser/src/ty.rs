@@ -46,7 +46,7 @@ pub enum Ty {
     Bool,
     /// `String`.
     String,
-    /// A homogeneous array (`cel_runtime::DynamicArray`) of the boxed element type, which may
+    /// A canonical homogeneous array of the boxed element type, which may
     /// itself be an array (`[[i32]]`) or [`Ty::Any`] (an array whose element type isn't
     /// statically known — e.g. `[f(), g()]`, whose elements are unresolved call results).
     Array(Box<Ty>),
@@ -70,14 +70,11 @@ impl Ty {
     /// # Examples
     /// ```
     /// use cel_parser::{ResolvedLeafType, Ty};
-    /// use cel_runtime::ArrayElementType;
-    /// let leaf = ResolvedLeafType::new("custom", ArrayElementType::leaf::<()>().unwrap());
+    /// use cel_runtime::ValueType;
+    /// let leaf = ResolvedLeafType::new("custom", ValueType::leaf::<()>());
     /// assert_eq!(Ty::from_leaf(&leaf), Ty::Registered(leaf));
     /// ```
     pub fn from_leaf(leaf: &ResolvedLeafType) -> Self {
-        if let Some(element) = leaf.element_type().nested() {
-            return Ty::Array(Box::new(descriptor_ty(element)));
-        }
         match Self::from_type_id(leaf.type_id()) {
             Ty::Any | Ty::Array(_) => Ty::Registered(leaf.clone()),
             primitive => primitive,
@@ -121,12 +118,11 @@ impl Ty {
 
     /// Describes a statically known non-array leaf.
     ///
-    /// - Precondition: T is not `DynamicArray`, whose descriptor requires element metadata.
+    /// - Precondition: T describes an opaque host leaf, not erased whole-value ownership.
     fn known_leaf<T: 'static>(name: &'static str) -> Ty {
-        debug_assert_ne!(TypeId::of::<T>(), TypeId::of::<cel_runtime::DynamicArray>());
         Ty::Registered(ResolvedLeafType::new(
             name,
-            cel_runtime::ArrayElementType::leaf::<T>().expect("non-array leaf"),
+            cel_runtime::ValueType::leaf::<T>(),
         ))
     }
 
@@ -148,10 +144,8 @@ impl Ty {
     /// Maps a `TypeId` (e.g. from `adam_lang::TypeRegistry::TypeEntry::type_id`) to its [`Ty`].
     /// An unrecognized `TypeId` maps to [`Ty::Any`] — not an error, matching adam-lang/CEL's
     /// extensible type system (a host binary's custom registered types are invisible here).
-    /// `cel_runtime::DynamicArray`'s own `TypeId` maps to `Array(Box::new(Ty::Any))`: a bare
-    /// `TypeId` is flat, so it carries no element descriptor to recover the array's element type
-    /// from, and [`Ty::Any`] is the element type that unifies with every actual element type
-    /// rather than claiming one falsely.
+    /// A flat `TypeId` never establishes a structural array shape; structural
+    /// identities require recursive descriptors instead.
     ///
     /// # Examples
     ///
@@ -162,8 +156,8 @@ impl Ty {
     /// assert_eq!(Ty::from_type_id(TypeId::of::<i32>()), Ty::I32);
     /// assert_eq!(Ty::from_type_id(TypeId::of::<Vec<u8>>()), Ty::Any);
     /// assert_eq!(
-    ///     Ty::from_type_id(TypeId::of::<cel_runtime::DynamicArray>()),
-    ///     Ty::Array(Box::new(Ty::Any))
+    ///     Ty::from_type_id(TypeId::of::<cel_runtime::OwnedValue>()),
+    ///     Ty::Any
     /// );
     /// ```
     pub fn from_type_id(id: TypeId) -> Ty {
@@ -199,16 +193,13 @@ impl Ty {
             Ty::Bool
         } else if id == TypeId::of::<String>() {
             Ty::String
-        } else if id == TypeId::of::<cel_runtime::DynamicArray>() {
-            Ty::Array(Box::new(Ty::Any))
         } else {
             Ty::Any
         }
     }
 
     /// Returns this type's `TypeId`, or `None` for [`Ty::Any`] and nonempty tuples (whose
-    /// storage needs a complete shape). Every [`Ty::Array`], whatever its element type, reports
-    /// `cel_runtime::DynamicArray`'s `TypeId` — the one runtime type every array value has.
+    /// storage needs a complete shape), and arrays, whose elements also need a complete shape.
     ///
     /// # Examples
     ///
@@ -220,7 +211,7 @@ impl Ty {
     /// assert_eq!(Ty::Any.type_id(), None);
     /// assert_eq!(
     ///     Ty::Array(Box::new(Ty::I32)).type_id(),
-    ///     Some(TypeId::of::<cel_runtime::DynamicArray>())
+    ///     None
     /// );
     /// ```
     pub fn type_id(&self) -> Option<TypeId> {
@@ -241,7 +232,7 @@ impl Ty {
             Ty::F64 => TypeId::of::<f64>(),
             Ty::Bool => TypeId::of::<bool>(),
             Ty::String => TypeId::of::<String>(),
-            Ty::Array(_) => TypeId::of::<cel_runtime::DynamicArray>(),
+            Ty::Array(_) => return None,
             Ty::Registered(leaf) => leaf.type_id(),
             Ty::Tuple(elements) if elements.is_empty() => TypeId::of::<()>(),
             Ty::Tuple(_) => return None,
@@ -407,29 +398,13 @@ impl Ty {
                 ))
             }
             (Ty::Registered(lhs), Ty::Registered(rhs))
-                if lhs.element_type() == rhs.element_type() =>
+                if lhs.element_type().same_shape(rhs.element_type()) =>
             {
                 Some(self.clone())
             }
             (this, other) if this == other => Some(this.clone()),
             _ => None,
         }
-    }
-}
-
-/// Preserves an array element descriptor without repeatedly cloning nested descriptors.
-///
-/// - Complexity: O(d + l) in descriptor depth d and leaf display-name length l.
-fn descriptor_ty(descriptor: &cel_runtime::ArrayElementType) -> Ty {
-    if let Some(element) = descriptor.nested() {
-        return Ty::Array(Box::new(descriptor_ty(element)));
-    }
-    match Ty::from_type_id(descriptor.type_id()) {
-        Ty::Any | Ty::Array(_) => Ty::Registered(ResolvedLeafType::new(
-            descriptor.type_name().to_owned(),
-            descriptor.clone(),
-        )),
-        primitive => primitive,
     }
 }
 
@@ -492,7 +467,7 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
 ///         "i32",
 ///         cel_parser::ResolvedLeafType::new(
 ///             "i32",
-///             cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
+///             cel_runtime::ValueType::leaf::<i32>(),
 ///         ),
 ///     )], &OpLookup::new());
 /// assert_eq!(ty, Ty::Array(Box::new(Ty::I32)));
@@ -776,7 +751,7 @@ pub fn check_expr_with_type_resolver(
 /// recursively. The first element that doesn't unify with the accumulated type gets one
 /// diagnostic, reported at that element's own span, and folding stops there: a heterogeneous
 /// literal yields exactly one conflict diagnostic, naming the first conflicting element, matching
-/// `cel_runtime::DynamicArray`'s own runtime "first conflicting index" report. Later elements are
+/// the runtime's own "first conflicting index" report. Later elements are
 /// still fully checked, so their own internal diagnostics still surface.
 ///
 /// A literal whose elements conflict infers as `Array(Any)` rather than `Any`: the node is
@@ -1258,7 +1233,7 @@ mod tests {
             );
             let scalar = builtin_scalar_type(&name)
                 .unwrap_or_else(|| panic!("`{name}` must resolve as a built-in scalar"));
-            assert_eq!((scalar.element_type)().type_id(), expected_id);
+            assert_eq!((scalar.value_type)().type_id(), expected_id);
             assert_eq!(scalar.type_name, name);
             let leaf = BuiltinTypeResolver
                 .resolve_named_type(&name, &[])
@@ -1271,8 +1246,8 @@ mod tests {
                 name,
                 "the runtime element descriptor must carry the source-level name"
             );
-            assert_eq!(leaf.element_type().size(), (scalar.element_type)().size());
-            assert_eq!(leaf.element_type().align(), (scalar.element_type)().align());
+            assert_eq!(leaf.element_type().size(), (scalar.value_type)().size());
+            assert_eq!(leaf.element_type().align(), (scalar.value_type)().align());
         }
     }
 
@@ -1661,18 +1636,34 @@ mod tests {
     }
 
     #[test]
-    fn array_type_id_is_the_runtime_array_wrapper_regardless_of_element_type() {
-        let element_id = TypeId::of::<cel_runtime::DynamicArray>();
-        assert_eq!(Ty::Array(Box::new(Ty::I32)).type_id(), Some(element_id));
-        assert_eq!(Ty::Array(Box::new(Ty::Any)).type_id(), Some(element_id));
+    fn array_type_id_requires_complete_shape_instead_of_a_flat_marker() {
+        assert_eq!(Ty::Array(Box::new(Ty::I32)).type_id(), None);
+        assert_eq!(Ty::Array(Box::new(Ty::Any)).type_id(), None);
     }
 
     #[test]
-    fn from_type_id_maps_the_array_wrapper_to_an_array_of_any() {
+    fn from_type_id_does_not_invent_structural_shape_from_an_owner() {
         assert_eq!(
-            Ty::from_type_id(TypeId::of::<cel_runtime::DynamicArray>()),
-            Ty::Array(Box::new(Ty::Any))
+            Ty::from_type_id(TypeId::of::<cel_runtime::OwnedValue>()),
+            Ty::Any
         );
+    }
+
+    /// Registered aliases unify by complete concrete identity, not diagnostic spelling.
+    #[test]
+    fn registered_leaf_aliases_unify_independently_of_names_and_capabilities() {
+        /// A foreign leaf whose optional clone capability does not change identity.
+        #[derive(Clone)]
+        struct Foreign;
+        let first = Ty::from_leaf(&ResolvedLeafType::new(
+            "FirstAlias",
+            cel_runtime::ValueType::leaf::<Foreign>(),
+        ));
+        let second = Ty::from_leaf(&ResolvedLeafType::new(
+            "SecondAlias",
+            cel_runtime::ValueType::cloneable_leaf::<Foreign>(),
+        ));
+        assert_eq!(first.unify(&second), Some(first.clone()));
     }
 
     #[test]
@@ -1953,10 +1944,7 @@ mod tests {
             &any_resolver,
             &[(
                 "Custom",
-                crate::ResolvedLeafType::new(
-                    "Custom",
-                    cel_runtime::ArrayElementType::leaf::<Custom>().unwrap(),
-                ),
+                crate::ResolvedLeafType::new("Custom", cel_runtime::ValueType::leaf::<Custom>()),
             )],
             &OpLookup::new(),
         );
@@ -1964,7 +1952,7 @@ mod tests {
             ty,
             Ty::Array(Box::new(Ty::Registered(crate::ResolvedLeafType::new(
                 "Custom",
-                cel_runtime::ArrayElementType::leaf::<Custom>().unwrap()
+                cel_runtime::ValueType::leaf::<Custom>()
             ))))
         );
         assert_eq!(diags.len(), 1);
@@ -2041,17 +2029,11 @@ mod tests {
         [
             (
                 "CustomA",
-                crate::ResolvedLeafType::new(
-                    "CustomA",
-                    cel_runtime::ArrayElementType::leaf::<CustomA>().unwrap(),
-                ),
+                crate::ResolvedLeafType::new("CustomA", cel_runtime::ValueType::leaf::<CustomA>()),
             ),
             (
                 "CustomB",
-                crate::ResolvedLeafType::new(
-                    "CustomB",
-                    cel_runtime::ArrayElementType::leaf::<CustomB>().unwrap(),
-                ),
+                crate::ResolvedLeafType::new("CustomB", cel_runtime::ValueType::leaf::<CustomB>()),
             ),
         ]
     }

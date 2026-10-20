@@ -47,7 +47,7 @@ pub(crate) struct ClosureSignature {
 }
 
 impl ClosureSignature {
-    /// Converts known recursive metadata without reinterpreting legacy storage.
+    /// Converts known recursive metadata without changing canonical storage.
     ///
     /// # Errors
     /// Returns an error for missing or mismatched leaf factories, unknown nested
@@ -61,16 +61,16 @@ impl ClosureSignature {
         let parameters = self
             .parameters
             .iter()
-            .map(|parameter| complete_legacy_value_type(parameter, leaf))
+            .map(|parameter| enrich_value_type(parameter, leaf))
             .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(crate::value_type::ValueType::callable(
             parameters,
-            complete_legacy_value_type(&self.result, leaf)?,
+            enrich_value_type(&self.result, leaf)?,
         ))
     }
 }
 
-/// Resolves one concrete legacy leaf through a previously monomorphized factory.
+/// Resolves one concrete registered leaf through a previously monomorphized factory.
 ///
 /// # Errors
 /// Returns an error if the factory is missing, structural, or describes another
@@ -100,7 +100,7 @@ fn complete_leaf(
 /// # Errors
 /// Returns an error for unavailable signatures/factories or invalid tuple layout.
 /// - Complexity: O(n) time and output space for n recursive descriptor nodes.
-fn complete_legacy_value_type(
+fn enrich_value_type(
     value: &ValueType,
     leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
 ) -> anyhow::Result<crate::value_type::ValueType> {
@@ -112,20 +112,18 @@ fn complete_legacy_value_type(
                 .map(|field| {
                     Ok(AssociatedType {
                         offset: 0,
-                        value_type: complete_legacy_value_type(&field.value_type, leaf)?,
+                        value_type: enrich_value_type(&field.value_type, leaf)?,
                     })
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?,
         ),
-        crate::ValueKind::Array(element) => {
-            Ok(Complete::array(complete_legacy_value_type(element, leaf)?))
-        }
+        crate::ValueKind::Array(element) => Ok(Complete::array(enrich_value_type(element, leaf)?)),
         crate::ValueKind::Callable { parameters, result } => Ok(Complete::callable(
             parameters
                 .iter()
-                .map(|parameter| complete_legacy_value_type(parameter, leaf))
+                .map(|parameter| enrich_value_type(parameter, leaf))
                 .collect::<anyhow::Result<_>>()?,
-            complete_legacy_value_type(result, leaf)?,
+            enrich_value_type(result, leaf)?,
         )),
         crate::ValueKind::Leaf(id) => complete_leaf(*id, value.size(), value.align(), leaf),
     }
@@ -290,7 +288,7 @@ impl DynClosure {
     ///
     /// # Safety
     /// Both frame pointers must match this exact carrier's validated signature.
-    /// Output is aligned uninitialized result storage. A legacy interpreted body
+    /// Output is aligned uninitialized result storage. A compiler-facing interpreted body
     /// must be protected by a trusted lease for the duration of the call.
     /// # Errors
     /// Returns reentrant entry or original body errors without initializing output.
@@ -331,7 +329,7 @@ impl DynClosure {
     ///
     /// # Errors
     /// Rejects untyped closures, executing bodies, or bodies changed incompatibly
-    /// through an unfrozen legacy mutable dispatcher.
+    /// through an unfrozen mutable dispatcher.
     /// - Complexity: O(n) complete comparisons for n signature/body descriptor nodes.
     ///
     /// # Examples
@@ -356,7 +354,7 @@ impl DynClosure {
     /// Wraps `body` as a closure value declaring `param_types` (in order) and `return_type`.
     ///
     /// - Precondition: `body` was compiled expecting exactly `param_types.len()` positional
-    ///   arguments (via `push_arg`/`push_arg_as_dynamic_sequence_tuple`), in that order, and
+    ///   arguments (via `push_arg`/`push_argument`), in that order, and
     ///   produces exactly one result of `return_type`.
     ///
     /// # Examples
@@ -508,7 +506,7 @@ impl DynClosure {
 
     /// Checks the current mutable body against its retained typed signature during preparation.
     ///
-    /// A legacy dispatcher may have replaced the body without updating its metadata.
+    /// An external mutable dispatcher may have replaced the body without updating its metadata.
     ///
     /// # Errors
     /// Rejects unavailable signatures, an executing body, invalid independent bodies
@@ -617,7 +615,7 @@ impl DynClosure {
     /// # Safety
     ///
     /// Preparation must validate the actual body's independent origin, argument reads,
-    /// and result against this closure's full signature and its legacy physical
+    /// and result against this closure's full signature and its canonical physical
     /// frame. Every pointer must remain a live matching borrowed value
     /// until execution returns; operations must not retain argument pointers.
     /// A trusted-binding lease must protect the validated body from modification

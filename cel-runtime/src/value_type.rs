@@ -346,19 +346,16 @@ impl ValueType {
         self
     }
 
-    /// Rejects legacy external wrapper leaves before binding interpreter instructions.
+    /// Rejects erased whole-value owners as opaque canonical elements.
     ///
     /// # Errors
-    /// Rejects `DynamicArray`, `DynamicSequence`, or tuple-marker opaque leaves
-    /// at any recursive node; those carriers require checked external conversion.
+    /// Rejects an `OwnedValue` leaf at any recursive node; owners require a checked whole-value boundary.
     /// - Complexity: O(n) traversal for n descriptor nodes.
     pub(crate) fn validate_canonical(&self) -> anyhow::Result<()> {
         match self.kind() {
             ValueKind::Leaf(id) => anyhow::ensure!(
-                *id != TypeId::of::<crate::DynamicArray>()
-                    && *id != TypeId::of::<crate::DynamicSequence>()
-                    && *id != TypeId::of::<crate::DynTuple>(),
-                "external wrappers require an explicit checked canonical boundary"
+                *id != TypeId::of::<crate::OwnedValue>(),
+                "whole-value owners cannot be opaque canonical elements"
             ),
             ValueKind::Array(element) => element.validate_canonical()?,
             ValueKind::Tuple(fields) => {
@@ -374,42 +371,6 @@ impl ValueType {
             }
         }
         Ok(())
-    }
-
-    /// Installs checked external tuple hooks while leaving canonical ownership unchanged.
-    ///
-    /// # Safety
-    /// Each hook must operate on the concrete leaf represented by this descriptor.
-    /// - Precondition: This descriptor describes an opaque leaf.
-    pub(crate) unsafe fn with_external_hooks(
-        mut self,
-        clone: crate::ElementCloner,
-        eq: crate::ElementEq,
-        debug: crate::ElementDebug,
-    ) -> Self {
-        debug_assert!(matches!(self.kind(), ValueKind::Leaf(_)));
-        let host = Arc::make_mut(&mut self.0)
-            .host_leaf
-            .as_mut()
-            .expect("concrete leaf factory");
-        host.clone = Some(clone);
-        host.eq = Some(eq);
-        host.debug = Some(debug);
-        self
-    }
-
-    /// Returns complete metadata retained by an external concrete element factory.
-    ///
-    /// # Errors
-    /// Rejects erased external descriptors without a concrete canonical factory.
-    ///
-    /// # Examples
-    /// ```
-    /// let external = cel_runtime::ArrayElementType::cloneable::<i32>().unwrap();
-    /// assert!(cel_runtime::ValueType::registered(external).unwrap().can_clone_for_argument());
-    /// ```
-    pub fn registered(element: crate::ArrayElementType) -> anyhow::Result<Self> {
-        element.value_type()
     }
 
     /// Returns whether the complete frozen plan supports borrowed argument cloning.
@@ -430,7 +391,7 @@ impl ValueType {
     pub fn type_id(&self) -> TypeId {
         match self.kind() {
             ValueKind::Leaf(id) => *id,
-            ValueKind::Tuple(_) => TypeId::of::<crate::DynTuple>(),
+            ValueKind::Tuple(_) => TypeId::of::<crate::CNil<()>>(),
             ValueKind::Array(_) => TypeId::of::<RawArray>(),
             ValueKind::Callable { .. } => TypeId::of::<crate::DynClosure>(),
         }
@@ -760,9 +721,6 @@ impl ValueType {
         let plan = Arc::make_mut(&mut self.0);
         plan.clone_hook = Some(clone_leaf::<R::Value>);
         plan.cloneable = true;
-        if let Some(host) = &mut plan.host_leaf {
-            host.clone = Some(crate::element_cloner_for::<R::Value>());
-        }
         Ok(self)
     }
 
@@ -788,9 +746,6 @@ impl ValueType {
         let plan = Arc::make_mut(&mut self.0);
         plan.equality_hook = Some(equal_leaf::<R::Value>);
         plan.comparable = true;
-        if let Some(host) = &mut plan.host_leaf {
-            host.eq = Some(crate::element_eq_for::<R::Value>());
-        }
         Ok(self)
     }
 
@@ -816,9 +771,6 @@ impl ValueType {
         let plan = Arc::make_mut(&mut self.0);
         plan.debug_hook = Some(debug_leaf::<R::Value>);
         plan.debuggable = true;
-        if let Some(host) = &mut plan.host_leaf {
-            host.debug = Some(crate::element_debug_for::<R::Value>());
-        }
         Ok(self)
     }
 

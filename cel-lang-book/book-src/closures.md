@@ -61,7 +61,7 @@ Closures:
 ## Host registration
 
 `CELParser::with_type_resolver` supplies annotation lookup. A registered
-leaf uses `ArrayElementType::cloneable::<T>()` so parameters can clone
+leaf uses `ValueType::cloneable_leaf::<T>()` so parameters can clone
 owned values without requiring `Copy`, equality, or debug formatting.
 Adam supplies these descriptors through its existing `TypeRegistry`;
 no second closure-specific type registry is needed. Results move from

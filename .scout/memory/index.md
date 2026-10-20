@@ -10,7 +10,7 @@
 - [[knowledge/celparser-and-parsercontext-dual-emission.md|CELParser and ParserContext Dual Emission]] (concept, 0.80) `cel-parser` `parser-context` `ast-context` `dyn-segment-context` `cel-expression`
 - [[knowledge/clippy-and-feature-flag-validation-matrix.md|Clippy and Feature Flag Validation Matrix]] (procedure, 0.85) `build` `clippy` `feature-flags` `validation` `cargo`
 - [[knowledge/contract-style-documentation-and-precondition-invariants.md|Contract-Style Documentation and Precondition Invariants]] (pattern, 0.85) `conventions` `documentation` `contract` `preconditions` `debug-assert`
-- [[knowledge/dynamicsequence-and-dynamicarray-value-persistence.md|DynamicSequence and DynamicArray Value Persistence]] (concept, 0.75) `cel-runtime` `dynamic-sequence` `dynamic-array` `tuples` `arrays` `value-persistence`
+- [[knowledge/canonical-container-value-persistence.md|Canonical Container Value Persistence]] (concept, 0.75) `cel-runtime` `canonical-values` `tuples` `arrays` `value-persistence`
 - [[knowledge/ez-adam-document-model-and-node-placements-separation.md|Ez-adam Document Model and Node Placements Separation]] (observation, 0.80) `ez-adam` `document-model` `cell-node` `cell` `canvas` `visual-model`
 - [[knowledge/filter-purity-and-idempotence-contract.md|Filter Purity and Idempotence Contract]] (observation, 0.80) `adam-rs` `filter` `method` `idempotence` `purity` `constraints`
 - [[knowledge/four-layer-stack-runtime-architecture.md|Four-Layer Stack Runtime Architecture]] (concept, 0.80) `cel-runtime` `raw-stack` `raw-segment` `dyn-segment` `segment` `type-safety`

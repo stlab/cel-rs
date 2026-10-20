@@ -16,7 +16,7 @@ fn resolve(name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
     if name == "ClientPoint" && args.is_empty() {
         Some(ResolvedLeafType::new(
             "ClientPoint",
-            cel_runtime::ArrayElementType::cloneable::<Point>().unwrap(),
+            cel_runtime::ValueType::cloneable_leaf::<Point>(),
         ))
     } else {
         cel_parser::resolve_builtin_named_type(name, args)

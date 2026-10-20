@@ -15,7 +15,7 @@ relationships:
   - type: applies_to
     target: "Architecture Overview"
   - type: relates_to
-    target: "DynamicSequence and DynamicArray Value Persistence"
+    target: "Canonical Container Value Persistence"
 tags: ["cel-runtime", "raw-stack", "raw-segment", "dyn-segment", "segment", "type-safety"]
 tier: knowledge
 source: inferred

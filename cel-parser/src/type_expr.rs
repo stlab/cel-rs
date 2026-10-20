@@ -8,7 +8,7 @@ use std::any::TypeId;
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 
 use crate::{ExprSpan, ParseError, Result, op_table};
 
@@ -168,11 +168,10 @@ impl TypeResolver for BuiltinTypeResolver {
             }
             _ => None,
         }?;
-        Some(
-            ResolvedLeafType::new(builtin.type_name, (builtin.element_type)())
-                .with_complete_value_type((builtin.value_type)())
-                .expect("built-in factories describe the same concrete leaf"),
-        )
+        Some(ResolvedLeafType::new(
+            builtin.type_name,
+            (builtin.value_type)(),
+        ))
     }
 }
 
@@ -201,9 +200,8 @@ pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<R
 
 /// One resolved scalar leaf type.
 ///
-/// This pairs a human-readable type name with the runtime element descriptor needed to build or
-/// validate a `DynamicArray` whose elements have this leaf type.
-/// Hosts use [`ArrayElementType::cloneable`] when this leaf may also appear in a closure
+/// This pairs a human-readable type name with complete canonical leaf metadata.
+/// Hosts use [`ValueType::cloneable_leaf`] when this leaf may also appear in a closure
 /// annotation; the same descriptor then supplies its checked argument-cloning adapter.
 ///
 /// Concrete element factories retain complete metadata. Use
@@ -214,18 +212,17 @@ pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<R
 pub struct ResolvedLeafType {
     type_id: TypeId,
     type_name: Cow<'static, str>,
-    element_type: ArrayElementType,
-    complete: Option<cel_runtime::value_type::ValueType>,
+    complete: ValueType,
 }
 
 impl PartialEq for ResolvedLeafType {
-    /// Compares legacy registered identities independently of optional factories.
+    /// Compares registered leaf identities independently of optional capabilities.
     ///
-    /// - Complexity: O(l + d) for name length l and legacy array nesting depth d.
+    /// - Complexity: O(l) for name length l.
     fn eq(&self, other: &Self) -> bool {
         self.type_id == other.type_id
             && self.type_name == other.type_name
-            && self.element_type == other.element_type
+            && self.complete.same_shape(&other.complete)
     }
 }
 
@@ -238,7 +235,7 @@ impl ResolvedLeafType {
     ///
     /// # Errors
     ///
-    /// Returns the legacy array-marker error for `DynamicArray`.
+    /// Rejects an erased whole-value owner, which is not a concrete CEL leaf.
     ///
     /// - Complexity: O(l) time and space for a source-facing name of length l.
     ///
@@ -249,30 +246,40 @@ impl ResolvedLeafType {
     /// let leaf = ResolvedLeafType::leaf::<std::path::PathBuf>("Path").unwrap();
     /// assert!(leaf.complete_value_type().is_ok());
     /// ```
-    pub fn leaf<T: 'static>(
-        type_name: impl Into<Cow<'static, str>>,
-    ) -> std::result::Result<Self, cel_runtime::ArrayBuildErrorKind> {
-        Ok(Self::new(type_name, ArrayElementType::leaf::<T>()?))
+    pub fn leaf<T: 'static>(type_name: impl Into<Cow<'static, str>>) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            TypeId::of::<T>() != TypeId::of::<cel_runtime::OwnedValue>(),
+            "whole-value owners require an explicit representation witness"
+        );
+        Ok(Self::new(type_name, ValueType::leaf::<T>()))
     }
 
     /// Creates one resolved leaf from a user-facing type name and runtime element descriptor.
     ///
     /// The descriptor adopts `type_name`, so a runtime mismatch diagnostic against this leaf
     /// reports the name the source annotation (or the host's registry) uses rather than
-    /// [`ArrayElementType::leaf`]'s Rust type path.
+    /// [`ValueType::leaf`]'s Rust type path.
     ///
     /// - Postcondition: the returned leaf's [`type_id`](Self::type_id) matches `element_type`,
     ///   and its [`element_type`](Self::element_type) reports `type_name`.
+    /// - Precondition: `element_type` describes a concrete opaque leaf.
+    /// - Complexity: O(l) for name length l.
+    ///
+    /// # Examples
+    /// ```
+    /// let leaf = cel_parser::ResolvedLeafType::new("Integer", cel_runtime::ValueType::leaf::<i32>());
+    /// assert_eq!(leaf.type_name(), "Integer");
+    /// ```
     #[must_use]
-    pub fn new(type_name: impl Into<Cow<'static, str>>, element_type: ArrayElementType) -> Self {
+    pub fn new(type_name: impl Into<Cow<'static, str>>, element_type: ValueType) -> Self {
         let type_name = type_name.into();
+        debug_assert!(matches!(
+            element_type.kind(),
+            cel_runtime::ValueKind::Leaf(_)
+        ));
         Self {
             type_id: element_type.type_id(),
-            complete: element_type
-                .value_type()
-                .ok()
-                .map(|ty| ty.with_type_name(type_name.clone())),
-            element_type: element_type.with_type_name(type_name.clone()),
+            complete: element_type.with_type_name(type_name.clone()),
             type_name,
         }
     }
@@ -300,17 +307,13 @@ impl ResolvedLeafType {
         mut self,
         complete: cel_runtime::value_type::ValueType,
     ) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            self.element_type.nested().is_none(),
-            "expected a concrete leaf"
-        );
         complete.validate_opaque_leaf(self.type_id)?;
         anyhow::ensure!(
-            complete.layout().size() == self.element_type.size()
-                && complete.layout().align() == self.element_type.align(),
+            complete.layout().size() == self.complete.size()
+                && complete.layout().align() == self.complete.align(),
             "complete leaf layout mismatch"
         );
-        self.complete = Some(complete.with_type_name(self.type_name.clone()));
+        self.complete = complete.with_type_name(self.type_name.clone());
         Ok(self)
     }
 
@@ -318,7 +321,7 @@ impl ResolvedLeafType {
     ///
     /// # Errors
     ///
-    /// Returns an error if only legacy erased metadata was registered.
+    /// Rejects an erased whole-value owner, which cannot be a registered leaf.
     ///
     /// # Examples
     ///
@@ -328,12 +331,11 @@ impl ResolvedLeafType {
     ///     .complete_value_type().is_ok());
     /// ```
     pub fn complete_value_type(&self) -> anyhow::Result<&cel_runtime::value_type::ValueType> {
-        self.complete.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "complete leaf factory is unavailable for `{}`",
-                self.type_name
-            )
-        })
+        anyhow::ensure!(
+            self.type_id != TypeId::of::<cel_runtime::OwnedValue>(),
+            "whole-value owners require an explicit representation witness"
+        );
+        Ok(&self.complete)
     }
 
     /// Returns this leaf type's concrete Rust [`TypeId`].
@@ -348,10 +350,10 @@ impl ResolvedLeafType {
         &self.type_name
     }
 
-    /// Returns the runtime array element descriptor for this leaf.
+    /// Returns complete canonical metadata for this leaf.
     #[must_use]
-    pub fn element_type(&self) -> &ArrayElementType {
-        &self.element_type
+    pub fn element_type(&self) -> &ValueType {
+        &self.complete
     }
 }
 
@@ -504,18 +506,14 @@ impl ResolvedArrayType {
     ///
     /// ```rust
     /// use cel_parser::ResolvedArrayType;
-    /// use cel_runtime::ArrayElementType;
+    /// use cel_runtime::ValueType;
     ///
-    /// let array = ResolvedArrayType::from_element_type(ArrayElementType::leaf::<i32>().unwrap());
+    /// let array = ResolvedArrayType::from_element_type(ValueType::leaf::<i32>());
     /// assert_eq!(array.element_type().type_name(), "i32");
     /// ```
     #[must_use]
-    pub fn from_element_type(element_type: ArrayElementType) -> Self {
-        Self {
-            element_type: element_type
-                .value_type()
-                .expect("registered element factory"),
-        }
+    pub fn from_element_type(element_type: ValueType) -> Self {
+        Self { element_type }
     }
 
     /// Creates a resolved array type from a fully resolved recursive type expression.
@@ -559,7 +557,7 @@ mod tests {
     use std::any::TypeId;
     use std::str::FromStr;
 
-    use cel_runtime::ArrayElementType;
+    use cel_runtime::ValueType;
     use proc_macro2::TokenStream;
 
     use crate::{CELParser, OpLookup};
@@ -625,7 +623,7 @@ mod tests {
             assert_eq!(owner.try_eq(&owner).is_ok(), comparable);
             assert_eq!(owner.try_debug().is_ok(), debuggable);
         }
-        assert!(ResolvedLeafType::leaf::<cel_runtime::DynamicArray>("Array").is_err());
+        assert!(ResolvedLeafType::leaf::<cel_runtime::OwnedValue>("Owner").is_err());
         assert!(
             ResolvedLeafType::leaf::<i32>("Integer")
                 .unwrap()
@@ -633,12 +631,10 @@ mod tests {
                 .is_err()
         );
         assert!(
-            ResolvedLeafType::new(
-                "Array",
-                ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap())
-            )
-            .with_complete_value_type(ValueType::leaf::<cel_runtime::DynamicArray>())
-            .is_err()
+            ResolvedLeafType::leaf::<i32>("Integer")
+                .unwrap()
+                .with_complete_value_type(ValueType::leaf::<u32>())
+                .is_err()
         );
     }
 
@@ -658,7 +654,7 @@ mod tests {
         assert_eq!(owner.try_into_typed::<Leaf<MoveOnly>>().unwrap().0, "owned");
     }
 
-    /// Composes array-of-tuple metadata without enabling legacy array packing.
+    /// Composes complete array-of-tuple metadata with nested arrays.
     #[test]
     fn complete_factory_resolved_recursive_shapes_retain_fields() {
         use cel_runtime::value_type::{ArrayOf, Cons, Leaf, Nil, ValueRepr};
@@ -685,7 +681,7 @@ mod tests {
         let unresolved = ResolvedType::Array {
             element: Box::new(ResolvedType::Scalar(ResolvedLeafType::new(
                 "Erased",
-                ArrayElementType::leaf::<i32>().unwrap(),
+                ValueType::leaf::<i32>(),
             ))),
         };
         assert!(unresolved.complete_value_type().is_ok());
@@ -701,7 +697,7 @@ mod tests {
         assert!(complete.same_shape(&Nil::value_type()));
         assert!(!complete.same_shape(host.complete_value_type().unwrap()));
         assert!(
-            ResolvedLeafType::new("old", ArrayElementType::leaf::<i32>().unwrap())
+            ResolvedLeafType::new("old", ValueType::leaf::<i32>())
                 .complete_value_type()
                 .is_ok()
         );
@@ -881,10 +877,7 @@ mod tests {
     fn resolve_type_expr_uses_a_custom_registry_resolver_recursively() {
         let resolver = [(
             "RegistryType",
-            ResolvedLeafType::new(
-                "RegistryType",
-                ArrayElementType::leaf::<RegistryType>().unwrap(),
-            ),
+            ResolvedLeafType::new("RegistryType", ValueType::leaf::<RegistryType>()),
         )];
         let mut parser = CELParser::with_type_resolver(OpLookup::new(), resolver);
         let expr = parser.parse_type_expr_str("[[RegistryType]]").unwrap();
@@ -917,12 +910,9 @@ mod tests {
                 match (name, args) {
                     ("Wrapper", [ResolvedType::Scalar(inner)]) => Some(ResolvedLeafType::new(
                         format!("Wrapper({})", inner.type_name()),
-                        ArrayElementType::leaf::<i32>().unwrap(),
+                        ValueType::leaf::<i32>(),
                     )),
-                    ("i32", []) => Some(ResolvedLeafType::new(
-                        "i32",
-                        ArrayElementType::leaf::<i32>().unwrap(),
-                    )),
+                    ("i32", []) => Some(ResolvedLeafType::new("i32", ValueType::leaf::<i32>())),
                     _ => None,
                 }
             }

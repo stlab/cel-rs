@@ -47,83 +47,6 @@ impl Drop for ArgumentGuard {
     }
 }
 
-/// Destroys an external wrapper leaf in place.
-///
-/// # Safety
-/// The pointer must uniquely own the concrete type associated with this hook.
-pub type RawDropper = unsafe fn(*mut u8, &[AssociatedType]);
-
-/// Clones a concrete external leaf into an `Any` box.
-///
-/// # Safety
-/// The pointer must borrow the concrete type associated with this hook. The
-/// hook must clone rather than move; the caller retains ownership of the source.
-pub type BoxExtractor = unsafe fn(*const u8) -> Box<dyn Any>;
-
-/// Supplies concrete capability hooks at an explicitly checked external tuple boundary.
-type TupleHooks = (
-    crate::ElementDropper,
-    crate::ElementCloner,
-    crate::ElementEq,
-    crate::ElementDebug,
-);
-
-/// Selects external extraction of one source-ordered tuple field.
-pub enum DynExtractor {
-    /// Clones an opaque concrete leaf through the caller's trusted extractor.
-    Scalar(TypeId, BoxExtractor),
-    /// Moves a canonical nested tuple into an external `DynamicSequence`.
-    Tuple(Box<dyn Fn(TypeId) -> Option<TupleHooks>>),
-}
-
-/// Prepares external tuple metadata without changing interpreter storage.
-///
-/// # Safety
-/// Every returned hook must describe the concrete leaf named by the lookup key.
-/// # Errors
-/// Rejects absent hooks or unsupported array/callable external tuple fields.
-/// - Complexity: O(n) descriptor preparation for n tuple/leaf nodes.
-unsafe fn external_tuple_type(
-    value: &ValueType,
-    lookup: &(impl Fn(TypeId) -> Option<TupleHooks> + ?Sized),
-) -> Result<ValueType> {
-    match value.kind() {
-        ValueKind::Leaf(id) => {
-            let (_, clone, eq, debug) =
-                lookup(*id).ok_or_else(|| anyhow!("external tuple leaf is unregistered"))?;
-            Ok(unsafe { value.clone().with_external_hooks(clone, eq, debug) })
-        }
-        ValueKind::Tuple(fields) => ValueType::tuple(
-            fields
-                .iter()
-                .map(|field| {
-                    Ok(AssociatedType {
-                        offset: 0,
-                        value_type: unsafe { external_tuple_type(&field.value_type, lookup)? },
-                    })
-                })
-                .collect::<Result<_>>()?,
-        ),
-        _ => anyhow::bail!("external tuples do not support structural array or callable fields"),
-    }
-}
-
-/// Returns an external leaf destructor while its concrete type is known.
-///
-/// # Examples
-/// ```
-/// let _ = cel_runtime::raw_dropper_for::<String>();
-/// ```
-pub fn raw_dropper_for<T: 'static>() -> RawDropper {
-    |pointer, _| unsafe { pointer.cast::<T>().drop_in_place() }
-}
-
-/// Marks a canonical tuple for diagnostic-only legacy `TypeId` dispatch.
-///
-/// This marker never authorizes a raw cast; structural boundaries need witnesses.
-#[derive(Debug)]
-pub struct DynTuple;
-
 /// Describes a live canonical stack slot.
 #[derive(Clone, Debug)]
 pub struct StackInfo {
@@ -274,7 +197,7 @@ impl DynSegment {
     /// Creates a segment with an optional preloaded opaque-leaf stack.
     ///
     /// # Panics
-    /// Rejects preloaded legacy wrapper carriers; import those at a checked external boundary.
+    /// Rejects preloaded erased whole-value owner carriers; import those at a checked external boundary.
     ///
     /// # Examples
     /// ```
@@ -443,8 +366,8 @@ impl DynSegment {
     /// Registers a nullary opaque-leaf host operation.
     ///
     /// # Panics
-    /// Rejects legacy wrapper results or unrepresentable frames. Use `op0_repr`
-    /// for fallible registration and `just_external` for checked wrapper imports.
+    /// Rejects erased whole-value owner results or unrepresentable frames. Use `op0_repr`
+    /// for fallible registration and `just_external` for checked owner imports.
     ///
     /// # Examples
     /// ```
@@ -460,7 +383,7 @@ impl DynSegment {
     /// Registers a fallible nullary opaque-leaf operation with ambient cleanup.
     ///
     /// # Panics
-    /// Rejects legacy wrapper results or unrepresentable frames during registration.
+    /// Rejects erased whole-value owner results or unrepresentable frames during registration.
     ///
     /// # Examples
     /// ```
@@ -826,7 +749,7 @@ impl DynSegment {
     /// Pushes a cloned opaque constant on each execution.
     ///
     /// # Panics
-    /// Rejects legacy wrapper constants; use [`Self::just_external`] to import them.
+    /// Rejects erased whole-value owner constants; use [`Self::just_external`] to import them.
     ///
     /// # Examples
     /// ```
@@ -848,10 +771,10 @@ impl DynSegment {
     ///
     /// # Examples
     /// ```
-    /// use cel_runtime::{DynSegment, DynamicArray, ValueType, Nil, ArrayOf, Leaf, IntoCStackList};
+    /// use cel_runtime::{DynSegment, Array, OwnedValue, ValueType, Nil, ArrayOf, Leaf, IntoCStackList};
     /// let mut body = DynSegment::new::<()>();
     /// body.just_external(ValueType::array(ValueType::cloneable_leaf::<i32>()),
-    ///     Box::new(DynamicArray::try_from_vec(vec![7i32]).unwrap())).unwrap();
+    ///     Box::new(OwnedValue::new::<ArrayOf<Leaf<i32>>>(Array::from_vec(vec![7i32])))).unwrap();
     /// let mut body = body.prepare::<Nil, ArrayOf<Leaf<i32>>>().unwrap();
     /// assert_eq!(body.call(&().into_c_stack_list()).unwrap().as_slice(), [7]);
     /// ```
@@ -893,17 +816,6 @@ impl DynSegment {
             .expect("cloneable leaf");
     }
 
-    /// Registers a legacy monomorphized argument factory using complete metadata.
-    pub(crate) fn push_typed_arg<T: Clone + 'static>(
-        &mut self,
-        index: usize,
-        value_type: ValueType,
-    ) {
-        let _ = std::marker::PhantomData::<T>;
-        self.push_argument(index, value_type)
-            .expect("registered clone capability");
-    }
-
     /// Registers a canonical borrowed argument read with its frozen clone plan.
     ///
     /// # Errors
@@ -943,27 +855,6 @@ impl DynSegment {
         self.argument_reads.push((index, value_type.clone()));
         self.replace(0, value_type);
         Ok(())
-    }
-
-    /// Registers an external tuple argument as a canonical borrowed tuple read.
-    ///
-    /// Conversion occurs only at `call_dyn`'s checked external boundary.
-    /// Prepared calls instead borrow the exact canonical witness directly.
-    /// # Errors
-    /// Rejects invalid tuple layout or missing recursive clone capabilities.
-    /// - Complexity: O(n) registration for n frame/descriptor nodes.
-    ///
-    /// # Examples
-    /// ```
-    /// let mut body = cel_runtime::DynSegment::new::<()>();
-    /// body.push_arg_as_dynamic_sequence_tuple(0, vec![]).unwrap();
-    /// ```
-    pub fn push_arg_as_dynamic_sequence_tuple(
-        &mut self,
-        index: usize,
-        associated: Vec<AssociatedType>,
-    ) -> Result<()> {
-        self.push_argument(index, ValueType::tuple(associated)?)
     }
 
     /// Packs source-ordered operands into their canonical concrete list layout.
@@ -1371,14 +1262,14 @@ impl DynSegment {
 
     /// Evaluates a result at a checked external host boundary.
     ///
-    /// Structural results export legacy host wrappers; callable results return
+    /// Structural results return canonical whole-value owners; callable results return
     /// their concrete carrier. Interpreter operations never use this conversion.
     /// Scalar inputs are borrowed after complete input preflight and cloned only
-    /// by executed reads; legacy structural inputs require ownership conversion.
+    /// by executed reads; compound inputs borrow checked canonical owners.
     ///
     /// # Errors
     /// Rejects dependent bodies, non-single results, unsupported external shapes,
-    /// unavailable host capabilities, or mismatched arguments/results; propagates body errors.
+    /// unavailable argument capabilities, or mismatched arguments/results; propagates body errors.
     /// - Complexity: Boundary validation and argument clones plus evaluation.
     ///
     /// # Examples
@@ -1394,19 +1285,14 @@ impl DynSegment {
                 return Ok(*unit.downcast::<R>().expect("checked host unit identity"));
             }
             ValueKind::Array(_) | ValueKind::Tuple(_) => {
-                let external = match result.kind() {
-                    ValueKind::Array(_) => TypeId::of::<crate::DynamicArray>(),
-                    _ => TypeId::of::<crate::DynamicSequence>(),
-                };
                 ensure!(
-                    TypeId::of::<R>() == external,
-                    "external result type mismatch"
+                    TypeId::of::<R>() == TypeId::of::<OwnedValue>(),
+                    "canonical result owner required"
                 );
-                return self
-                    .call_dyn_external(inputs)?
+                let owner: Box<dyn Any> = Box::new(self.call_dyn_value(inputs)?);
+                return Ok(*owner
                     .downcast::<R>()
-                    .map(|value| *value)
-                    .map_err(|_| anyhow!("external result type mismatch"));
+                    .map_err(|_| anyhow!("canonical result owner required"))?);
             }
             ValueKind::Callable { .. } => {
                 ensure!(
@@ -1440,222 +1326,15 @@ impl DynSegment {
         Ok(unsafe { result.take(&mut output) })
     }
 
-    /// Exports a result as an explicitly checked external host owner.
-    ///
-    /// Structural tuples become `DynamicSequence`; arrays become `DynamicArray`.
-    /// This boundary is not used by prepared execution or emitted instructions.
-    /// # Errors
-    /// Rejects unsupported external shapes/capabilities before evaluation, invalid
-    /// external arguments, data-dependent export overflow, or operation errors.
-    /// - Complexity: Boundary checks/conversions plus body evaluation.
-    ///
-    /// # Examples
-    /// ```
-    /// let mut body = cel_runtime::DynSegment::new::<()>(); body.just(7i32);
-    /// assert_eq!(*body.call_dyn_external(&[]).unwrap().downcast::<i32>().unwrap(), 7);
-    /// ```
-    pub fn call_dyn_external(&mut self, inputs: &[&dyn Any]) -> Result<Box<dyn Any>> {
-        let plan = HostValuePlan::new(self.result_type()?.clone())?;
-        plan.validate_export_capabilities()?;
-        let mut owner = Some(self.call_dyn_value(inputs)?);
-        plan.export_box(&mut owner)
-    }
-
-    /// Exports a canonical tuple using capabilities installed in its complete leaves.
-    ///
-    /// # Errors
-    /// Rejects a nontuple result, unsupported tuple fields, missing external leaf
-    /// capabilities, invalid external inputs, or operation errors.
-    /// - Complexity: Boundary checks/conversions plus body evaluation.
-    ///
-    /// # Examples
-    /// ```
-    /// let mut body = cel_runtime::DynSegment::new::<()>();
-    /// body.make_tuple(0, 0).unwrap();
-    /// assert_eq!(body.call_dyn_as_dynamic_sequence(&[]).unwrap().arity(), 0);
-    /// ```
-    pub fn call_dyn_as_dynamic_sequence(
-        &mut self,
-        inputs: &[&dyn Any],
-    ) -> Result<crate::DynamicSequence> {
-        ensure!(
-            self.result_type()?.tuple_elements().is_some(),
-            "tuple result required"
-        );
-        self.call_dyn_external(inputs)?
-            .downcast::<crate::DynamicSequence>()
-            .map(|value| *value)
-            .map_err(|_| anyhow!("external tuple representation mismatch"))
-    }
-
-    /// Reconstructs a native Rust tuple whose fields are opaque canonical leaves.
-    ///
-    /// Structural nested tuples need an explicit representation witness instead.
-    /// # Errors
-    /// Rejects non-single/nontuple results, arity or concrete field mismatches,
-    /// invalid external inputs, or operation errors before transferring ownership.
-    /// - Complexity: Boundary checks and raw moves plus body evaluation.
-    ///
-    /// # Examples
-    /// ```
-    /// let mut body = cel_runtime::DynSegment::new::<()>();
-    /// body.just(7i32); body.just(2f64); body.make_tuple(2, 0).unwrap();
-    /// assert_eq!(body.call_dyn_as_tuple::<(i32, f64)>(&[]).unwrap(), (7, 2.0));
-    /// ```
-    pub fn call_dyn_as_tuple<T: crate::TupleSequence>(&mut self, inputs: &[&dyn Any]) -> Result<T>
-    where
-        T::Output: crate::SequenceList,
-    {
-        let fields = self
-            .result_type()?
-            .tuple_elements()
-            .ok_or_else(|| anyhow!("tuple result required"))?;
-        let mut shape = Vec::new();
-        <T::Output as crate::SequenceList>::append_shape(&mut shape, 0, &mut 1);
-        ensure!(fields.len() == shape.len(), "native tuple arity mismatch");
-        for (field, expected) in fields.iter().zip(&shape) {
-            field.value_type.validate_opaque_leaf(expected.type_id)?;
-            ensure!(
-                field.value_type.size() == expected.size
-                    && field.value_type.align() == expected.align,
-                "native tuple field layout mismatch"
-            );
-        }
-        // SAFETY: TupleSequence's monomorphized shape supplies each concrete
-        // leaf's hooks, after exact field identity and layout validation.
-        let value_type = unsafe {
-            external_tuple_type(self.result_type()?, &|id| {
-                shape
-                    .iter()
-                    .find(|field| field.type_id == id)
-                    .map(|field| (field.drop, field.clone, field.eq, field.debug))
-            })?
-        };
-        let plan = HostValuePlan::new(value_type)?;
-        plan.validate_export_capabilities()?;
-        let mut owner = Some(self.call_dyn_value(inputs)?);
-        let sequence = plan
-            .export_box(&mut owner)?
-            .downcast::<crate::DynamicSequence>()
-            .map_err(|_| anyhow!("external tuple representation mismatch"))?;
-        sequence.try_into_tuple::<T>()
-    }
-
-    /// Splits one canonical tuple into scalar boxes and checked external nested tuples.
-    ///
-    /// # Safety
-    /// Scalar extractors must clone their named concrete leaves. Tuple lookups must
-    /// return hooks for exactly the leaf type named by each lookup key.
-    /// # Errors
-    /// Rejects arity/leaf mismatches, unsupported or unregistered tuple fields,
-    /// invalid external arguments, or operation errors. Static checks precede evaluation.
-    /// - Complexity: Boundary checks/conversions and source field moves plus evaluation.
-    ///
-    /// # Examples
-    /// Use [`Self::call_dyn_tuple`] for all-scalar results or
-    /// [`Self::call_dyn_value`] to retain canonical ownership.
-    pub unsafe fn call_dyn_tuple_mixed(
-        &mut self,
-        inputs: &[&dyn Any],
-        extractors: &[DynExtractor],
-    ) -> Result<Vec<Box<dyn Any>>> {
-        let fields = self
-            .result_type()?
-            .tuple_elements()
-            .ok_or_else(|| anyhow!("tuple result required"))?;
-        ensure!(
-            fields.len() == extractors.len(),
-            "tuple extractor arity mismatch"
-        );
-        let plans: Vec<_> = fields
-            .iter()
-            .zip(extractors)
-            .map(|(field, extractor)| match extractor {
-                DynExtractor::Scalar(id, _) => {
-                    field.value_type.validate_opaque_leaf(*id)?;
-                    Ok(None)
-                }
-                DynExtractor::Tuple(lookup) => {
-                    ensure!(
-                        field.value_type.tuple_elements().is_some(),
-                        "nested tuple field required"
-                    );
-                    let plan = HostValuePlan::new(unsafe {
-                        external_tuple_type(&field.value_type, lookup.as_ref())?
-                    })?;
-                    plan.validate_export_capabilities()?;
-                    Ok(Some(plan))
-                }
-            })
-            .collect::<Result<_>>()?;
-        let owners = self.call_dyn_value(inputs)?.into_fields()?;
-        owners
-            .into_iter()
-            .zip(extractors)
-            .zip(plans)
-            .map(|((owner, extractor), plan)| match extractor {
-                DynExtractor::Scalar(_, extract) => Ok(unsafe { extract(owner.as_ptr()) }),
-                DynExtractor::Tuple(_) => plan.unwrap().export_box(&mut Some(owner)),
-            })
-            .collect()
-    }
-
-    /// Clones checked opaque fields from a canonical tuple into external boxes.
-    ///
-    /// # Safety
-    /// Every extractor must clone the concrete leaf named by its `TypeId`.
-    /// Structural fields require the complete owned/prepared boundary instead.
-    /// # Errors
-    /// Rejects nontuple results, arity/leaf mismatches, or invalid external arguments.
-    /// Propagates operation errors and destroys the full result if extraction unwinds.
-    /// - Complexity: Body evaluation plus O(n) external clones for n fields.
-    ///
-    /// # Examples
-    /// ```
-    /// use cel_runtime::DynSegment;
-    /// use std::any::{Any, TypeId};
-    /// unsafe fn clone_i32(p: *const u8) -> Box<dyn Any> {
-    ///     Box::new(unsafe { *p.cast::<i32>() })
-    /// }
-    /// let mut body = DynSegment::new::<()>(); body.just(7i32);
-    /// body.make_tuple(1, 0).unwrap();
-    /// let fields = unsafe { body.call_dyn_tuple(&[], &[(TypeId::of::<i32>(), clone_i32)]) }.unwrap();
-    /// assert_eq!(*fields[0].downcast_ref::<i32>().unwrap(), 7);
-    /// ```
-    pub unsafe fn call_dyn_tuple(
-        &mut self,
-        inputs: &[&dyn Any],
-        extractors: &[(TypeId, BoxExtractor)],
-    ) -> Result<Vec<Box<dyn Any>>> {
-        let fields = self
-            .result_type()?
-            .tuple_elements()
-            .ok_or_else(|| anyhow!("tuple result required"))?
-            .to_vec();
-        ensure!(
-            fields.len() == extractors.len(),
-            "tuple extractor arity mismatch"
-        );
-        for (field, (id, _)) in fields.iter().zip(extractors) {
-            field.value_type.validate_opaque_leaf(*id)?;
-        }
-        let owner = self.call_dyn_value(inputs)?;
-        fields
-            .iter()
-            .zip(extractors)
-            .map(|(field, (_, extract))| Ok(unsafe { extract(owner.as_ptr().add(field.offset)) }))
-            .collect()
-    }
-
-    /// Validates all external inputs, then borrows leaves and imports structural owners.
+    /// Validates all external inputs, then borrows canonical storage.
     ///
     /// Scalar inputs remain borrowed for this call, including nested calls.
     /// Only executed scalar reads clone them. Recursive validation completes
-    /// before any structural conversion or body operation runs.
+    /// before any clone or body operation runs.
     ///
     /// # Errors
     /// Rejects dependent bodies or invalid external reads; propagates body errors.
-    /// - Complexity: Boundary checking/structural cloning plus body execution.
+    /// - Complexity: Boundary checking plus body execution.
     fn call_external(&mut self, inputs: &[&dyn Any]) -> Result<RawStack> {
         self.validate_independent_body()?;
         for (position, (index, ty)) in self.argument_reads.iter().enumerate() {
@@ -1676,18 +1355,6 @@ impl DynSegment {
             let plan = HostValuePlan::new(ty.clone())?;
             pointers[*index] = plan.validate_any(inputs[*index])?;
             plans[*index] = Some(plan);
-        }
-        let mut owners: Vec<Option<OwnedValue>> = (0..inputs.len()).map(|_| None).collect();
-        for (index, ty) in &self.argument_reads {
-            if matches!(ty.kind(), ValueKind::Leaf(_)) || owners[*index].is_some() {
-                continue;
-            }
-            let owner = plans[*index]
-                .as_ref()
-                .expect("external argument preflight completed")
-                .clone_any(inputs[*index])?;
-            pointers[*index] = owner.as_ptr();
-            owners[*index] = Some(owner);
         }
         unsafe { self.execute_raw(&pointers) }
     }

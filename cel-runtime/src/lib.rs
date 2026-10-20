@@ -44,10 +44,6 @@ mod container_execution;
 pub mod dyn_closure;
 /// Dynamic segment implementation with runtime type checking.
 pub mod dyn_segment;
-/// Owned, homogeneous, type-erased arrays with zero-copy `Vec<T>` conversion.
-pub mod dynamic_array;
-/// Owned, type-erased CEL tuple value that can outlive a `DynSegment` evaluation.
-pub mod dynamic_sequence;
 /// Checked adapters for the existing external host boundaries.
 mod host_value_bridge;
 /// Traits for working with type lists and type information.
@@ -82,8 +78,6 @@ pub use c_stack_list::*;
 pub use callable::Callable;
 pub use dyn_closure::{CallDynFn, DynClosure};
 pub use dyn_segment::*;
-pub use dynamic_array::*;
-pub use dynamic_sequence::*;
 pub use list_traits::*;
 pub use memory::*;
 pub use owned_value::OwnedValue;

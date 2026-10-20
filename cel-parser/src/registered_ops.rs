@@ -5,13 +5,13 @@
 //!
 //! ```
 //! use cel_parser::{OpLookup, OperationSignature, ResolvedLeafType};
-//! use cel_runtime::ArrayElementType;
+//! use cel_runtime::ValueType;
 //! use std::sync::Arc;
 //! #[derive(Clone)]
 //! struct Identity;
 //! let mut lookup = OpLookup::new();
 //! lookup.register_function("identity", Identity).unwrap();
-//! let ty = ResolvedLeafType::new("u32", ArrayElementType::leaf::<u32>().unwrap());
+//! let ty = ResolvedLeafType::new("u32", ValueType::leaf::<u32>());
 //! lookup.register_operation(OperationSignature {
 //!     name: "identity", operands: vec![ty.clone().into()], result: ty.into(),
 //!     emit: Arc::new(|segment, _| segment.op1(|value: u32| value)),
@@ -132,11 +132,11 @@ impl OpLookup {
     /// # Examples
     /// ```
     /// use cel_parser::{CELParser, OpLookup, RecordSchema, ResolvedLeafType};
-    /// use cel_runtime::ArrayElementType;
+    /// use cel_runtime::ValueType;
     /// use std::sync::Arc;
     /// let mut lookup = OpLookup::new();
     /// lookup.register_record(RecordSchema {
-    ///     ty: ResolvedLeafType::new("Empty", ArrayElementType::leaf::<()>().unwrap()),
+    ///     ty: ResolvedLeafType::new("Empty", ValueType::leaf::<()>()),
     ///     fields: vec![],
     ///     emit: Arc::new(|s, _, _, _| { s.just(()); Ok(()) }),
     /// }).unwrap();
@@ -315,11 +315,11 @@ impl OpLookup {
     /// # Examples
     /// ```
     /// use cel_parser::{OpLookup, RecordSchema, ResolvedLeafType};
-    /// use cel_runtime::ArrayElementType;
+    /// use cel_runtime::ValueType;
     /// use std::sync::Arc;
     /// let mut lookup = OpLookup::new();
     /// lookup.register_record(RecordSchema {
-    ///     ty: ResolvedLeafType::new("Unit", ArrayElementType::leaf::<()>().unwrap()),
+    ///     ty: ResolvedLeafType::new("Unit", ValueType::leaf::<()>()),
     ///     fields: vec![],
     ///     emit: Arc::new(|segment, _, _, _| { segment.just(()); Ok(()) }),
     /// }).unwrap();

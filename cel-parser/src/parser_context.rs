@@ -212,12 +212,12 @@ impl<'a> AnnotatedArray<'a> {
     /// ```rust
     /// use cel_parser::{ExprSpan, ResolvedArrayType, TypeExpr};
     /// use cel_parser::parser_context::AnnotatedArray;
-    /// use cel_runtime::ArrayElementType;
+    /// use cel_runtime::ValueType;
     /// use proc_macro2::Span;
     ///
     /// fn resolve_i32(_: &TypeExpr) -> cel_parser::Result<ResolvedArrayType> {
     ///     Ok(ResolvedArrayType::from_element_type(
-    ///         ArrayElementType::leaf::<i32>().unwrap(),
+    ///         ValueType::leaf::<i32>(),
     ///     ))
     /// }
     ///
@@ -1063,8 +1063,13 @@ mod tests {
         ctx.push_literal(2i32, Span::call_site());
         ctx.make_array(2, ambient_start, Span::call_site(), Span::call_site())
             .unwrap();
-        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
-        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
+        let array = ctx
+            .into_inner()
+            .call0::<cel_runtime::OwnedValue>()
+            .unwrap()
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+            .unwrap();
+        assert_eq!(array.into_vec(), vec![1, 2]);
     }
 
     #[test]
@@ -1101,8 +1106,13 @@ mod tests {
             Span::call_site(),
         )
         .unwrap();
-        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
-        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
+        let array = ctx
+            .into_inner()
+            .call0::<cel_runtime::OwnedValue>()
+            .unwrap()
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+            .unwrap();
+        assert_eq!(array.into_vec(), vec![1, 2]);
     }
 
     #[test]
@@ -1129,7 +1139,7 @@ mod tests {
             AnnotatedArray::new(
                 &mut |_| {
                     Ok(crate::ResolvedArrayType::from_element_type(
-                        cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
+                        cel_runtime::ValueType::leaf::<i32>(),
                     ))
                 },
                 Some(annotation),
@@ -1142,8 +1152,13 @@ mod tests {
             Span::call_site(),
         )
         .unwrap();
-        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
-        assert!(array.try_into_vec::<i32>().unwrap().is_empty());
+        let array = ctx
+            .into_inner()
+            .call0::<cel_runtime::OwnedValue>()
+            .unwrap()
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+            .unwrap();
+        assert!(array.into_vec().is_empty());
     }
 
     #[test]

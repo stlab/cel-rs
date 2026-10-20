@@ -5,7 +5,7 @@ use std::sync::Arc;
 use cel_parser::{
     CELParser, OpLookup, OperationSignature, RecordField, RecordSchema, ResolvedLeafType,
 };
-use cel_runtime::{ArrayElementType, DynSegment};
+use cel_runtime::{DynSegment, ValueType};
 use proc_macro2::Span;
 
 /// Resolves a complete source shape independently of operation installation.
@@ -292,10 +292,7 @@ struct TestBox(f64);
 
 /// Describes a concrete host leaf type.
 fn leaf<T: 'static>() -> ResolvedLeafType {
-    ResolvedLeafType::new(
-        std::any::type_name::<T>(),
-        ArrayElementType::leaf::<T>().unwrap(),
-    )
+    ResolvedLeafType::new(std::any::type_name::<T>(), ValueType::leaf::<T>())
 }
 
 /// Installs the ordinary binary numeric signature.

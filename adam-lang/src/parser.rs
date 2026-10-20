@@ -2514,7 +2514,7 @@ mod tests {
     #[test]
     fn field_labels_and_member_names_are_not_cell_dependencies() {
         use cel_parser::{OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
-        use cel_runtime::ArrayElementType;
+        use cel_runtime::ValueType;
         use std::sync::Arc;
         /// A record independent of any geometry library.
         #[derive(Clone, Debug, PartialEq)]
@@ -2522,9 +2522,8 @@ mod tests {
             x: f64,
             y: f64,
         }
-        let point =
-            ResolvedLeafType::new("TestPoint", ArrayElementType::leaf::<TestPoint>().unwrap());
-        let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+        let point = ResolvedLeafType::new("TestPoint", ValueType::leaf::<TestPoint>());
+        let scalar = ResolvedLeafType::new("f64", ValueType::leaf::<f64>());
         let mut lookup = OpLookup::new();
         lookup
             .register_record(RecordSchema {
@@ -3472,13 +3471,13 @@ mod tests {
             .register_record(cel_parser::RecordSchema {
                 ty: cel_parser::ResolvedLeafType::new(
                     "Gate",
-                    cel_runtime::ArrayElementType::leaf::<bool>().unwrap(),
+                    cel_runtime::ValueType::leaf::<bool>(),
                 ),
                 fields: vec![cel_parser::RecordField {
                     name: "value",
                     ty: cel_parser::ResolvedLeafType::new(
                         "bool",
-                        cel_runtime::ArrayElementType::leaf::<bool>().unwrap(),
+                        cel_runtime::ValueType::leaf::<bool>(),
                     )
                     .into(),
                 }],

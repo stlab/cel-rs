@@ -6,7 +6,7 @@ use cel_parser::{
     AstContext, CELParser, Expr, OpLookup, OperationSignature, Parser, ResolvedLeafType,
     SourceSpan, Ty, format_expr,
 };
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 
 /// Supplies a host-defined receiver.
 #[derive(Clone)]
@@ -18,10 +18,7 @@ struct TestVector(f64);
 
 /// Describes one concrete host leaf.
 fn leaf<T: 'static>() -> ResolvedLeafType {
-    ResolvedLeafType::new(
-        std::any::type_name::<T>(),
-        ArrayElementType::leaf::<T>().unwrap(),
-    )
+    ResolvedLeafType::new(std::any::type_name::<T>(), ValueType::leaf::<T>())
 }
 
 /// Installs host operations and values without geometry-library dependencies.

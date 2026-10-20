@@ -45,18 +45,18 @@
 //! ## Parsing an Array Literal
 //!
 //! CEL array literals use canonical [`Array`](cel_runtime::Array) storage.
-//! A checked host call exports supported leaf arrays as
-//! [`DynamicArray`](cel_runtime::DynamicArray), which converts to `Vec<T>` without
-//! moving or reallocating its elements. Recursive tuple arrays use
-//! [`DynSegment::prepare`](cel_runtime::DynSegment::prepare) and representation witnesses:
+//! A checked host call returns [`OwnedValue`](cel_runtime::OwnedValue). Bind its complete
+//! shape to recover typed storage without moving or reallocating array elements.
+//! Prepared calls use [`DynSegment::prepare`](cel_runtime::DynSegment::prepare) directly:
 //!
 //! ```rust
 //! use cel_rs::parser::{CELParser, OpLookup};
-//! use cel_rs::runtime::DynamicArray;
+//! use cel_rs::runtime::{ArrayOf, Leaf, Nil, IntoCStackList};
 //!
-//! let mut segment = CELParser::new(OpLookup::new()).parse_str("[0, 1, 2]").unwrap();
-//! let array: DynamicArray = segment.call0().unwrap();
-//! assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+//! let segment = CELParser::new(OpLookup::new()).parse_str("[0, 1, 2]").unwrap();
+//! let mut prepared = segment.prepare::<Nil, ArrayOf<Leaf<i32>>>().unwrap();
+//! let array = prepared.call(&().into_c_stack_list()).unwrap();
+//! assert_eq!(array.into_vec(), vec![0, 1, 2]);
 //! ```
 //!
 //! ## Using the Macros

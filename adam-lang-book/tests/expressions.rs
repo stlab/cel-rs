@@ -22,7 +22,7 @@ fn no_standard_library() {
 fn registered_record_and_member_example() {
     use adam_lang::{AdamParser, TypeRegistry};
     use cel_parser::{OpLookup, OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
-    use cel_runtime::ArrayElementType;
+    use cel_runtime::ValueType;
     use std::sync::Arc;
 
     /// A host-defined type with a named field.
@@ -30,8 +30,8 @@ fn registered_record_and_member_example() {
     struct Sample {
         value: f64,
     }
-    let sample = ResolvedLeafType::new("Sample", ArrayElementType::leaf::<Sample>().unwrap());
-    let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+    let sample = ResolvedLeafType::new("Sample", ValueType::leaf::<Sample>());
+    let scalar = ResolvedLeafType::new("f64", ValueType::leaf::<f64>());
     let mut registry = TypeRegistry::new();
     registry.register::<Sample>("Sample");
     let mut lookup = OpLookup::new();

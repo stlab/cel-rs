@@ -73,7 +73,66 @@ pub struct OwnedValue {
     live: bool,
 }
 
+/// Binds recursive debug capabilities independently of a value's ownership.
+///
+/// The formatter never clones or consumes a value. Each checked formatting
+/// boundary validates the complete shape before invoking any leaf hook.
+///
+/// # Examples
+/// ```
+/// use cel_runtime::{Leaf, OwnedValue, ValueType};
+/// let value = OwnedValue::new::<Leaf<i32>>(7)
+///     .with_value_type(ValueType::leaf::<i32>().with_debug::<Leaf<i32>>().unwrap()).unwrap();
+/// let formatter = value.prepare_debug().unwrap();
+/// assert_eq!(formatter.format(&value).unwrap(), "7");
+/// ```
+#[derive(Clone)]
+pub struct ValueFormatter {
+    value_type: ValueType,
+}
+
+impl ValueFormatter {
+    /// Formats a matching live value using this previously prepared debug capability.
+    ///
+    /// # Errors
+    /// Rejects a complete shape mismatch before invoking any formatter.
+    /// - Complexity: O(n + v + s) for n type nodes, v values and s output bytes,
+    ///   excluding leaf formatting costs.
+    ///
+    /// # Examples
+    /// See [`OwnedValue::prepare_debug`].
+    pub fn format(&self, value: &OwnedValue) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            self.value_type.same_shape(value.value_type()),
+            "formatter value shape mismatch"
+        );
+        let mut output = String::new();
+        // SAFETY: Preparation checks every debug hook; the boundary checks full shape.
+        unsafe { debug_raw(&self.value_type, value.as_ptr(), &mut output) };
+        Ok(output)
+    }
+}
+
 impl OwnedValue {
+    /// Prepares an independent reusable formatter without consuming or formatting this value.
+    ///
+    /// # Errors
+    /// Rejects absent debug capability at any recursive node.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{Leaf, OwnedValue, ValueType};
+    /// let value = OwnedValue::new::<Leaf<i32>>(7)
+    ///     .with_value_type(ValueType::leaf::<i32>().with_debug::<Leaf<i32>>().unwrap()).unwrap();
+    /// assert_eq!(value.prepare_debug().unwrap().format(&value).unwrap(), "7");
+    /// ```
+    pub fn prepare_debug(&self) -> anyhow::Result<ValueFormatter> {
+        anyhow::ensure!(self.value_type.can_debug(), "debug capability unavailable");
+        Ok(ValueFormatter {
+            value_type: self.value_type.clone(),
+        })
+    }
+
     /// Moves one bound array element and destroys every unselected element.
     ///
     /// # Safety

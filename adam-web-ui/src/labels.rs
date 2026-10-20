@@ -36,7 +36,7 @@ pub struct CellMeta {
     pub display: Box<dyn Fn(&Sheet) -> String>,
     /// Parses `s` and writes the result to the cell; returns `Err` on parse failure or type
     /// mismatch. May also always return `Err` for a cell type with no write support yet (e.g.
-    /// tuples — see [`Labels::add_tuple_cell`]).
+    /// compound values — see [`Labels::add_compound_cell`]).
     pub write_str: WriteStrFn,
     /// Live slider bounds, present only for a numeric cell whose filter is a
     /// [`adam_rs::FilterKind::Range`] — recomputed from the filter's current argument values on
@@ -94,17 +94,31 @@ impl Labels {
         );
     }
 
-    /// Registers display-only metadata for a tuple-typed cell of any shape.
+    /// Registers display-only metadata for a canonical compound cell of any shape.
     ///
-    /// `write_str` always returns `Err` — no tuple-literal parser exists yet (tracked as a
+    /// `write_str` always returns `Err` — no compound editor exists yet (tracked as a
     /// follow-up: see the "Support editing tuple-typed cells in `begin`" GitHub issue). The
     /// field still participates fully in [`crate::SheetInspector`]'s existing
     /// invalid/warning/disabled machinery, since that's entirely keyed on `CellId`, not on any
     /// per-type behavior.
     ///
-    /// - Precondition: `id` is a live cell in the sheet this `Labels` will be used with, holding
-    ///   canonical adam-lang tuple storage.
-    pub fn add_tuple_cell(&mut self, id: CellId, label: &str) {
+    /// Missing storage or formatting capability displays `?`; unsupported writes
+    /// always return an explicit error without mutating the sheet.
+    ///
+    /// - Complexity: Preparation O(1); display O(n + v + s) for n type nodes,
+    ///   v values and s output bytes, excluding leaf formatter costs.
+    ///
+    /// # Examples
+    /// ```
+    /// let sheet = adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
+    ///     .parse_str("sheet s { cell xs: [i32]; }").unwrap();
+    /// let id = sheet.cell_names["xs"].0;
+    /// let mut labels = adam_web_ui::Labels::new();
+    /// labels.add_compound_cell(&sheet, id, "xs");
+    /// assert_eq!((labels.cells[&id].display)(&sheet), "[]");
+    /// ```
+    pub fn add_compound_cell(&mut self, sheet: &Sheet, id: CellId, label: &str) {
+        let formatter = adam_lang::prepare_compound_cell_formatter(sheet, id);
         self.cells.insert(
             id,
             CellMeta {
@@ -113,11 +127,15 @@ impl Labels {
                 is_numeric: false,
                 is_integer: false,
                 display: Box::new(move |sheet| {
-                    adam_lang::debug_compound_cell(sheet, id).unwrap_or_else(|_| "?".to_owned())
+                    formatter
+                        .as_ref()
+                        .ok()
+                        .and_then(|format| format(sheet).ok())
+                        .unwrap_or_else(|| "?".to_owned())
                 }),
                 write_str: Box::new(|_sheet, _s| {
                     Err(Error::MethodFailed {
-                        error: anyhow::anyhow!("editing tuple-typed cells is not yet supported"),
+                        error: anyhow::anyhow!("editing compound cells is not yet supported"),
                         sites: vec![],
                     })
                 }),
@@ -185,11 +203,11 @@ impl_to_f64_display!(
 /// Builds a [`Labels`] from an adam-lang-style declaration-ordered cell name map.
 ///
 /// Matches each scalar cell's `TypeId` against the built-in primitive types
-/// `adam_lang::TypeRegistry::new()` registers. A tuple-typed cell
-/// (`TypeShape::Tuple`) appears with a Debug-formatted, display-only entry via
-/// [`Labels::add_tuple_cell`]. Cells whose `TypeId` is none of the built-in
+/// `adam_lang::TypeRegistry::new()` registers. Tuple and array cells
+/// appear with a Debug-formatted, display-only entry via
+/// [`Labels::add_compound_cell`]. Cells whose `TypeId` is none of the built-in
 /// primitives are silently skipped, so they simply won't appear in the sidebar.
-/// Arrays and callable signatures are skipped pending compound Inspector support.
+/// Callable signatures are skipped because no callable Inspector exists.
 ///
 /// - Complexity: O(n) in the number of cells.
 pub fn labels_from_cell_names(
@@ -201,11 +219,11 @@ pub fn labels_from_cell_names(
         let id = *id;
         let type_id = match shape {
             TypeShape::Named(type_id) => *type_id,
-            TypeShape::Tuple(_) => {
-                labels.add_tuple_cell(id, name);
+            TypeShape::Tuple(_) | TypeShape::Array(_) => {
+                labels.add_compound_cell(sheet, id, name);
                 continue;
             }
-            TypeShape::Array(_) | TypeShape::Callable(_, _) => continue,
+            TypeShape::Callable(_, _) => continue,
         };
         macro_rules! try_numeric_ty {
             ($T:ty) => {
@@ -542,19 +560,48 @@ mod tests {
         assert!(!labels.cells[&pair].is_bool);
     }
 
-    /// Compound storage migration preserves tuple labels without adding array presentation.
+    /// Compound labels display nested tuples, arrays, empty arrays, and source unit.
     #[test]
-    fn labels_skip_arrays_and_keep_empty_tuple_display() {
-        let sheet =
+    fn labels_display_compound_values_and_reject_edits() {
+        let mut sheet =
             adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
-                .parse_str("sheet s { cell xs: [i32]; cell unit: (); }")
+                .parse_str(
+                    "sheet s {
+                        cell xs: [(i32, bool)] = [(3, true), (4, false)];
+                        cell empty: [i32];
+                        cell nested: ([(i32, bool)], [i32]) = ([(7, true)], []: [i32]);
+                        cell unit: ();
+                        cell scalar: i32 = 5;
+                    }",
+                )
                 .unwrap();
         let labels = labels_from_cell_names(&sheet, &sheet.cell_names);
-        assert_eq!(labels.cells.len(), 1);
-        assert_eq!(
-            (labels.cells[&sheet.cell_names["unit"].0].display)(&sheet),
-            "()"
-        );
+        assert_eq!(labels.cells.len(), 5);
+        for (name, expected) in [
+            ("xs", "[(3, true), (4, false)]"),
+            ("empty", "[]"),
+            ("nested", "([(7, true)], [])"),
+            ("unit", "()"),
+        ] {
+            let meta = &labels.cells[&sheet.cell_names[name].0];
+            assert_eq!((meta.display)(&sheet), expected);
+            assert!(!meta.is_bool && !meta.is_numeric && !meta.is_integer);
+            let error = (meta.write_str)(&mut sheet, "[]").unwrap_err();
+            assert!(error.to_string().contains("not yet supported"));
+            assert_eq!((meta.display)(&sheet), expected);
+        }
+        let scalar = &labels.cells[&sheet.cell_names["scalar"].0];
+        assert_eq!((scalar.display)(&sheet), "5");
+        (scalar.write_str)(&mut sheet, "9").unwrap();
+        assert_eq!((scalar.display)(&sheet), "9");
+        let id = sheet.cell_names["empty"].0;
+        sheet
+            .write_compound::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>(
+                id,
+                cel_runtime::Array::from_vec(vec![1, 2]),
+            )
+            .unwrap();
+        assert_eq!((labels.cells[&id].display)(&sheet), "[1, 2]");
     }
 
     #[test]
@@ -650,7 +697,7 @@ mod tests {
         let sheet = tuple_sheet();
         let cell_id = sheet.cell_names["pair"].0;
         let mut labels = Labels::new();
-        labels.add_tuple_cell(cell_id, "pair");
+        labels.add_compound_cell(&sheet, cell_id, "pair");
         let meta = labels.cells.get(&cell_id).unwrap();
         assert_eq!((meta.display)(&sheet), "(3, 4.5)");
     }
@@ -660,7 +707,7 @@ mod tests {
         let mut sheet = tuple_sheet();
         let cell_id = sheet.cell_names["pair"].0;
         let mut labels = Labels::new();
-        labels.add_tuple_cell(cell_id, "pair");
+        labels.add_compound_cell(&sheet, cell_id, "pair");
         let meta = labels.cells.get(&cell_id).unwrap();
         let before = adam_lang::debug_compound_cell(&sheet, cell_id).unwrap();
         let result = (meta.write_str)(&mut sheet, "(1, 2.0)");
@@ -674,5 +721,18 @@ mod tests {
         adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
             .parse_str("sheet s { cell pair: (i32, f64) = (3, 4.5); }")
             .unwrap()
+    }
+
+    /// A missing compound formatting capability stays visible without enabling edits.
+    #[test]
+    fn compound_label_reports_unavailable_storage_without_panicking() {
+        let mut sheet = AdamSheet::new();
+        let id = sheet.add_cell(7i32);
+        let mut labels = Labels::new();
+        labels.add_compound_cell(&sheet, id, "unavailable");
+        let meta = &labels.cells[&id];
+        assert_eq!((meta.display)(&sheet), "?");
+        assert!((meta.write_str)(&mut sheet, "9").is_err());
+        assert_eq!(*sheet.read::<i32>(id).unwrap(), 7);
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
 use cel_parser::{OpLookup, OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 
 /// A host-defined record with no core-language special treatment.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -20,7 +20,7 @@ struct OtherPoint {
 
 /// Returns a concrete registered leaf.
 fn leaf<T: 'static>(name: &'static str) -> ResolvedLeafType {
-    ResolvedLeafType::new(name, ArrayElementType::leaf::<T>().unwrap())
+    ResolvedLeafType::new(name, ValueType::leaf::<T>())
 }
 
 /// Installs real constructors and accessors and their corresponding type annotations.

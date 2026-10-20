@@ -1,6 +1,6 @@
 //! Regression contracts shared by opaque leaves and the canonical root ABI.
 
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -106,7 +106,10 @@ fn external_scalar_preflight_checks_all_inputs() -> anyhow::Result<()> {
         panic_on_clone: true,
     };
     let wrong =
-        DynamicArray::try_from_vec(vec![DynamicArray::try_from_vec(vec![true]).unwrap()]).unwrap();
+        OwnedValue::new::<ArrayOf<ArrayOf<Leaf<bool>>>>(Array::from_vec(vec![Array::from_vec(
+            vec![true],
+        )]));
+
     assert!(body.call_dyn::<usize>(&[&input, &wrong]).is_err());
     assert_eq!(calls.get(), 0);
     assert_eq!(input.clones.get(), 0);
@@ -270,11 +273,11 @@ fn witnessed_tuple_relabel_and_direct_static_segment() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// External wrappers are imported once; subsequent trusted calls return canonical owners.
+/// Checked whole-value imports retain canonical storage for borrowed and prepared execution.
 #[test]
 fn checked_external_constants_and_borrowed_inputs() -> anyhow::Result<()> {
     let element = ValueType::cloneable_leaf::<i32>();
-    let array = DynamicArray::try_from_vec(vec![1i32, 2]).unwrap();
+    let array = OwnedValue::new::<ArrayOf<Leaf<i32>>>(Array::from_vec(vec![1i32, 2]));
     let mut body = DynSegment::new::<()>();
     body.just_external(ValueType::array(element.clone()), Box::new(array))?;
     let mut body = body.prepare::<Nil, ArrayOf<Leaf<i32>>>()?;
@@ -283,13 +286,12 @@ fn checked_external_constants_and_borrowed_inputs() -> anyhow::Result<()> {
 
     let mut body = DynSegment::new::<()>();
     body.push_argument(0, ValueType::array(element))?;
-    let array = DynamicArray::try_from_vec(vec![3i32, 4]).unwrap();
+    let array = OwnedValue::new::<ArrayOf<Leaf<i32>>>(Array::from_vec(vec![3i32, 4]));
     let result = body
-        .call_dyn_external(&[&array])?
-        .downcast::<DynamicArray>()
-        .unwrap();
-    assert_eq!(result.try_into_vec::<i32>().unwrap(), [3, 4]);
-    assert_eq!(array.len(), 2);
+        .call_dyn_value(&[&array])?
+        .try_into_typed::<ArrayOf<Leaf<i32>>>()?;
+    assert_eq!(result.into_vec(), [3, 4]);
+    assert_eq!(array.try_into_typed::<ArrayOf<Leaf<i32>>>()?.len(), 2);
     assert!(body.call_dyn_value(&[&7i32]).is_err());
     Ok(())
 }
@@ -317,39 +319,23 @@ fn escaped_callable_keeps_all_aliases_frozen() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Splitting mixed external results converts nested lists rather than casting their bytes.
+/// Splitting canonical results retains nested lists and checks full witnesses before extraction.
 #[test]
-fn mixed_tuple_external_boundary() -> anyhow::Result<()> {
-    /// Clones a concrete scalar for the checked external extractor.
-    unsafe fn extract_i32(pointer: *const u8) -> Box<dyn Any> {
-        Box::new(unsafe { *pointer.cast::<i32>() })
-    }
+fn mixed_tuple_whole_value_boundary() -> anyhow::Result<()> {
     let mut body = DynSegment::new::<()>();
     body.just(7i32);
     let origin = body.current_stack_offset();
     body.just(8i32);
     body.make_tuple(1, origin)?;
     body.make_tuple(2, 0)?;
-    let extractors = [
-        DynExtractor::Scalar(TypeId::of::<i32>(), extract_i32),
-        DynExtractor::Tuple(Box::new(|id| {
-            (id == TypeId::of::<i32>()).then(|| {
-                (
-                    element_dropper_for::<i32>(),
-                    element_cloner_for::<i32>(),
-                    element_eq_for::<i32>(),
-                    element_debug_for::<i32>(),
-                )
-            })
-        })),
-    ];
-    let result = unsafe { body.call_dyn_tuple_mixed(&[], &extractors) }?;
-    assert_eq!(result[0].downcast_ref::<i32>(), Some(&7));
+    let mut fields = body.call_dyn_value(&[])?.into_fields()?.into_iter();
+    assert_eq!(fields.next().unwrap().try_into_typed::<Leaf<i32>>()?, 7);
     assert_eq!(
-        result[1]
-            .downcast_ref::<DynamicSequence>()
+        fields
+            .next()
             .unwrap()
-            .try_to_tuple::<(i32,)>()?,
+            .try_into_typed::<Cons<Leaf<i32>, Nil>>()?
+            .into_rust_tuple(),
         (8,)
     );
     Ok(())
@@ -453,7 +439,7 @@ fn explicit_drop_preserves_ambient_values() -> anyhow::Result<()> {
 
 /// Registered capabilities attach only to the exact existing result shape.
 #[test]
-fn registered_capabilities_survive_checked_tuple_export() -> anyhow::Result<()> {
+fn registered_capabilities_survive_checked_tuple_ownership() -> anyhow::Result<()> {
     let mut body = DynSegment::new::<()>();
     body.op0(|| 7i32);
     assert!(
@@ -467,25 +453,30 @@ fn registered_capabilities_survive_checked_tuple_export() -> anyhow::Result<()> 
     )?;
     body.make_tuple(1, 0)?;
     assert_eq!(
-        body.call_dyn_as_dynamic_sequence(&[])?
-            .try_into_tuple::<(i32,)>()?,
+        body.call_dyn_value(&[])?
+            .try_into_typed::<Cons<Leaf<i32>, Nil>>()?
+            .into_rust_tuple(),
         (7,)
     );
     Ok(())
 }
-/// Checked host calls export legacy wrappers without exposing them to interpreter operations.
+/// Checked host calls return arrays through canonical whole-value ownership.
 #[test]
-fn checked_host_call_exports_array() {
+fn checked_host_call_returns_canonical_array() {
     let mut body = cel_runtime::DynSegment::new::<()>();
     body.just(1i32);
     body.make_array(1, 0).unwrap();
-    let result: cel_runtime::DynamicArray = body.call0().unwrap();
-    assert_eq!(result.try_into_vec::<i32>().unwrap(), [1]);
+    let result = body
+        .call_dyn_value(&[])
+        .unwrap()
+        .try_into_typed::<ArrayOf<Leaf<i32>>>()
+        .unwrap();
+    assert_eq!(result.into_vec(), [1]);
 }
 
-/// Checked host mismatches and missing tuple capabilities fail before evaluating the body.
+/// Checked host result mismatches fail before evaluating the body.
 #[test]
-fn checked_host_export_preflight_never_executes_invalid_results() {
+fn checked_host_result_preflight_never_executes_invalid_results() {
     let calls = Rc::new(Cell::new(0));
     let mut body = DynSegment::new::<()>();
     let counter = calls.clone();
@@ -495,7 +486,6 @@ fn checked_host_export_preflight_never_executes_invalid_results() {
     });
     body.make_tuple(1, 0).unwrap();
     assert!(body.call0::<i32>().is_err());
-    assert!(body.call_dyn_as_dynamic_sequence(&[]).is_err());
     assert_eq!(calls.get(), 0);
 
     body.annotate_top(
@@ -511,10 +501,11 @@ fn checked_host_export_preflight_never_executes_invalid_results() {
     )
     .unwrap();
     assert_eq!(
-        body.call_dyn_as_dynamic_sequence(&[])
+        body.call_dyn_value(&[])
             .unwrap()
-            .try_into_tuple::<(i32,)>()
-            .unwrap(),
+            .try_into_typed::<Cons<Leaf<i32>, Nil>>()
+            .unwrap()
+            .into_rust_tuple(),
         (1,)
     );
     assert_eq!(calls.get(), 1);

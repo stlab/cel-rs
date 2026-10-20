@@ -1,7 +1,7 @@
 //! Contracts for checked, noncapturing CEL closure invocation.
 
 use cel_parser::{CELParser, OpLookup, ResolvedLeafType, resolve_builtin_named_type};
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 
 /// Callable annotations retain complete signatures through higher-order and tuple intermediates.
 #[test]
@@ -52,7 +52,7 @@ fn parser() -> CELParser {
     CELParser::with_type_resolver(lookup, |name: &str, args: &[cel_parser::ResolvedType]| {
         if name == "Parcel" && args.is_empty() {
             Some(
-                ResolvedLeafType::new("Parcel", ArrayElementType::cloneable::<Parcel>().unwrap())
+                ResolvedLeafType::new("Parcel", ValueType::cloneable_leaf::<Parcel>())
                     .with_complete_value_type(
                         cel_runtime::ValueType::cloneable_leaf::<Parcel>()
                             .with_equality::<cel_runtime::Leaf<Parcel>>()
@@ -94,13 +94,15 @@ fn registered_recursive_tuple_and_nested_invocation() {
              ((first, (7, last)))",
         )
         .unwrap();
-    let result = segment.call_dyn_as_dynamic_sequence(&[]).unwrap();
-    let (first, nested): (Parcel, cel_runtime::DynamicSequence) = result.try_into_tuple().unwrap();
+    use cel_runtime::{Cons, IntoRustTuple, Leaf, Nil};
+    type Nested = Cons<Leaf<i32>, Cons<Leaf<Parcel>, Nil>>;
+    let result = segment.call_dyn_value(&[]).unwrap();
+    let (first, nested) = result
+        .try_into_typed::<Cons<Leaf<Parcel>, Cons<Nested, Nil>>>()
+        .unwrap()
+        .into_rust_tuple();
     assert_eq!(first, Parcel("first".into()));
-    assert_eq!(
-        nested.try_into_tuple::<(i32, Parcel)>().unwrap(),
-        (7, Parcel("last".into()))
-    );
+    assert_eq!(nested.into_rust_tuple(), (7, Parcel("last".into())));
 }
 
 /// Array annotations retain recursive element shapes rather than only the array marker.
@@ -110,19 +112,14 @@ fn recursive_arrays_cross_invocation_boundaries() {
         .parse_str("(|x: [[Parcel]]| (|y: [[Parcel]]| y)(x))([[first], [last]])")
         .unwrap();
     let rows = segment
-        .call0::<cel_runtime::DynamicArray>()
+        .call0::<cel_runtime::OwnedValue>()
         .unwrap()
-        .try_into_vec::<cel_runtime::DynamicArray>()
-        .unwrap();
+        .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::ArrayOf<cel_runtime::Leaf<Parcel>>>>()
+        .unwrap()
+        .into_vec();
     assert_eq!(rows.len(), 2);
-    assert_eq!(
-        rows[0].try_as_slice::<Parcel>().unwrap(),
-        &[Parcel("first".into())]
-    );
-    assert_eq!(
-        rows[1].try_as_slice::<Parcel>().unwrap(),
-        &[Parcel("last".into())]
-    );
+    assert_eq!(rows[0].as_slice(), &[Parcel("first".into())]);
+    assert_eq!(rows[1].as_slice(), &[Parcel("last".into())]);
 }
 
 /// Nullary and higher-order literal results retain their known signatures.
@@ -243,7 +240,7 @@ fn counted_parser(live: std::sync::Arc<std::sync::atomic::AtomicIsize>) -> CELPa
         if name == "Item" && args.is_empty() {
             Some(ResolvedLeafType::new(
                 "Item",
-                ArrayElementType::cloneable::<Item>().unwrap(),
+                ValueType::cloneable_leaf::<Item>(),
             ))
         } else {
             resolve_builtin_named_type(name, args)
@@ -453,7 +450,7 @@ fn parameter_without_clone_adapter_is_explicitly_unsupported() {
         OpLookup::new(),
         [(
             "Ticket",
-            ResolvedLeafType::new("Ticket", ArrayElementType::leaf::<Ticket>().unwrap()),
+            ResolvedLeafType::new("Ticket", ValueType::leaf::<Ticket>()),
         )],
     );
     let error = parser.parse_str("|x: Ticket| x").err().unwrap();

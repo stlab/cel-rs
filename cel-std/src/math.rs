@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use cel_parser::{OpLookup, OperationSignature, ResolvedLeafType};
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 use std::sync::Arc;
 
 /// Marker pushed for a bare `min` lookup; consumed by the paired `"()"` call.
@@ -46,11 +46,7 @@ struct RoundTiesEvenFn;
 
 /// Returns a numeric leaf's complete concrete descriptor.
 fn numeric_type<T: 'static>() -> cel_parser::ResolvedType {
-    ResolvedLeafType::new(
-        std::any::type_name::<T>(),
-        ArrayElementType::leaf::<T>().expect("numeric types are non-array leaves"),
-    )
-    .into()
+    ResolvedLeafType::new(std::any::type_name::<T>(), ValueType::leaf::<T>()).into()
 }
 
 /// Registers existing numeric contracts as composable direct operation signatures.
@@ -146,7 +142,7 @@ mod tests {
     #[test]
     fn independent_min_overload_composes_with_standard_library() -> Result<()> {
         use cel_parser::{OperationSignature, ResolvedLeafType};
-        use cel_runtime::ArrayElementType;
+        use cel_runtime::ValueType;
         use std::sync::Arc;
 
         /// Names the host's independent overload installer.
@@ -164,12 +160,8 @@ mod tests {
             lookup.register_function("min", HostMin)?;
             lookup.register_operation(OperationSignature {
                 name: "min",
-                operands: vec![
-                    ResolvedLeafType::new("Corner", ArrayElementType::leaf::<Corner>().unwrap())
-                        .into(),
-                ],
-                result: ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap())
-                    .into(),
+                operands: vec![ResolvedLeafType::new("Corner", ValueType::leaf::<Corner>()).into()],
+                result: ResolvedLeafType::new("f64", ValueType::leaf::<f64>()).into(),
                 emit: Arc::new(|segment, _| segment.op1(|corner: Corner| corner.0)),
             })?;
             if !reverse {

@@ -186,7 +186,7 @@ mod typecheck;
 // All parse errors carry a proc_macro2::Span for source-location diagnostics.
 pub use ast_parser::AdamAstParser;
 pub use cel_parser::ParseError;
-pub use cell_value::debug_compound_cell;
+pub use cell_value::{debug_compound_cell, prepare_compound_cell_formatter};
 pub use fmt::{FormatSourceError, format_sheet, format_source};
 pub use parser::{AdamParser, ParsedSheet};
 pub use trivia::attach_trivia;

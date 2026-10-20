@@ -25,6 +25,32 @@ pub fn debug_compound_cell(sheet: &adam_rs::Sheet, id: adam_rs::CellId) -> anyho
     sheet.read::<CellValue>(id)?.0.try_debug()
 }
 
+/// Prepares canonical compound-cell formatting from the cell owner's debug capability.
+///
+/// The returned closure reads the current value, checks its complete shape, and
+/// formats through the retained capability. It does not consume or clone values.
+///
+/// # Errors
+/// Rejects an unknown cell, noncompound storage, or unavailable debug capability.
+/// The closure also rejects a different shape or missing cell in its input sheet.
+/// - Complexity: Preparation O(1); each call O(n + v + s) for n type nodes,
+///   v contained values and s output bytes, excluding leaf formatter costs.
+///
+/// # Examples
+/// ```
+/// let parsed = adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
+///     .parse_str("sheet s { cell xs: [i32]; }").unwrap();
+/// let format = adam_lang::prepare_compound_cell_formatter(&parsed, parsed.cell_names["xs"].0).unwrap();
+/// assert_eq!(format(&parsed).unwrap(), "[]");
+/// ```
+pub fn prepare_compound_cell_formatter(
+    sheet: &adam_rs::Sheet,
+    id: adam_rs::CellId,
+) -> anyhow::Result<impl Fn(&adam_rs::Sheet) -> anyhow::Result<String> + use<>> {
+    let formatter = sheet.read::<CellValue>(id)?.0.prepare_debug()?;
+    Ok(move |sheet: &adam_rs::Sheet| formatter.format(&sheet.read::<CellValue>(id)?.0))
+}
+
 /// Owns a compound value whose cloning and equality capabilities are bound.
 ///
 /// Only checked host writes and frozen output adapters construct this private type.

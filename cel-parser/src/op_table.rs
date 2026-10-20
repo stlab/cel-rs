@@ -71,7 +71,7 @@ pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 /// `tuple_operand_index` is the *only* operand position.
 ///
 /// `shape` is flat: an element position that is itself a nested tuple can
-/// only be recorded as `DynTuple`'s `TypeId`, which matches *any* nested
+/// only be recorded as a flat tuple `TypeId`, which matches *any* nested
 /// tuple at that position regardless of its inner arity or element types.
 /// Two registrations that would only differ by that inner shape are not
 /// distinguishable — do not rely on nested-tuple precision at this level.
@@ -1409,7 +1409,6 @@ pub fn cast_source_types(target_name: &str) -> impl Iterator<Item = TypeId> {
 /// configured resolvers may additionally supply host-registered descriptors.
 pub(crate) struct BuiltinScalarType {
     pub(crate) type_name: &'static str,
-    pub(crate) element_type: fn() -> cel_runtime::ArrayElementType,
     /// Builds complete metadata at the concrete built-in registration site.
     pub(crate) value_type: fn() -> cel_runtime::value_type::ValueType,
 }
@@ -1453,11 +1452,6 @@ macro_rules! builtin_scalars {
                 $($name => BuiltinScalarType {
                     type_name: $name,
                     value_type: complete_builtin_leaf::<$ty>,
-                    element_type: || {
-                        cel_runtime::ArrayElementType::cloneable::<$ty>()
-                            .expect("a built-in scalar type is never DynamicArray")
-                            .with_type_name($name)
-                    },
                 },)*
                 _ => return None,
             })
@@ -1506,11 +1500,6 @@ macro_rules! builtin_generic_types {
                     $($arg_name => Some(BuiltinScalarType {
                         type_name: concat!($generic, "(", $arg_name, ")"),
                         value_type: complete_builtin_leaf::<$ty>,
-                        element_type: || {
-                            cel_runtime::ArrayElementType::cloneable::<$ty>()
-                                .expect("a built-in generic type is never DynamicArray")
-                                .with_type_name(concat!($generic, "(", $arg_name, ")"))
-                        },
                     }),)*
                     _ => None,
                 },)*
@@ -1577,11 +1566,6 @@ pub(crate) fn builtin_generic_type_0(name: &str) -> Option<BuiltinScalarType> {
         "RangeFull" => Some(BuiltinScalarType {
             type_name: "RangeFull",
             value_type: complete_builtin_leaf::<std::ops::RangeFull>,
-            element_type: || {
-                cel_runtime::ArrayElementType::cloneable::<std::ops::RangeFull>()
-                    .expect("RangeFull is never DynamicArray")
-                    .with_type_name("RangeFull")
-            },
         }),
         _ => None,
     }
@@ -2986,9 +2970,9 @@ mod tests {
     #[test]
     fn builtin_scalar_type_i32_matches_std_any_type_id() {
         let scalar = builtin_scalar_type("i32").unwrap();
-        assert_eq!((scalar.element_type)().type_id(), TypeId::of::<i32>());
-        assert_eq!((scalar.element_type)().size(), std::mem::size_of::<i32>());
-        assert_eq!((scalar.element_type)().align(), std::mem::align_of::<i32>());
+        assert_eq!((scalar.value_type)().type_id(), TypeId::of::<i32>());
+        assert_eq!((scalar.value_type)().size(), std::mem::size_of::<i32>());
+        assert_eq!((scalar.value_type)().align(), std::mem::align_of::<i32>());
     }
 
     #[test]
@@ -3027,11 +3011,11 @@ mod tests {
     fn builtin_generic_type_range_inclusive_f64_matches_std_any_type_id() {
         let resolved = builtin_generic_type("RangeInclusive", "f64").unwrap();
         assert_eq!(
-            (resolved.element_type)().type_id(),
+            (resolved.value_type)().type_id(),
             TypeId::of::<std::ops::RangeInclusive<f64>>()
         );
         assert_eq!(
-            (resolved.element_type)().size(),
+            (resolved.value_type)().size(),
             std::mem::size_of::<std::ops::RangeInclusive<f64>>()
         );
     }
@@ -3049,7 +3033,7 @@ mod tests {
         let resolved = builtin_generic_type_0("RangeFull").unwrap();
         assert_eq!(resolved.type_name, "RangeFull");
         assert_eq!(
-            (resolved.element_type)().type_id(),
+            (resolved.value_type)().type_id(),
             TypeId::of::<std::ops::RangeFull>()
         );
         assert!(builtin_generic_type_0("NotAGeneric").is_none());

@@ -9,7 +9,7 @@ use cel_parser::{
     AstContext, CELParser, Expr, ExpressionRestriction, OpLookup, OperationSignature, Parser,
     RecordField, RecordSchema, ResolvedLeafType, Ty, format_expr,
 };
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 
 /// Stores a recursively typed field as a concrete host value.
 #[derive(Clone)]
@@ -110,7 +110,7 @@ struct TestPoint {
 
 /// Describes a concrete host type without registering any value binding.
 fn leaf<T: 'static>(name: &'static str) -> ResolvedLeafType {
-    ResolvedLeafType::new(name, ArrayElementType::leaf::<T>().unwrap())
+    ResolvedLeafType::new(name, ValueType::leaf::<T>())
 }
 
 /// Installs test constructors and an accessor in their own namespaces.

@@ -1,7 +1,7 @@
 //! Checked examples for the static CEL book.
 
 use cel_parser::{CELParser, OpLookup};
-use cel_runtime::{DynClosure, DynamicArray};
+use cel_runtime::DynClosure;
 use cel_std::install as install_std;
 
 /// Evaluates `source` with the optional CEL standard library installed.
@@ -26,7 +26,7 @@ fn arithmetic_respects_precedence() {
 #[test]
 fn registered_record_and_member_example() {
     use cel_parser::{OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
-    use cel_runtime::ArrayElementType;
+    use cel_runtime::ValueType;
     use std::sync::Arc;
 
     /// A host-defined value, not a built-in CEL type.
@@ -34,8 +34,8 @@ fn registered_record_and_member_example() {
     struct Sample {
         value: f64,
     }
-    let sample = ResolvedLeafType::new("Sample", ArrayElementType::leaf::<Sample>().unwrap());
-    let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+    let sample = ResolvedLeafType::new("Sample", ValueType::leaf::<Sample>());
+    let scalar = ResolvedLeafType::new("f64", ValueType::leaf::<f64>());
     let mut lookup = OpLookup::new();
     lookup
         .register_record(RecordSchema {
@@ -111,8 +111,12 @@ fn array_literal_round_trips_through_dynamic_array() {
         .parse_str("[0, 1, 2]")
         .unwrap();
 
-    let array: DynamicArray = segment.call0().unwrap();
-    assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+    let array = segment
+        .call0::<cel_runtime::OwnedValue>()
+        .unwrap()
+        .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+        .unwrap();
+    assert_eq!(array.into_vec(), vec![0, 1, 2]);
 }
 
 #[test]
@@ -129,17 +133,22 @@ fn typed_array_annotations_support_empty_arrays() {
     let mut empty = CELParser::new(OpLookup::new())
         .parse_str("[]: [i32]")
         .unwrap();
-    let empty_array: DynamicArray = empty.call0().unwrap();
-    assert_eq!(
-        empty_array.try_into_vec::<i32>().unwrap(),
-        Vec::<i32>::new()
-    );
+    let empty_array = empty
+        .call0::<cel_runtime::OwnedValue>()
+        .unwrap()
+        .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+        .unwrap();
+    assert_eq!(empty_array.into_vec(), Vec::<i32>::new());
 
     let mut values = CELParser::new(OpLookup::new())
         .parse_str("[0i32, 1i32]: [i32]")
         .unwrap();
-    let array: DynamicArray = values.call0().unwrap();
-    assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1]);
+    let array = values
+        .call0::<cel_runtime::OwnedValue>()
+        .unwrap()
+        .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+        .unwrap();
+    assert_eq!(array.into_vec(), vec![0, 1]);
 }
 
 #[test]

@@ -94,7 +94,7 @@ genuine one-element tuple; `(T, U, ...)` is the general case:
 
 Tuples nest: `(i32, (f64, String))` is a 2-tuple whose second element is itself a 2-tuple.
 Compound cells own canonical CEL values. Host code uses `ParsedSheet::read_compound` and
-`write_compound` with representation witnesses, not `DynamicSequence`. For example,
+`write_compound` with complete representation witnesses. For example,
 `Cons<Leaf<i32>, Cons<Leaf<f64>, Nil>>` witnesses `(i32, f64)`. Reads return independent
 owned clones; writes validate the complete recursive shape before changing the cell.
 `source_compound` reads the original aspiration independently of any filter result.
