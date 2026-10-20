@@ -137,7 +137,13 @@ fn nullary_function_values_do_not_infer_their_result_until_called() {
     })
     .unwrap();
     for (source, expected) in [
-        ("constant", cel_parser::Ty::Any),
+        (
+            "constant",
+            cel_parser::Ty::from_leaf(&ResolvedLeafType::new(
+                "constant",
+                ValueType::cloneable_leaf::<Constant>(),
+            )),
+        ),
         ("constant()", cel_parser::Ty::I32),
     ] {
         let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
@@ -177,6 +183,119 @@ fn shadowing_lookup() -> OpLookup {
     })
     .unwrap();
     ops
+}
+
+/// Concrete generic and foreign leaves never borrow a same-named global signature.
+#[test]
+fn registered_leaf_locals_shadow_registered_functions() {
+    /// An opaque noncallable host value.
+    #[derive(Clone)]
+    struct Foreign;
+    let resolver = |name: &str, args: &[cel_parser::ResolvedType]| {
+        if name == "Foreign" && args.is_empty() {
+            Some(ResolvedLeafType::new(
+                "Foreign",
+                ValueType::leaf::<Foreign>(),
+            ))
+        } else {
+            cel_parser::builtin_type_resolver().resolve_named_type(name, args)
+        }
+    };
+    for source in [
+        "|f: RangeInclusive(i32)| f(1i32)",
+        "|f: Range(i32)| f(1i32)",
+        "|f: Foreign| f(1i32)",
+    ] {
+        assert!(
+            CELParser::with_type_resolver(shadowing_lookup(), resolver)
+                .parse_str(source)
+                .is_err(),
+            "{source}"
+        );
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| cel_parser::Ty::Any,
+            &resolver,
+            &shadowing_lookup(),
+        );
+        assert_eq!(diagnostics.len(), 1, "{source}: {ty:?}, {diagnostics:?}");
+        assert!(diagnostics[0].message().contains("not callable"));
+        assert!(
+            matches!(ty, cel_parser::Ty::Callable(_, result) if *result == cel_parser::Ty::Any)
+        );
+    }
+}
+
+/// Marker identity survives aliases and overrides a different global name's signature.
+#[test]
+fn genuine_registered_marker_aliases_remain_callable() {
+    /// The integer function's concrete callable marker.
+    #[derive(Clone)]
+    struct Marker;
+    /// The boolean function's distinct callable marker.
+    #[derive(Clone)]
+    struct Other;
+    /// Installs independent integer and boolean functions.
+    fn lookup() -> OpLookup {
+        let mut ops = OpLookup::new();
+        ops.register_function("f", Marker).unwrap();
+        ops.register_function("g", Other).unwrap();
+        ops.register_operation(OperationSignature {
+            name: "f",
+            operands: vec![shape("i32")],
+            result: shape("i32"),
+            emit: Arc::new(|s, _| s.op1(|x: i32| x)),
+        })
+        .unwrap();
+        ops.register_operation(OperationSignature {
+            name: "g",
+            operands: vec![shape("bool")],
+            result: shape("bool"),
+            emit: Arc::new(|s, _| s.op1(|x: bool| x)),
+        })
+        .unwrap();
+        ops
+    }
+    let resolver = |name: &str, args: &[cel_parser::ResolvedType]| {
+        if name == "Marker" && args.is_empty() {
+            Some(ResolvedLeafType::new(
+                "Marker",
+                ValueType::cloneable_leaf::<Marker>(),
+            ))
+        } else {
+            cel_parser::builtin_type_resolver().resolve_named_type(name, args)
+        }
+    };
+    for source in [
+        "(|alias: Marker| alias(3i32))(f)",
+        "(|g: Marker| g(3i32))(f)",
+        "(f,).0(3i32)",
+        "(if true { f } else { f })(3i32)",
+    ] {
+        assert_eq!(
+            CELParser::with_type_resolver(lookup(), resolver)
+                .parse_str(source)
+                .unwrap()
+                .call0::<i32>()
+                .unwrap(),
+            3,
+            "{source}"
+        );
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| cel_parser::Ty::Any,
+            &resolver,
+            &lookup(),
+        );
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        assert_eq!(ty, cel_parser::Ty::I32, "{source}");
+    }
 }
 
 /// Known noncallable locals shadow same-named registered functions in ordinary calls.

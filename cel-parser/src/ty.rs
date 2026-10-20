@@ -54,7 +54,9 @@ pub enum Ty {
     Tuple(Vec<Ty>),
     /// A callable with complete parameter and result types.
     Callable(Vec<Ty>, Box<Ty>),
-    /// A known host leaf, retaining its concrete identity and complete runtime descriptor.
+    /// A known leaf, retaining its concrete identity and complete runtime descriptor.
+    /// Registered function markers are callable only through their registered identity;
+    /// other leaves, including builtin ranges and foreign values, are not callable.
     Registered(ResolvedLeafType),
     /// Anything not statically known: an unannotated cell, an
     /// unresolved identifier, or a call without available metadata.
@@ -417,6 +419,9 @@ impl Ty {
 /// Arrays require homogeneous complete shapes, tuples retain source order, and `if` joins
 /// compatible branch types. Callable applications check parameter and result types.
 /// Calls without metadata and free identifiers without declarations remain unresolved.
+/// Registered function values retain concrete marker identity through aliases, rather than
+/// using the alias's spelling to select a signature. Builtin range expressions retain their
+/// concrete range result, not their endpoint type.
 ///
 /// - Complexity: O(n) in the number of nodes in `expr`.
 ///
@@ -483,8 +488,12 @@ pub fn check_expr_with_type_resolver(
         Expr::Literal { value, .. } => (Ty::from_literal(value), Vec::new()),
         Expr::Ident { name, .. } => {
             let ty = resolve_ident(name);
-            let ty = if ty == Ty::Any && !lookup.is_registered_function(name) {
-                matching_registered_type(name, &[], lookup).unwrap_or(ty)
+            let ty = if ty == Ty::Any {
+                lookup
+                    .registered_function_type(name)
+                    .map(Ty::from_leaf)
+                    .or_else(|| matching_registered_type(name, &[], lookup))
+                    .unwrap_or(ty)
             } else {
                 ty
             };
@@ -590,14 +599,20 @@ pub fn check_expr_with_type_resolver(
                     span.end,
                 ));
             } else {
-                if matches!(callee_ty, Ty::Any | Ty::Registered(_))
-                    && let Expr::Ident { name, .. } = callee.as_ref()
+                let function_name = callee_ty
+                    .type_id()
+                    .and_then(|id| lookup.registered_function_name(id))
+                    .or_else(|| match (&callee_ty, callee.as_ref()) {
+                        (Ty::Any, Expr::Ident { name, .. }) => Some(name.as_str()),
+                        _ => None,
+                    });
+                if let Some(name) = function_name
                     && let Some(ty) =
                         registered_operation_ty(name, &types, *span, lookup, &mut diagnostics)
                 {
                     return (ty, diagnostics);
                 }
-                if !matches!(callee_ty, Ty::Any | Ty::Registered(_)) {
+                if function_name.is_none() && callee_ty != Ty::Any {
                     diagnostics.push(ParseError::new_range(
                         "value is not callable",
                         span.start,
@@ -930,6 +945,17 @@ fn check_op(
     if let Some(ty) = matching_registered_type(name, &operand_tys, lookup) {
         return (ty, diagnostics);
     }
+    if name == "range_full" && operand_tys.is_empty() {
+        let builtin = crate::op_table::builtin_generic_type_0("RangeFull")
+            .expect("builtin full range descriptor");
+        return (
+            Ty::from_leaf(&ResolvedLeafType::new(
+                builtin.type_name,
+                (builtin.value_type)(),
+            )),
+            diagnostics,
+        );
+    }
     let signatures = builtin_operand_types(name);
     let matched = signatures.iter().find(|sig| {
         sig.arity as usize == operand_tys.len()
@@ -1014,10 +1040,25 @@ fn matching_registered_type(name: &str, operands: &[Ty], lookup: &OpLookup) -> O
 }
 
 /// Returns the result type of a matched built-in operator application: `Ty::Bool` for the
-/// comparison operators, otherwise the (matched, homogeneous) operand type — every built-in
-/// signature is either a comparison (returning `bool`) or same-type-in-same-type-out (arithmetic,
-/// bitwise, shifts, unary negation, logical not).
+/// comparison operators, the concrete range descriptor for range constructors, or the
+/// matched LHS type for arithmetic, bitwise, shifts, unary negation and logical not.
 fn result_ty_for_op(name: &str, operand_ty: &Ty) -> Ty {
+    let range = match name {
+        "range" => Some("Range"),
+        "range_inclusive" => Some("RangeInclusive"),
+        "range_from" => Some("RangeFrom"),
+        "range_to" => Some("RangeTo"),
+        "range_to_inclusive" => Some("RangeToInclusive"),
+        _ => None,
+    };
+    if let Some(range) = range {
+        let builtin = crate::op_table::builtin_generic_type(range, &operand_ty.name())
+            .expect("matched builtin range endpoint has a concrete descriptor");
+        return Ty::from_leaf(&ResolvedLeafType::new(
+            builtin.type_name,
+            (builtin.value_type)(),
+        ));
+    }
     match name {
         "==" | "!=" | "<" | "<=" | ">" | ">=" => Ty::Bool,
         _ => operand_ty.clone(),

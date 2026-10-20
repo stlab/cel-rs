@@ -74,7 +74,7 @@ pub struct RecordSchema {
 /// Stores the first marker selected for a function name.
 pub(crate) struct RegisteredFunction {
     pub(crate) name: &'static str,
-    pub(crate) marker_type: TypeId,
+    pub(crate) marker: ResolvedLeafType,
     pub(crate) emit: OperationEmitter,
 }
 
@@ -107,14 +107,26 @@ fn matches_type(expected: &ResolvedType, actual: &ValueType) -> bool {
 }
 
 impl OpLookup {
-    /// Returns whether a bare name emits a registered function marker rather than a nullary result.
+    /// Returns the concrete marker emitted by a bare registered function name.
     ///
     /// - Complexity: O(f) for f registered functions.
-    pub(crate) fn is_registered_function(&self, name: &str) -> bool {
+    pub(crate) fn registered_function_type(&self, name: &str) -> Option<&ResolvedLeafType> {
         self.registered
             .functions
             .iter()
-            .any(|function| function.name == name)
+            .find(|function| function.name == name)
+            .map(|function| &function.marker)
+    }
+
+    /// Returns the callable name selected by executable dispatch for a concrete marker.
+    ///
+    /// - Complexity: O(f) for f registered functions.
+    pub(crate) fn registered_function_name(&self, marker: TypeId) -> Option<&'static str> {
+        self.registered
+            .functions
+            .iter()
+            .find(|function| function.marker.type_id() == marker)
+            .map(|function| function.name)
     }
 
     /// Validates required named fields and emits one record from their original stack order.
@@ -294,7 +306,7 @@ impl OpLookup {
         {
             self.registered.functions.push(RegisteredFunction {
                 name,
-                marker_type,
+                marker: ResolvedLeafType::new(name, ValueType::cloneable_leaf::<M>()),
                 emit: Arc::new(move |segment, _| {
                     segment.just(marker.clone());
                     Ok(())
@@ -439,7 +451,7 @@ impl OpLookup {
                 .registered
                 .functions
                 .iter()
-                .find(|f| f.marker_type == marker_type)
+                .find(|f| f.marker.type_id() == marker_type)
             {
                 let ambient_start = segment.stack_offset_before_top(arity)?;
                 if self.lookup_direct_operation(function.name, segment, arity - 1, span)? {

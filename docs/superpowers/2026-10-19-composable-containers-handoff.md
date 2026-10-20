@@ -4,6 +4,8 @@ Status snapshot: 2026-10-19. Tasks 1–8 are implemented and reviewed.
 Task 9 supplies executable documentation and passes the complete required local
 gate. The controller's mutation-oriented final review is still pending; this
 document does not claim that review has happened. No push or PR was requested.
+The final two-finding fixwave below passes affected checks; scoped re-review
+remains pending until the controller supplies its verdict and fresh full gate.
 
 Approved contract:
 [design](specs/2026-10-19-cel-composable-containers-design.md) and
@@ -225,3 +227,60 @@ Edge/dx helpers. No new long-lived process is required by Task 9.
   clone/equality bounds, and checks reintroduced into prepared invocation.
   Task 9 adds executable contracts and sanitizer evidence, not a substitute for
   that review. No agents/reviewers, push, PR, or merge occurred in Task 9.
+
+## Final review fixwave — concrete callable and range identities
+
+Base: `ce762425728618ffa0bebf2b57e2821dfed63791`.
+Both Important findings are addressed together, with real RED–GREEN tests:
+
+1. **Registered leaves are not automatically callable.** The earlier
+   builtin-only shadowing guard left generic and foreign leaves eligible for a
+   same-spelled global function signature. Persistent function registration now
+   retains its concrete marker descriptor. The checker resolves known callee
+   identities through the same selected-marker table as executable dispatch,
+   independently of identifier spelling. Generic/foreign local shadows fail;
+   genuine marker aliases, including aliases shadowing a different global
+   function and marker values transported through tuples/branches, remain
+   callable. Unknown metadata-free values retain best-effort handling.
+2. **Range operators return ranges, not endpoints.** Matched builtin range
+   operators obtain concrete descriptors from the existing builtin generic
+   factories, including half-open, inclusive, one-sided and full ranges.
+   Registered operator metadata keeps its precedence; arithmetic, comparisons
+   and heterogeneous shifts retain their existing behavior. Tests cover all
+   fourteen numeric endpoint types, typed callable arguments/results, nested
+   arrays and annotations, negative mismatches, and executable agreement.
+
+Accurate range inference exposed a tightly coupled Adam filter dependency on
+the old shortcut. Filter checking now uses `TypeRegistry::range_entry` on the
+inferred result, like executable filter dispatch: inclusive-range endpoint
+identity must match the cell, and a range-producing expression need not use `_`.
+Cell/source/out tests include callable-produced bounds and invalid endpoints.
+This does not change executable evaluation, runtime ABI, or persistent storage.
+The only registration storage change retains marker metadata in place of its
+flat ID; executable marker selection is unchanged.
+
+Affected validation:
+
+```sh
+cargo fmt --all --check
+cargo test -p cel-parser -p cel-std -p cel-euclid -p adam-rs -p adam-lang \
+  -p adam-lsp -p cel-lang-book -p adam-lang-book \
+  -p adam-lang-book-live-config -p adam-lang-book-preprocessor
+cargo clippy -p cel-parser -p cel-std -p cel-euclid -p adam-rs -p adam-lang \
+  -p adam-lsp -p cel-lang-book -p adam-lang-book \
+  -p adam-lang-book-live-config -p adam-lang-book-preprocessor \
+  --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc -p cel-parser -p cel-std -p cel-euclid \
+  -p adam-rs -p adam-lang -p adam-lsp -p cel-lang-book -p adam-lang-book \
+  -p adam-lang-book-live-config -p adam-lang-book-preprocessor --no-deps --lib
+git diff --check
+```
+
+All pass: **1842 tests including doctests, 0 failed, 0 ignored**, no compiler,
+Clippy or rustdoc warnings. Detailed RED–GREEN commands/results and limitations
+are retained locally in
+`.superpowers/sdd/2026-10-19-cel-composable-containers/final-fix-report.md`.
+The crop test remains untouched with its previously recorded SHA-256.
+No agents/reviewers, dependencies, UI edits, push, PR, or merge were used.
+The prior full gate is historical evidence only: the controller must run its
+fresh full gate after scoped re-review. **Scoped re-review pending**, not approved.
