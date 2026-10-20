@@ -109,6 +109,8 @@ pub struct TypeEntry {
     pub add_conditional_fn: AddConditionalFn,
     /// Builds the runtime array-element descriptor for this leaf type.
     pub element_type_fn: fn() -> cel_runtime::ArrayElementType,
+    /// Builds complete concrete leaf metadata with the registered capabilities.
+    pub value_type_fn: fn() -> cel_runtime::value_type::ValueType,
     /// Size in bytes of a value of this type.
     pub size: usize,
     /// Required alignment in bytes of a value of this type.
@@ -212,6 +214,17 @@ fn array_element_type_impl<T: 'static + Clone>() -> cel_runtime::ArrayElementTyp
         .expect("registered leaf type is not DynamicArray")
 }
 
+/// Builds complete leaf ownership and the capabilities required by Adam registration.
+fn value_type_impl<T: Clone + PartialEq + std::fmt::Debug + 'static>()
+-> cel_runtime::value_type::ValueType {
+    use cel_runtime::value_type::{Leaf, ValueType};
+    ValueType::cloneable_leaf::<T>()
+        .with_equality::<Leaf<T>>()
+        .expect("same registered leaf")
+        .with_debug::<Leaf<T>>()
+        .expect("same registered leaf")
+}
+
 /// Evaluates `seg` (producing a `RangeInclusive<T>`) against `value` prepended to `args`, then
 /// clamps `value` into the resulting bounds. For [`RangeEntry::clamp_fn`].
 fn range_clamp_impl<T: Clone + PartialOrd + 'static>(
@@ -268,10 +281,11 @@ impl TypeRegistry {
     pub(crate) fn resolved_leaf_type(&self, type_id: TypeId) -> Option<ResolvedLeafType> {
         let name = self.by_type_id.get(&type_id)?;
         let entry = self.by_name.get(name)?;
-        Some(ResolvedLeafType::new(
-            name.clone(),
-            (entry.element_type_fn)(),
-        ))
+        Some(
+            ResolvedLeafType::new(name.clone(), (entry.element_type_fn)())
+                .with_complete_value_type((entry.value_type_fn)())
+                .expect("registered factories describe the same concrete leaf"),
+        )
     }
 
     /// Builds a CEL-facing resolver snapshot from this registry's registered leaf types.
@@ -289,7 +303,9 @@ impl TypeRegistry {
             .map(|(name, entry)| {
                 (
                     name.clone(),
-                    ResolvedLeafType::new(name.clone(), (entry.element_type_fn)()),
+                    ResolvedLeafType::new(name.clone(), (entry.element_type_fn)())
+                        .with_complete_value_type((entry.value_type_fn)())
+                        .expect("registered factories describe the same concrete leaf"),
                 )
             })
             .collect();
@@ -374,6 +390,7 @@ impl TypeRegistry {
                 default_fn: Some(|| Box::new(T::default()) as Box<dyn Any>),
                 add_conditional_fn: add_conditional_impl::<T>,
                 element_type_fn: array_element_type_impl::<T>,
+                value_type_fn: value_type_impl::<T>,
                 size: std::mem::size_of::<T>(),
                 align: std::mem::align_of::<T>(),
                 raw_dropper: cel_runtime::raw_dropper_for::<T>(),
@@ -426,6 +443,7 @@ impl TypeRegistry {
                 default_fn: None,
                 add_conditional_fn: add_conditional_impl::<T>,
                 element_type_fn: array_element_type_impl::<T>,
+                value_type_fn: value_type_impl::<T>,
                 size: std::mem::size_of::<T>(),
                 align: std::mem::align_of::<T>(),
                 raw_dropper: cel_runtime::raw_dropper_for::<T>(),
@@ -799,6 +817,35 @@ mod tests {
         let reg = TypeRegistry::new();
         let entry = reg.get("i32").expect("i32 registered");
         assert_eq!(entry.type_id, TypeId::of::<i32>());
+    }
+
+    /// Installs complete factories while foreign concrete types are still known.
+    #[test]
+    fn complete_factory_registered_foreign_leaf_retains_capabilities() {
+        use cel_runtime::{owned_value::OwnedValue, value_type::Leaf};
+        let mut registry = TypeRegistry::new();
+        registry.register::<std::path::PathBuf>("Path");
+        registry.register_no_default::<std::ops::RangeInclusive<i32>>("Bounds");
+        let entry = registry.get("Path").unwrap();
+        let descriptor = (entry.value_type_fn)();
+        let owner = OwnedValue::new::<Leaf<std::path::PathBuf>>("example".into())
+            .with_value_type(descriptor)
+            .unwrap();
+        assert!(owner.try_eq(&owner.try_clone().unwrap()).unwrap());
+        assert_eq!(owner.try_debug().unwrap(), "\"example\"");
+        for name in ["Path", "Bounds"] {
+            let resolved = registry
+                .cel_type_resolver()
+                .resolve_named_type(name, &[])
+                .unwrap();
+            assert_eq!(resolved.type_name(), name);
+            assert!(
+                resolved
+                    .complete_value_type()
+                    .unwrap()
+                    .same_shape(&(registry.get(name).unwrap().value_type_fn)())
+            );
+        }
     }
 
     #[test]

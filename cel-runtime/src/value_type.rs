@@ -185,8 +185,9 @@ where
 
 /// Identifies a value structurally, independently of aggregate storage markers.
 ///
-/// Callable metadata includes every parameter and the result. Task 5 supplies
-/// its concrete carrier and witness; no callable value can be constructed here.
+/// Callable metadata includes every parameter and the result. Its private
+/// ownership plan uses the existing shared `DynClosure` carrier; a public typed
+/// callable witness remains separate.
 ///
 /// # Examples
 ///
@@ -202,7 +203,7 @@ pub enum ValueKind {
     Tuple(Vec<AssociatedType>),
     /// One complete homogeneous element descriptor.
     Array(ValueType),
-    /// Complete semantic callable signature, without an execution carrier.
+    /// Complete semantic callable signature for the shared closure carrier.
     Callable {
         /// Parameter types in source order.
         parameters: Vec<ValueType>,
@@ -304,6 +305,29 @@ impl ValueType {
         Self::leaf::<T>()
             .with_clone::<Leaf<T>>()
             .expect("identical leaf representation")
+    }
+
+    /// Describes a known signature using the existing shared closure carrier.
+    ///
+    /// Cloning shares the compiled body, independent of parameter/result clone
+    /// capabilities. Equality is unavailable; formatting describes the carrier.
+    /// This constructor installs ownership directly from the statically known
+    /// carrier, not from an opaque leaf witness.
+    pub(crate) fn callable(parameters: Vec<ValueType>, result: ValueType) -> Self {
+        Self(Arc::new(Plan {
+            kind: ValueKind::Callable {
+                parameters,
+                result: Box::new(result),
+            },
+            layout: Layout::new::<crate::DynClosure>(),
+            leaf_drop: Some(drop_leaf::<crate::DynClosure>),
+            clone_hook: Some(clone_leaf::<crate::DynClosure>),
+            equality_hook: None,
+            debug_hook: Some(debug_leaf::<crate::DynClosure>),
+            cloneable: true,
+            comparable: false,
+            debuggable: true,
+        }))
     }
 
     /// Describes a homogeneous array using the fixed descriptor-free header.
@@ -415,6 +439,34 @@ impl ValueType {
     /// ```
     pub fn same_shape(&self, other: &Self) -> bool {
         self.layout() == other.layout() && same_kind(self.kind(), other.kind())
+    }
+
+    /// Checks concrete identity for a legacy conversion that names only a host leaf.
+    ///
+    /// Structural values require explicit representation witnesses, regardless
+    /// of a shared carrier ID or equal layout. This checks metadata only and
+    /// does not change the existing typed segment conversion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for structural descriptors or a different leaf identity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::any::TypeId;
+    /// use cel_runtime::value_type::ValueType;
+    /// assert!(ValueType::leaf::<String>()
+    ///     .validate_opaque_leaf(TypeId::of::<String>()).is_ok());
+    /// assert!(ValueType::tuple(vec![]).unwrap()
+    ///     .validate_opaque_leaf(TypeId::of::<()>()).is_err());
+    /// ```
+    pub fn validate_opaque_leaf(&self, type_id: TypeId) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            matches!(self.kind(), ValueKind::Leaf(id) if *id == type_id),
+            "value requires a matching opaque leaf or an explicit structural witness"
+        );
+        Ok(())
     }
 
     /// Installs a concrete clone adapter after validating the entire witness.
@@ -537,7 +589,7 @@ impl ValueType {
         self.0.debug_hook
     }
 
-    /// Returns the registered leaf destructor, absent for structural aggregates.
+    /// Returns the concrete leaf or callable destructor, absent for tuples and arrays.
     pub(crate) fn leaf_drop(&self) -> Option<DropHook> {
         self.0.leaf_drop
     }
@@ -625,6 +677,38 @@ unsafe fn debug_leaf<T: Debug>(pointer: *const u8, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::{ValueKind, ValueType, same_kind};
+
+    /// Rejects structural descriptors when a legacy host conversion names only a leaf.
+    #[test]
+    fn complete_factory_legacy_leaf_validation_requires_concrete_identity() {
+        use std::any::TypeId;
+        assert!(
+            ValueType::leaf::<()>()
+                .validate_opaque_leaf(TypeId::of::<()>())
+                .is_ok()
+        );
+        assert!(
+            ValueType::leaf::<i32>()
+                .validate_opaque_leaf(TypeId::of::<u32>())
+                .is_err()
+        );
+        for (structural, marker) in [
+            (
+                ValueType::tuple(vec![]).unwrap(),
+                TypeId::of::<crate::CNil<()>>(),
+            ),
+            (
+                ValueType::array(ValueType::leaf::<i32>()),
+                TypeId::of::<crate::Array<i32>>(),
+            ),
+            (
+                ValueType::callable(vec![], ValueType::leaf::<()>()),
+                TypeId::of::<crate::DynClosure>(),
+            ),
+        ] {
+            assert!(structural.validate_opaque_leaf(marker).is_err());
+        }
+    }
 
     /// Builds semantic callable metadata without constructing an execution carrier.
     fn signature(parameter: ValueType, result: ValueType) -> ValueKind {

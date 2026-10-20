@@ -46,6 +46,105 @@ pub(crate) struct ClosureSignature {
     pub(crate) result: ValueType,
 }
 
+impl ClosureSignature {
+    /// Converts known recursive metadata without reinterpreting legacy storage.
+    ///
+    /// # Errors
+    /// Returns an error for missing or mismatched leaf factories, unknown nested
+    /// callable signatures, or an unrepresentable canonical tuple layout.
+    /// - Complexity: O(n) traversal time and output space for n signature nodes,
+    ///   excluding leaf factory costs.
+    fn complete(
+        &self,
+        leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+    ) -> anyhow::Result<crate::value_type::ValueType> {
+        let parameters = self
+            .parameters
+            .iter()
+            .map(|parameter| complete_legacy_value_type(parameter, leaf))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(crate::value_type::ValueType::callable(
+            parameters,
+            complete_legacy_value_type(&self.result, leaf)?,
+        ))
+    }
+}
+
+/// Resolves one concrete legacy leaf through a previously monomorphized factory.
+///
+/// # Errors
+/// Returns an error if the factory is missing, structural, or describes another
+/// concrete type or layout. A closure marker without a signature is rejected.
+fn complete_leaf(
+    id: TypeId,
+    size: usize,
+    align: usize,
+    leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+) -> anyhow::Result<crate::value_type::ValueType> {
+    anyhow::ensure!(
+        id != TypeId::of::<DynClosure>(),
+        "closure signature metadata is unavailable"
+    );
+    let complete =
+        leaf(id).ok_or_else(|| anyhow::anyhow!("complete leaf factory is unavailable"))?;
+    complete.validate_opaque_leaf(id)?;
+    anyhow::ensure!(
+        complete.layout().size() == size && complete.layout().align() == align,
+        "complete leaf factory layout mismatch"
+    );
+    Ok(complete)
+}
+
+/// Converts a recursive legacy array element shape, not its different header.
+///
+/// # Errors
+/// Returns an error if a required concrete leaf factory or signature is unavailable.
+/// - Complexity: O(n) time and output space for n nested array nodes.
+fn complete_array_element(
+    element: &crate::ArrayElementType,
+    leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+) -> anyhow::Result<crate::value_type::ValueType> {
+    if let Some(nested) = element.nested() {
+        Ok(crate::value_type::ValueType::array(complete_array_element(
+            nested, leaf,
+        )?))
+    } else {
+        complete_leaf(element.type_id(), element.size(), element.align(), leaf)
+    }
+}
+
+/// Converts recursive legacy semantic metadata into canonical metadata only.
+///
+/// # Errors
+/// Returns an error for unavailable signatures/factories or invalid tuple layout.
+/// - Complexity: O(n) time and output space for n recursive descriptor nodes.
+fn complete_legacy_value_type(
+    value: &ValueType,
+    leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+) -> anyhow::Result<crate::value_type::ValueType> {
+    use crate::value_type::{AssociatedType, ValueType as Complete};
+    if let Some(signature) = &value.callable {
+        return signature.complete(leaf);
+    }
+    if let Some(fields) = value.tuple_elements() {
+        return Complete::tuple(
+            fields
+                .iter()
+                .map(|field| {
+                    Ok(AssociatedType {
+                        offset: 0,
+                        value_type: complete_legacy_value_type(&field.value_type, leaf)?,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        );
+    }
+    if let Some(element) = value.array_element() {
+        return Ok(Complete::array(complete_array_element(element, leaf)?));
+    }
+    complete_leaf(value.type_id(), value.size(), value.align(), leaf)
+}
+
 /// Compares complete known signatures without relying on the erased closure marker.
 ///
 /// - Complexity: O(number of recursive type nodes).
@@ -194,6 +293,46 @@ impl DynClosure {
     /// Returns the metadata retained for a typed CEL closure.
     pub(crate) fn signature(&self) -> Option<std::sync::Arc<ClosureSignature>> {
         self.0.signature.clone()
+    }
+
+    /// Converts a known legacy signature into complete canonical metadata.
+    ///
+    /// `leaf` looks up descriptors built while each concrete Rust type was
+    /// known; a `TypeId` is never used to synthesize a Rust monomorphization.
+    /// Factory capabilities are preserved independently. This converts metadata
+    /// only: the body, arguments, results, and interpreter storage do not change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an untyped closure (including [`Self::new`]), an
+    /// unknown nested callable signature, a missing or mismatched concrete leaf
+    /// factory, or an unrepresentable canonical tuple layout.
+    ///
+    /// - Complexity: O(n) traversal time and output space for n signature nodes,
+    ///   excluding leaf factory costs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_runtime::{DynClosure, DynSegment, value_type::{ValueKind, ValueType}};
+    /// use std::any::TypeId;
+    /// let mut body = DynSegment::new::<()>();
+    /// body.just(42i32);
+    /// let closure = DynClosure::typed(vec![], body).unwrap();
+    /// let complete = closure.complete_value_type(|id| {
+    ///     (id == TypeId::of::<i32>()).then(ValueType::cloneable_leaf::<i32>)
+    /// }).unwrap();
+    /// assert!(matches!(complete.kind(), ValueKind::Callable { .. }));
+    /// ```
+    pub fn complete_value_type(
+        &self,
+        mut leaf: impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+    ) -> anyhow::Result<crate::value_type::ValueType> {
+        self.0
+            .signature
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("closure signature metadata is unavailable"))?
+            .complete(&mut leaf)
     }
 
     /// Evaluates a previously checked borrowed raw argument frame into an independent stack.
@@ -360,6 +499,125 @@ impl DynClosure {
 mod tests {
     use super::*;
     use crate::dyn_segment::DynSegment;
+
+    /// Clones and drops the existing shared carrier without erasing its signature.
+    #[test]
+    fn complete_factory_callable_owns_shared_carrier() {
+        use crate::value_type::ValueType as Complete;
+        use std::mem::{ManuallyDrop, MaybeUninit};
+        let mut body = DynSegment::new::<()>();
+        body.just(42i32);
+        let closure = DynClosure::typed(vec![], body).unwrap();
+        let weak = Rc::downgrade(&closure.0);
+        let descriptor = Complete::callable(vec![], Complete::leaf::<i32>());
+        assert_eq!(descriptor.layout(), std::alloc::Layout::new::<DynClosure>());
+        assert!(descriptor.can_clone());
+        assert!(descriptor.can_debug());
+        assert!(!descriptor.can_compare());
+        let mut source = ManuallyDrop::new(closure);
+        let source_ptr = (&mut *source as *mut DynClosure).cast::<u8>();
+        let mut destination = MaybeUninit::<DynClosure>::uninit();
+        // SAFETY: Both locations have the statically known carrier layout and
+        // the descriptor describes this closure's signature.
+        unsafe {
+            crate::owned_value::clone_raw(&descriptor, source_ptr, destination.as_mut_ptr().cast());
+            crate::owned_value::drop_raw(&descriptor, source_ptr);
+            assert!(weak.upgrade().is_some());
+            assert_eq!(destination.assume_init_ref().call::<i32>(&[]).unwrap(), 42);
+            crate::owned_value::drop_raw(&descriptor, destination.as_mut_ptr().cast());
+        }
+        assert!(weak.upgrade().is_none());
+    }
+
+    /// Keeps tuple and array identities in migrated signatures.
+    #[test]
+    fn complete_factory_preserves_structural_callable_signatures() {
+        use crate::value_type::{ValueKind, ValueType as Complete};
+        let mut body = DynSegment::new::<()>();
+        body.just(1i32);
+        body.make_tuple(1, 0);
+        let parameter = ValueType::array(crate::ArrayElementType::cloneable::<i32>().unwrap());
+        let closure = DynClosure::typed(vec![parameter], body).unwrap();
+        let descriptor = closure
+            .complete_value_type(|id| {
+                (id == TypeId::of::<i32>()).then(Complete::cloneable_leaf::<i32>)
+            })
+            .unwrap();
+        let ValueKind::Callable { parameters, result } = descriptor.kind() else {
+            panic!("expected complete callable metadata");
+        };
+        assert!(parameters[0].same_shape(&Complete::array(Complete::leaf::<i32>())));
+        assert!(!parameters[0].same_shape(&Complete::array(Complete::leaf::<u32>())));
+        assert!(matches!(result.kind(), ValueKind::Tuple(fields) if fields.len() == 1));
+        assert!(!result.same_shape(&Complete::leaf::<i32>()));
+        assert!(!descriptor.same_shape(&Complete::callable(
+            vec![Complete::array(Complete::leaf::<u32>())],
+            (**result).clone()
+        )));
+        assert!(!descriptor.same_shape(&Complete::callable(
+            parameters.clone(),
+            Complete::leaf::<i32>()
+        )));
+    }
+
+    /// Retains known nested callable results and distinguishes canonical source unit.
+    #[test]
+    fn complete_factory_preserves_nested_callable_and_unit() {
+        use crate::value_type::{Nil, ValueKind, ValueRepr, ValueType as Complete};
+        let mut inner_body = DynSegment::new::<()>();
+        inner_body.make_tuple(0, 0);
+        let inner = DynClosure::typed(vec![ValueType::leaf::<()>()], inner_body).unwrap();
+        let mut body = DynSegment::new::<()>();
+        body.push_closure(inner);
+        let outer = DynClosure::typed(vec![], body).unwrap();
+        let complete = outer
+            .complete_value_type(|id| (id == TypeId::of::<()>()).then(Complete::leaf::<()>))
+            .unwrap();
+        let ValueKind::Callable { result, .. } = complete.kind() else {
+            panic!("expected callable");
+        };
+        let ValueKind::Callable { parameters, result } = result.kind() else {
+            panic!("expected nested callable");
+        };
+        assert!(parameters[0].same_shape(&Complete::leaf::<()>()));
+        assert!(!parameters[0].same_shape(&Nil::value_type()));
+        assert!(result.same_shape(&Nil::value_type()));
+        assert!(!result.same_shape(&Complete::leaf::<()>()));
+    }
+
+    /// Rejects unavailable signatures and missing or incorrectly keyed leaf factories.
+    #[test]
+    fn complete_factory_rejects_unknown_callable_metadata() {
+        use crate::value_type::ValueType as Complete;
+        assert!(
+            adder_closure()
+                .complete_value_type(|_| Some(Complete::leaf::<i32>()))
+                .is_err()
+        );
+        let mut body = DynSegment::new::<()>();
+        body.just(1i32);
+        let closure = DynClosure::typed(vec![], body).unwrap();
+        assert!(closure.complete_value_type(|_| None).is_err());
+        assert!(
+            closure
+                .complete_value_type(|_| Some(Complete::leaf::<u32>()))
+                .is_err()
+        );
+        assert!(
+            closure
+                .complete_value_type(|_| Some(Complete::array(Complete::leaf::<i32>())))
+                .is_err()
+        );
+
+        let mut body = DynSegment::new::<()>();
+        body.just(adder_closure());
+        let closure = DynClosure::typed(vec![], body).unwrap();
+        assert!(
+            closure
+                .complete_value_type(|_| Some(Complete::leaf::<DynClosure>()))
+                .is_err()
+        );
+    }
 
     fn adder_closure() -> DynClosure {
         let mut body = DynSegment::new::<()>();

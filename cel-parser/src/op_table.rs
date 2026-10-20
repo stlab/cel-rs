@@ -1410,6 +1410,19 @@ pub fn cast_source_types(target_name: &str) -> impl Iterator<Item = TypeId> {
 pub(crate) struct BuiltinScalarType {
     pub(crate) type_name: &'static str,
     pub(crate) element_type: fn() -> cel_runtime::ArrayElementType,
+    /// Builds complete metadata at the concrete built-in registration site.
+    pub(crate) value_type: fn() -> cel_runtime::value_type::ValueType,
+}
+
+/// Builds independent clone, equality, and formatting plans for a known built-in leaf.
+fn complete_builtin_leaf<T: Clone + PartialEq + std::fmt::Debug + 'static>()
+-> cel_runtime::value_type::ValueType {
+    use cel_runtime::value_type::{Leaf, ValueType};
+    ValueType::cloneable_leaf::<T>()
+        .with_equality::<Leaf<T>>()
+        .expect("same concrete leaf")
+        .with_debug::<Leaf<T>>()
+        .expect("same concrete leaf")
 }
 
 /// Declares the one built-in scalar table every built-in name lookup reads: the name list
@@ -1431,6 +1444,7 @@ macro_rules! builtin_scalars {
             Some(match name {
                 $($name => BuiltinScalarType {
                     type_name: $name,
+                    value_type: complete_builtin_leaf::<$ty>,
                     element_type: || {
                         cel_runtime::ArrayElementType::cloneable::<$ty>()
                             .expect("a built-in scalar type is never DynamicArray")
@@ -1483,6 +1497,7 @@ macro_rules! builtin_generic_types {
                 $($generic => match arg_type_name {
                     $($arg_name => Some(BuiltinScalarType {
                         type_name: concat!($generic, "(", $arg_name, ")"),
+                        value_type: complete_builtin_leaf::<$ty>,
                         element_type: || {
                             cel_runtime::ArrayElementType::cloneable::<$ty>()
                                 .expect("a built-in generic type is never DynamicArray")
@@ -1553,6 +1568,7 @@ pub(crate) fn builtin_generic_type_0(name: &str) -> Option<BuiltinScalarType> {
     match name {
         "RangeFull" => Some(BuiltinScalarType {
             type_name: "RangeFull",
+            value_type: complete_builtin_leaf::<std::ops::RangeFull>,
             element_type: || {
                 cel_runtime::ArrayElementType::cloneable::<std::ops::RangeFull>()
                     .expect("RangeFull is never DynamicArray")
