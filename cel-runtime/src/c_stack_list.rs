@@ -111,11 +111,34 @@ impl<H: 'static, T: List + CStackListHeadLimit> List for CStackList<H, T> {
     }
 }
 
-/// Converts tuples and list-like values into a [`CStackList`].
+/// Converts tuples and list-like values into a source-ordered [`CStackList`].
+///
+/// The first source field becomes the logical head, even though each `repr(C)`
+/// node physically stores its tail before its head.
+///
+/// # Examples
+///
+/// ```
+/// use cel_runtime::{IntoCStackList, IntoRustTuple};
+///
+/// let list = (String::from("left"), 7_u8).into_c_stack_list();
+/// assert_eq!(list.into_rust_tuple(), (String::from("left"), 7));
+/// ```
 pub trait IntoCStackList {
     /// The resulting list type.
     type Output: List;
-    /// Convert into a `CStackList` preserving element order.
+    /// Moves fields into a `CStackList`, preserving logical source order.
+    ///
+    /// - Complexity: Native tuple conversions take O(n) field moves for n fields,
+    ///   without heap allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_runtime::{IntoCStackList, List};
+    ///
+    /// assert_eq!((1_u8, 2_u16).into_c_stack_list().len(), 2);
+    /// ```
     fn into_c_stack_list(self) -> Self::Output;
 }
 
@@ -125,6 +148,84 @@ impl<T: IntoList> IntoCStackList for T {
         self.into_list()
     }
 }
+
+/// Moves a canonical list into a native Rust tuple in logical source order.
+///
+/// Canonical lists terminate in [`CNil<()>`]. Native tuple bridges support zero
+/// through twelve fields; lists themselves have no arity limit. Nested list
+/// fields remain lists rather than being recursively converted or flattened.
+/// Conversion requires no cloning, equality, or formatting capabilities.
+///
+/// # Examples
+///
+/// ```
+/// use cel_runtime::{IntoCStackList, IntoRustTuple};
+///
+/// let list = (String::from("left"), 7_u8, 2.5_f64).into_c_stack_list();
+/// let value: (String, u8, f64) = list.into_rust_tuple();
+/// assert_eq!(value, (String::from("left"), 7, 2.5));
+/// ```
+pub trait IntoRustTuple {
+    /// The native tuple type with fields in logical source order.
+    type Tuple;
+
+    /// Moves each logical field into the corresponding native tuple field.
+    ///
+    /// - Complexity: O(n) field moves for n fields, without heap allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_runtime::{IntoCStackList, IntoRustTuple};
+    ///
+    /// let value: (String,) = (String::from("owned"),)
+    ///     .into_c_stack_list()
+    ///     .into_rust_tuple();
+    /// assert_eq!(value.0, "owned");
+    /// ```
+    fn into_rust_tuple(self) -> Self::Tuple;
+}
+
+impl IntoRustTuple for CNil<()> {
+    type Tuple = ();
+
+    fn into_rust_tuple(self) -> Self::Tuple {}
+}
+
+/// Implements native tuple bridges by destructuring tail-first canonical nodes.
+macro_rules! impl_rust_tuple {
+    (@type) => { CNil<()> };
+    (@type $head:ident $(, $tail:ident)*) => {
+        CStackList<$head, impl_rust_tuple!(@type $($tail),*)>
+    };
+    (@pattern) => { CNil(()) };
+    (@pattern $head:ident $(, $tail:ident)*) => {
+        CStackList(impl_rust_tuple!(@pattern $($tail),*), $head)
+    };
+    ($($head:ident : $value:ident),+) => {
+        impl<$($head: 'static),+> IntoRustTuple for impl_rust_tuple!(@type $($head),+) {
+            type Tuple = ($($head,)+);
+
+            fn into_rust_tuple(self) -> Self::Tuple {
+                let impl_rust_tuple!(@pattern $($value),+) = self;
+                ($($value,)+)
+            }
+        }
+    };
+}
+
+impl_rust_tuple!(A: a);
+impl_rust_tuple!(A: a, B: b);
+impl_rust_tuple!(A: a, B: b, C: c);
+impl_rust_tuple!(A: a, B: b, C: c, D: d);
+impl_rust_tuple!(A: a, B: b, C: c, D: d, E: e);
+impl_rust_tuple!(A: a, B: b, C: c, D: d, E: e, F: f);
+impl_rust_tuple!(A: a, B: b, C: c, D: d, E: e, F: f, G: g);
+impl_rust_tuple!(A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h);
+impl_rust_tuple!(A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h, I: i);
+impl_rust_tuple!(A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h, I: i, J: j);
+impl_rust_tuple!(A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h, I: i, J: j, K: k);
+impl_rust_tuple!(A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h, I: i, J: j, K: k, L: l);
 
 impl<H: 'static, T: List + CStackListHeadLimit> ListIndex<RangeFrom<U0>> for CStackList<H, T> {
     type Output = CStackList<H, T>;

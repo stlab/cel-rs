@@ -60,6 +60,8 @@ pub mod raw_vec;
 pub mod segment;
 /// Tuple list implementation for type-safe tuple operations.
 pub mod tuple_list;
+/// Canonical tuple-list layout support.
+mod tuple_value;
 
 pub use array::Array;
 pub use c_stack_list::*;
