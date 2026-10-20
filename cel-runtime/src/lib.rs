@@ -50,6 +50,12 @@ pub mod dyn_segment;
 pub mod dynamic_array;
 /// Owned, type-erased CEL tuple value that can outlive a `DynSegment` evaluation.
 pub mod dynamic_sequence;
+/// Checked adapters for the existing external host boundaries.
+#[allow(
+    dead_code,
+    reason = "Prepared for the later atomic interpreter cutover."
+)]
+mod host_value_bridge;
 /// Traits for working with type lists and type information.
 pub mod list_traits;
 /// Memory management and alignment utilities for the runtime.

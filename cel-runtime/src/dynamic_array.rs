@@ -818,6 +818,21 @@ pub struct DynamicArray {
 }
 
 impl DynamicArray {
+    /// Borrows the concrete allocation header without interpreting element bytes.
+    pub(crate) fn allocation_parts(&self) -> (NonNull<u8>, usize, usize) {
+        (self.ptr, self.len, self.capacity)
+    }
+
+    /// Transfers the allocation and descriptor without destroying any element.
+    ///
+    /// The recipient assumes sole responsibility for elements and allocation.
+    pub(crate) fn into_allocation_parts(self) -> (NonNull<u8>, usize, usize, ArrayElementType) {
+        let this = ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop suppresses the only other descriptor owner.
+        let element = unsafe { std::ptr::read(&this.element) };
+        (this.ptr, this.len, this.capacity, element)
+    }
+
     /// Deep-clones this array using an exactly matching descriptor with validated clone hooks.
     ///
     /// # Safety

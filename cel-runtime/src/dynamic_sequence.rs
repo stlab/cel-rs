@@ -721,6 +721,15 @@ impl DynamicSequence {
         &self.shape
     }
 
+    /// Surrenders one field's destruction responsibility after its ownership move.
+    ///
+    /// # Safety
+    /// The indexed field must have just been moved into a unique new owner. This
+    /// sequence must only be destroyed or have other fields transferred afterward.
+    pub(crate) unsafe fn disarm_element(&mut self, index: usize) {
+        self.shape[index].drop = |_| {};
+    }
+
     /// Reads this sequence's element at `offset` via `read`, given a pointer to its start.
     ///
     /// # Safety

@@ -252,6 +252,7 @@ struct Plan {
     cloneable: bool,
     comparable: bool,
     debuggable: bool,
+    host_leaf: Option<crate::host_value_bridge::LeafBridge>,
 }
 
 /// Owns immutable recursive identity, canonical layout, and trusted operations.
@@ -290,6 +291,7 @@ impl ValueType {
             cloneable: false,
             comparable: false,
             debuggable: false,
+            host_leaf: Some(crate::host_value_bridge::LeafBridge::new::<T>()),
         }))
     }
 
@@ -327,6 +329,7 @@ impl ValueType {
             cloneable: true,
             comparable: false,
             debuggable: true,
+            host_leaf: None,
         }))
     }
 
@@ -355,6 +358,7 @@ impl ValueType {
             cloneable,
             comparable,
             debuggable,
+            host_leaf: None,
         }))
     }
 
@@ -396,6 +400,7 @@ impl ValueType {
             cloneable,
             comparable,
             debuggable,
+            host_leaf: None,
         })))
     }
 
@@ -491,6 +496,9 @@ impl ValueType {
         let plan = Arc::make_mut(&mut self.0);
         plan.clone_hook = Some(clone_leaf::<R::Value>);
         plan.cloneable = true;
+        if let Some(host) = &mut plan.host_leaf {
+            host.clone = Some(crate::element_cloner_for::<R::Value>());
+        }
         Ok(self)
     }
 
@@ -516,6 +524,9 @@ impl ValueType {
         let plan = Arc::make_mut(&mut self.0);
         plan.equality_hook = Some(equal_leaf::<R::Value>);
         plan.comparable = true;
+        if let Some(host) = &mut plan.host_leaf {
+            host.eq = Some(crate::element_eq_for::<R::Value>());
+        }
         Ok(self)
     }
 
@@ -541,6 +552,9 @@ impl ValueType {
         let plan = Arc::make_mut(&mut self.0);
         plan.debug_hook = Some(debug_leaf::<R::Value>);
         plan.debuggable = true;
+        if let Some(host) = &mut plan.host_leaf {
+            host.debug = Some(crate::element_debug_for::<R::Value>());
+        }
         Ok(self)
     }
 
@@ -592,6 +606,11 @@ impl ValueType {
     /// Returns the concrete leaf or callable destructor, absent for tuples and arrays.
     pub(crate) fn leaf_drop(&self) -> Option<DropHook> {
         self.0.leaf_drop
+    }
+
+    /// Borrows concrete host adapters installed while the leaf type is known.
+    pub(crate) fn host_leaf(&self) -> Option<&crate::host_value_bridge::LeafBridge> {
+        self.0.host_leaf.as_ref()
     }
 }
 
