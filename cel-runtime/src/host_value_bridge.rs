@@ -156,12 +156,13 @@ impl HostValuePlan {
         }
     }
 
-    /// Prepares leaves, tuples, and currently representable legacy arrays.
+    /// Prepares leaves, tuples, and supported legacy array conversions.
     ///
     /// # Errors
-    /// Rejects legacy wrapper leaves, callables, and tuple-valued array elements,
-    /// which have no existing external array representation. Other explicitly
-    /// opaque registered aggregates remain leaves.
+    /// Rejects legacy wrapper leaves, callables, and tuple-valued array elements.
+    /// Legacy arrays can hold `DynamicSequence` elements, but this bridge does
+    /// not prepare their recursive structural tuple metadata and conversion.
+    /// Other explicitly opaque registered aggregates remain leaves.
     ///
     /// - Complexity: O(n) time and storage for n descriptor nodes.
     pub(crate) fn new(value_type: ValueType) -> anyhow::Result<Self> {
@@ -180,7 +181,7 @@ impl HostValuePlan {
             ValueKind::Array(element) => {
                 anyhow::ensure!(
                     matches!(element.kind(), ValueKind::Leaf(_) | ValueKind::Array(_)),
-                    "existing external arrays do not represent tuple or callable elements"
+                    "host bridge does not support tuple or callable array elements"
                 );
                 vec![Self::new(element.clone())?]
             }
@@ -285,6 +286,24 @@ impl HostValuePlan {
         }
     }
 
+    /// Validates an external box without moving or cloning its owner.
+    ///
+    /// # Errors
+    /// Rejects missing input or any complete external representation mismatch.
+    /// - Complexity: O(v * d) time and O(d) call space for v values and
+    ///   external array metadata depth d (at least 1).
+    fn validate_box(&self, input: &Option<Box<dyn Any>>) -> anyhow::Result<()> {
+        let value = input
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing external owner"))?;
+        anyhow::ensure!(
+            (**value).type_id() == self.external_type().0,
+            "external box type mismatch"
+        );
+        let source = &**value as *const dyn Any as *const u8;
+        unsafe { self.validate_raw(source) }
+    }
+
     /// Imports a box, retaining its entire original owner on validation failure.
     ///
     /// # Errors
@@ -296,15 +315,7 @@ impl HostValuePlan {
         &self,
         input: &mut Option<Box<dyn Any>>,
     ) -> anyhow::Result<OwnedValue> {
-        let value = input
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing external owner"))?;
-        anyhow::ensure!(
-            (**value).type_id() == self.external_type().0,
-            "external box type mismatch"
-        );
-        let source = &**value as *const dyn Any as *const u8;
-        unsafe { self.validate_raw(source)? };
+        self.validate_box(input)?;
         let boxed = input.take().unwrap();
         match self.value_type.kind() {
             ValueKind::Leaf(_) => {
@@ -331,11 +342,11 @@ impl HostValuePlan {
         }
     }
 
-    /// Imports boxed tuple fields, cleaning completed fields on a later error.
+    /// Validates all boxed tuple fields before transferring any owner.
     ///
-    /// Each successful field transfer empties its slot. A failing field and all
-    /// subsequent fields retain their original owners. This intentionally permits
-    /// partial input consumption; the completed canonical prefix is destroyed.
+    /// Validation failure leaves every slot and its original owner unchanged.
+    /// After validation succeeds, each successful transfer empties its slot;
+    /// guarded construction cleans completed fields if a later conversion fails.
     ///
     /// # Errors
     /// Rejects non-tuples, wrong arity, missing slots, or mismatching fields.
@@ -350,7 +361,10 @@ impl HostValuePlan {
             inputs.len() == self.children.len(),
             "external tuple arity mismatch"
         );
-        // SAFETY: Each owner is validated before moving; ContainerPlan owns only completed fields.
+        for (child, input) in self.children.iter().zip(inputs.iter()) {
+            child.validate_box(input)?;
+        }
+        // SAFETY: All owners are validated before moving; ContainerPlan owns only completed fields.
         unsafe {
             plan.construct(|index, destination| {
                 let mut owner = self.children[index].import_box(&mut inputs[index])?;
@@ -873,9 +887,9 @@ mod tests {
         }
     }
 
-    /// Destroys only the completed canonical prefix when a later boxed conversion fails.
+    /// Retains every original box when a later field has the wrong concrete identity.
     #[test]
-    fn conversion_error_cleans_prefix_and_retains_failing_and_suffix_owners() {
+    fn field_identity_mismatch_retains_all_original_owners() {
         let drops = Rc::new(RefCell::new(Vec::new()));
         let plan = HostValuePlan::new(tuple(vec![
             ValueType::leaf::<Tracked>(),
@@ -888,12 +902,106 @@ mod tests {
             Some(Box::new(Tracked(1, drops.clone()))),
             Some(Box::new(Tracked(2, drops.clone()))),
         ];
+        let pointers: Vec<_> = inputs
+            .iter()
+            .map(|input| &**input.as_ref().unwrap() as *const dyn Any as *const u8)
+            .collect();
         assert!(plan.import_elements(&mut inputs).is_err());
-        assert_eq!(&*drops.borrow(), &[0]);
-        assert!(inputs[0].is_none());
-        assert!(inputs[1].is_some() && inputs[2].is_some());
+        assert!(drops.borrow().is_empty());
+        for (input, pointer) in inputs.iter().zip(pointers) {
+            let retained = input.as_ref().unwrap().downcast_ref::<Tracked>().unwrap();
+            assert_eq!(retained as *const Tracked as *const u8, pointer);
+        }
         drop(inputs);
         assert_eq!(&*drops.borrow(), &[0, 1, 2]);
+    }
+
+    /// Retains an earlier native owner when a later required slot is absent.
+    #[test]
+    fn missing_later_field_retains_original_owner() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let plan = HostValuePlan::new(tuple(vec![
+            ValueType::leaf::<Tracked>(),
+            ValueType::leaf::<u32>(),
+        ]))
+        .unwrap();
+        let original = Box::new(Tracked(0, drops.clone()));
+        let pointer = &*original as *const Tracked;
+        let mut inputs: Vec<Option<Box<dyn Any>>> = vec![Some(original), None];
+        assert!(plan.import_elements(&mut inputs).is_err());
+        assert!(drops.borrow().is_empty());
+        let retained = inputs[0]
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<Tracked>()
+            .unwrap();
+        assert_eq!(retained as *const Tracked, pointer);
+        assert!(inputs[1].is_none());
+        drop(inputs);
+        assert_eq!(&*drops.borrow(), &[0]);
+    }
+
+    /// Checks nested tuple and array identities before taking any native owner.
+    #[test]
+    fn nested_field_mismatch_retains_all_original_owners() {
+        for (descriptor, original) in [
+            (
+                tuple(vec![registered::<u32>()]),
+                Box::new(DynamicSequence::from_tuple((String::from("retained"),))) as Box<dyn Any>,
+            ),
+            (
+                ValueType::array(ValueType::array(registered::<u32>())),
+                Box::new(
+                    DynamicArray::try_from_vec(vec![
+                        DynamicArray::try_from_vec(vec![String::from("retained")]).unwrap(),
+                    ])
+                    .unwrap(),
+                ) as Box<dyn Any>,
+            ),
+        ] {
+            let drops = Rc::new(RefCell::new(Vec::new()));
+            let plan = HostValuePlan::new(tuple(vec![
+                ValueType::leaf::<Tracked>(),
+                descriptor,
+                ValueType::leaf::<Tracked>(),
+            ]))
+            .unwrap();
+            let mut inputs: Vec<Option<Box<dyn Any>>> = vec![
+                Some(Box::new(Tracked(0, drops.clone()))),
+                Some(original),
+                Some(Box::new(Tracked(2, drops.clone()))),
+            ];
+            let pointers: Vec<_> = inputs
+                .iter()
+                .map(|input| &**input.as_ref().unwrap() as *const dyn Any as *const u8)
+                .collect();
+            assert!(plan.import_elements(&mut inputs).is_err());
+            assert!(drops.borrow().is_empty());
+            for (input, pointer) in inputs.iter().zip(pointers) {
+                assert_eq!(
+                    &**input.as_ref().unwrap() as *const dyn Any as *const u8,
+                    pointer
+                );
+            }
+            let retained = inputs[1].take().unwrap();
+            if retained.is::<DynamicSequence>() {
+                let (text,): (String,) = retained
+                    .downcast::<DynamicSequence>()
+                    .unwrap()
+                    .try_into_tuple()
+                    .unwrap();
+                assert_eq!(text, "retained");
+            } else {
+                let rows = retained
+                    .downcast::<DynamicArray>()
+                    .unwrap()
+                    .try_into_vec::<DynamicArray>()
+                    .unwrap();
+                assert_eq!(rows[0].try_as_slice::<String>().unwrap(), &["retained"]);
+            }
+            drop(inputs);
+            assert_eq!(&*drops.borrow(), &[0, 2]);
+        }
     }
 
     /// Converts nested legacy array headers rather than copying wrapper bytes.
@@ -1003,9 +1111,9 @@ mod tests {
         assert_eq!(nested.try_to_tuple::<(Foreign,)>().unwrap(), (4..=9,));
     }
 
-    /// Cleans a nested completed prefix exactly once on a later outer-field error.
+    /// Retains nested legacy owners when a later outer field fails validation.
     #[test]
-    fn conversion_error_drops_nested_prefix_in_reverse_source_order() {
+    fn later_field_mismatch_retains_nested_legacy_owner() {
         let drops = Rc::new(RefCell::new(Vec::new()));
         let plan = HostValuePlan::new(tuple(vec![
             tuple(vec![
@@ -1036,9 +1144,32 @@ mod tests {
         let nested = DynamicSequence::from_dyn_elements(elements.into());
         let mut inputs: Vec<Option<Box<dyn Any>>> =
             vec![Some(Box::new(nested)), Some(Box::new(-1i32))];
+        let pointer = inputs[0]
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<DynamicSequence>()
+            .unwrap() as *const DynamicSequence;
         assert!(plan.import_elements(&mut inputs).is_err());
-        assert_eq!(&*drops.borrow(), &[1, 0]);
+        assert!(drops.borrow().is_empty());
+        assert_eq!(
+            inputs[0]
+                .as_ref()
+                .unwrap()
+                .downcast_ref::<DynamicSequence>()
+                .unwrap() as *const DynamicSequence,
+            pointer
+        );
+        assert_eq!(
+            *inputs[1].as_ref().unwrap().downcast_ref::<i32>().unwrap(),
+            -1
+        );
+        inputs[1] = Some(Box::new(7u32));
+        let owner = plan.import_elements(&mut inputs).unwrap();
+        assert!(inputs.iter().all(Option::is_none));
+        assert!(drops.borrow().is_empty());
         drop(inputs);
+        assert!(drops.borrow().is_empty());
+        drop(owner);
         assert_eq!(&*drops.borrow(), &[1, 0]);
     }
 
