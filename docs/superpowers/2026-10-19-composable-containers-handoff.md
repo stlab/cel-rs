@@ -1,9 +1,9 @@
 # Composable CEL Containers — Implementation Handoff
 
-Status snapshot: 2026-10-19. Tasks 1–8 are implemented and reviewed.
-Task 9 supplies executable documentation and passes the complete required local
-gate. The controller's mutation-oriented final review is still pending; this
-document does not claim that review has happened. No push or PR was requested.
+Status snapshot: 2026-10-19. All nine tasks are implemented and reviewed.
+The whole-branch review's two findings are fixed and its scoped re-review
+approves both corrections. The complete required local gate passes again after
+those fixes. No push or PR was requested.
 The final two-finding fixwave below passes affected checks; scoped re-review
 remains pending until the controller supplies its verdict and fresh full gate.
 
@@ -105,8 +105,8 @@ Cargo prints the pre-existing third-party **`block v0.1.6` future-incompatibilit
 advisory** in desktop/workspace commands. That is not a project warning and was
 not introduced or suppressed here.
 
-Evidence directory (retained, ignored):
-`.superpowers/sdd/2026-10-19-cel-composable-containers/`.
+Evidence directory (archived outside the repository):
+`/Users/sean-parent/.copilot/session-state/3f9dbc0b-1ade-468d-80e2-b5a8009e0d85/files/cel-composable-containers-evidence/`.
 Each filename below is relative to that directory.
 
 | Exact command | Result | Log |
@@ -222,11 +222,13 @@ Edge/dx helpers. No new long-lived process is required by Task 9.
 - No newly discovered implementation finding remains deferred; no new GitHub
   issue was necessary. The existing nightly Cargo manifest warning is reported
   above as a toolchain caveat, not concealed as a clean nightly-Cargo build.
-- Controller still performs the mutation-oriented final review: reject missing
-  nested identity checks, incorrect canonical offsets, accidental
-  clone/equality bounds, and checks reintroduced into prepared invocation.
-  Task 9 adds executable contracts and sanitizer evidence, not a substitute for
-  that review. No agents/reviewers, push, PR, or merge occurred in Task 9.
+- The whole-branch review assessed nested identity checks, canonical offsets,
+  accidental capability bounds, and repeated prepared-invocation checks against
+  the contract tests and source. It found the two checker issues below; the
+  scoped re-review approves their corrections. No unresolved findings remain.
+  No source mutations were executed. Comparison probes instrument `same_shape`;
+  source inspection supplements them for direct identity checks or downcasts.
+  No push, PR, or merge occurred.
 
 ## Final review fixwave — concrete callable and range identities
 
@@ -278,9 +280,16 @@ git diff --check
 
 All pass: **1842 tests including doctests, 0 failed, 0 ignored**, no compiler,
 Clippy or rustdoc warnings. Detailed RED–GREEN commands/results and limitations
-are retained locally in
-`.superpowers/sdd/2026-10-19-cel-composable-containers/final-fix-report.md`.
+are retained in `final-fix-report.md` in the archived evidence directory above.
 The crop test remains untouched with its previously recorded SHA-256.
 No agents/reviewers, dependencies, UI edits, push, PR, or merge were used.
-The prior full gate is historical evidence only: the controller must run its
-fresh full gate after scoped re-review. **Scoped re-review pending**, not approved.
+The scoped re-review approves both fixes and finds no new breakage. After that
+review, the controller repeated all eleven required gate commands at
+`346e6f671bdfabe8316e1e071a2db03b37fe6a35`: **2569 workspace tests passed,
+0 failed, 4 ignored**, with **293 doctests passed, 0 failed, 4 ignored** in the
+separate doc run. Plain build, all five Clippy configurations, formatting,
+strict rustdoc, and diff checks pass. No project warnings remain; the existing
+third-party `block v0.1.6` Cargo advisory remains unchanged.
+Logs use the `final-gate-*.log` prefix in the archived evidence directory.
+The earlier AddressSanitizer run remains applicable to the unchanged runtime;
+the final fixes affect checker metadata and Adam filter checking only.
