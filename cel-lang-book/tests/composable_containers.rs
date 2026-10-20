@@ -103,7 +103,6 @@ fn reverse_rows(mut rows: Vec<RowValue>) -> Array<RowValue> {
 fn shared_native_and_interpreted_operation() {
     use cel_parser::{CELParser, OpLookup, OperationSignature, builtin_type_resolver};
     use cel_runtime::{ArrayOf, Cons, IntoCStackList, IntoRustTuple, Leaf, Nil};
-    use std::sync::Arc;
 
     type Row = Cons<Leaf<i32>, Cons<Leaf<bool>, Nil>>;
     let native = reverse_rows(vec![
@@ -127,7 +126,7 @@ fn shared_native_and_interpreted_operation() {
             name: "reverse_rows",
             operands: vec![shape.clone()],
             result: shape,
-            emit: Arc::new(|body, _| body.op1_vec::<Row, ArrayOf<Row>, _>(reverse_rows)),
+            emit: Box::new(|body, _| body.op1_vec::<Row, ArrayOf<Row>, _>(reverse_rows)),
         })
         .unwrap();
     let body = CELParser::new(lookup)

@@ -209,6 +209,12 @@ impl OwnedValue {
             skip: index,
         };
         self.live = false;
+        // The element allocation is handled below; release the header's metadata separately.
+        drop(
+            unsafe { &mut *self.allocation.pointer.as_ptr().cast::<RawArray>() }
+                .element_type
+                .take(),
+        );
         siblings.destroy();
         Ok(result)
     }
@@ -694,19 +700,7 @@ pub(crate) unsafe fn drop_raw(value_type: &ValueType, pointer: *mut u8) {
             };
             unsafe { prefix.destroy() };
         }
-        ValueKind::Array(element) => {
-            let raw = unsafe { &*pointer.cast::<RawArray>() };
-            let _allocation = Allocation {
-                pointer: raw.ptr.cast(),
-                layout: array_layout(element, raw.capacity),
-            };
-            let mut prefix = Prefix {
-                base: raw.ptr.as_ptr().cast(),
-                children: Children::Elements(element),
-                initialized: raw.len,
-            };
-            unsafe { prefix.destroy() };
-        }
+        ValueKind::Array(_) => unsafe { pointer.cast::<RawArray>().drop_in_place() },
         // No public constructor supplies callable storage before its carrier exists.
         ValueKind::Leaf(_) | ValueKind::Callable { .. } => unreachable!("missing ownership plan"),
     }
@@ -771,11 +765,12 @@ pub(crate) unsafe fn clone_raw(value_type: &ValueType, source: *const u8, destin
                 prefix.initialized += 1;
             }
             unsafe {
-                destination.cast::<RawArray>().write(RawArray {
-                    ptr: allocation.pointer.cast(),
-                    len: source.len,
+                destination.cast::<RawArray>().write(RawArray::from_erased(
+                    allocation.pointer.cast(),
+                    source.len,
                     capacity,
-                });
+                    element.clone(),
+                ));
             }
             prefix.initialized = 0;
             std::mem::forget(allocation);

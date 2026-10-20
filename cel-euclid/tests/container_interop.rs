@@ -1,7 +1,6 @@
 //! Foreign Euclid leaves compose with canonical containers without orphan impls.
 use cel_parser::{CELParser, OpLookup, OperationSignature, ResolvedLeafType, ResolvedType};
 use cel_runtime::{Array, ArrayOf, Cons, IntoCStackList, IntoRustTuple, Leaf, Nil};
-use std::sync::Arc;
 
 /// Distinguishes this external client's coordinate space from installed geometry.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,14 +49,14 @@ fn foreign_points_roundtrip_nested_lists_vectors_and_slices() {
         name: "roundtrip",
         operands: vec![shape("[(ClientPoint, [ClientPoint])]")],
         result: shape("[(ClientPoint, [ClientPoint])]"),
-        emit: Arc::new(|segment, _| segment.op1_vec::<Item, ArrayOf<Item>, _>(Array::from_vec)),
+        emit: Box::new(|segment, _| segment.op1_vec::<Item, ArrayOf<Item>, _>(Array::from_vec)),
     })
     .unwrap();
     ops.register_operation(OperationSignature {
         name: "borrowed",
         operands: vec![shape("[(ClientPoint, [ClientPoint])]")],
         result: shape("[(ClientPoint, [ClientPoint])]"),
-        emit: Arc::new(|segment, _| {
+        emit: Box::new(|segment, _| {
             segment.op1_slice::<Item, ArrayOf<Item>, _>(|values| Array::from_vec(values.to_vec()))
         }),
     })
@@ -66,7 +65,7 @@ fn foreign_points_roundtrip_nested_lists_vectors_and_slices() {
         name: "list",
         operands: vec![shape("(ClientPoint, [ClientPoint])")],
         result: shape("(ClientPoint, [ClientPoint])"),
-        emit: Arc::new(|segment, _| segment.op1_repr::<Item, Item, _>(|list| list)),
+        emit: Box::new(|segment, _| segment.op1_repr::<Item, Item, _>(|list| list)),
     })
     .unwrap();
     let mut parser = CELParser::with_type_resolver(ops, resolve);

@@ -27,7 +27,6 @@ fn arithmetic_respects_precedence() {
 fn registered_record_and_member_example() {
     use cel_parser::{OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
     use cel_runtime::ValueType;
-    use std::sync::Arc;
 
     /// A host-defined value, not a built-in CEL type.
     #[derive(Clone, Debug, PartialEq)]
@@ -44,7 +43,7 @@ fn registered_record_and_member_example() {
                 name: "value",
                 ty: scalar.clone().into(),
             }],
-            emit: Arc::new(|s, _, _, _| s.op1(|value: f64| Sample { value })),
+            emit: Box::new(|s, _, _, _| s.op1(|value: f64| Sample { value })),
         })
         .unwrap();
     lookup
@@ -52,7 +51,7 @@ fn registered_record_and_member_example() {
             name: "value",
             operands: vec![sample.into()],
             result: scalar.into(),
-            emit: Arc::new(|s, _| s.op1(|sample: Sample| sample.value)),
+            emit: Box::new(|s, _| s.op1(|sample: Sample| sample.value)),
         })
         .unwrap();
     let mut parser = CELParser::new(lookup);

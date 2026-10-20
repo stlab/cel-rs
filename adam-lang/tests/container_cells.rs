@@ -28,7 +28,7 @@ fn operations(types: &TypeRegistry, calls: Arc<AtomicUsize>) -> OpLookup {
         name: "nonempty",
         operands: vec![shape(types, "[(i32, [f64])]")],
         result: shape(types, "bool"),
-        emit: Arc::new(move |body, _| {
+        emit: Box::new(move |body, _| {
             let calls = calls.clone();
             body.op1_slice::<Pair, Leaf<bool>, _>(move |values| {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -41,7 +41,7 @@ fn operations(types: &TypeRegistry, calls: Arc<AtomicUsize>) -> OpLookup {
         name: "head",
         operands: vec![shape(types, "[(i32, [f64])]")],
         result: shape(types, "[(i32, [f64])]"),
-        emit: Arc::new(|body, _| {
+        emit: Box::new(|body, _| {
             body.op1_vec::<Pair, Pairs, _>(|mut values| {
                 values.truncate(1);
                 Array::from_vec(values)
@@ -495,7 +495,7 @@ fn failing_filter_cleans_candidates_and_preserves_aspiration() {
         name: "conform",
         operands: vec![shape(&types, "[(Tracked, [Tracked])]")],
         result: shape(&types, "[(Tracked, [Tracked])]"),
-        emit: Arc::new(|body, _| {
+        emit: Box::new(|body, _| {
             body.op1r_vec::<TrackedRow, TrackedRows, _>(|mut rows| {
                 rows.truncate(1);
                 anyhow::ensure!(
@@ -715,7 +715,7 @@ fn registered_callable_markers_keep_concrete_capabilities() {
         name: "successor",
         operands: vec![shape(&types, "i32")],
         result: shape(&types, "i32"),
-        emit: Arc::new(|body, _| {
+        emit: Box::new(|body, _| {
             body.op1r(|n: i32| n.checked_add(1).ok_or_else(|| anyhow::anyhow!("overflow")))
         }),
     })

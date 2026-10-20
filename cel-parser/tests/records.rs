@@ -44,7 +44,7 @@ fn compound_record_fields_preserve_arrays_tuples_and_callables() {
             name: "value",
             ty: field,
         }],
-        emit: Arc::new(move |segment, _, _, _| {
+        emit: Box::new(move |segment, _, _, _| {
             let observed = observed.clone();
             segment.op1_repr::<CompoundField, Leaf<CompoundRecord>, _>(move |value| {
                 observed.fetch_add(1, Ordering::SeqCst);
@@ -129,7 +129,7 @@ fn lookup() -> OpLookup {
                     ty: leaf::<f64>("f64").into(),
                 },
             ],
-            emit: Arc::new(|s, mapping, ambient, _| {
+            emit: Box::new(|s, mapping, ambient, _| {
                 assert_eq!(s.stack_offset_before_top(2)?, ambient);
                 match mapping {
                     [0, 1] => s.op2(|x: f64, y: f64| TestPoint { x, y }),
@@ -143,7 +143,7 @@ fn lookup() -> OpLookup {
         .register_record(RecordSchema {
             ty: leaf::<()>("Empty"),
             fields: vec![],
-            emit: Arc::new(|s, mapping, ambient, _| {
+            emit: Box::new(|s, mapping, ambient, _| {
                 assert!(mapping.is_empty());
                 assert_eq!(s.current_stack_offset(), ambient);
                 s.just(());
@@ -158,7 +158,7 @@ fn lookup() -> OpLookup {
                 name: "point",
                 ty: leaf::<TestPoint>("TestPoint").into(),
             }],
-            emit: Arc::new(|s, _, _, _| s.op1(|point: TestPoint| (point,))),
+            emit: Box::new(|s, _, _, _| s.op1(|point: TestPoint| (point,))),
         })
         .unwrap();
     lookup
@@ -166,7 +166,7 @@ fn lookup() -> OpLookup {
             name: "x",
             operands: vec![leaf::<TestPoint>("TestPoint").into()],
             result: leaf::<f64>("f64").into(),
-            emit: Arc::new(|s, _| s.op1(|point: TestPoint| point.x)),
+            emit: Box::new(|s, _| s.op1(|point: TestPoint| point.x)),
         })
         .unwrap();
     lookup.push_scope(|name, s, arity, _| {
@@ -284,7 +284,7 @@ fn registered_operator_results_precede_builtin_inference() {
         name: "+",
         operands: vec![leaf::<i32>("i32").into(), leaf::<i32>("i32").into()],
         result: leaf::<f64>("f64").into(),
-        emit: Arc::new(|s, _| s.op2(|a: i32, b: i32| f64::from(a) + f64::from(b))),
+        emit: Box::new(|s, _| s.op2(|a: i32, b: i32| f64::from(a) + f64::from(b))),
     })
     .unwrap();
     for source in ["1 + 2", "1.0 + 2.0"] {
@@ -320,7 +320,7 @@ fn unresolved_array_operands_do_not_select_known_results() {
             element: Box::new(leaf::<i32>("i32").into()),
         }],
         result: leaf::<usize>("usize").into(),
-        emit: Arc::new(|s, _| {
+        emit: Box::new(|s, _| {
             s.op1_repr::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>, cel_runtime::Leaf<usize>, _>(
                 |array| array.len(),
             )
@@ -361,7 +361,7 @@ fn mixed_operator_overloads_preserve_unresolved_operands() {
             leaf::<TestPoint>("TestPoint").into(),
         ],
         result: leaf::<TestPoint>("TestPoint").into(),
-        emit: Arc::new(|s, _| {
+        emit: Box::new(|s, _| {
             s.op2(|a: TestPoint, b: TestPoint| TestPoint {
                 x: a.x + b.x,
                 y: a.y + b.y,
@@ -407,7 +407,7 @@ fn mixed_operator_overloads_reject_known_incompatible_operands() {
                 leaf::<TestPoint>("TestPoint").into(),
             ],
             result: leaf::<TestPoint>("TestPoint").into(),
-            emit: Arc::new(|s, _| s.op2(|a: TestPoint, _: TestPoint| a)),
+            emit: Box::new(|s, _| s.op2(|a: TestPoint, _: TestPoint| a)),
         })
         .unwrap();
     for ops in [lookup(), registered] {
@@ -545,7 +545,7 @@ fn heterogeneous_source_order_drops_once() {
                     ty: leaf::<Aligned>("Aligned").into(),
                 },
             ],
-            emit: Arc::new(|s, mapping, ambient, _| {
+            emit: Box::new(|s, mapping, ambient, _| {
                 assert_eq!(mapping, [1, 0]);
                 assert_eq!(s.stack_offset_before_top(2)?, ambient);
                 s.op2(|aligned: Aligned, text: String| Owned { text, aligned })
@@ -775,7 +775,7 @@ fn invalid_field_sets_do_not_invoke_constructor() {
             name: "x",
             ty: leaf::<f64>("f64").into(),
         }],
-        emit: Arc::new(move |s, _, _, _| {
+        emit: Box::new(move |s, _, _, _| {
             count.fetch_add(1, Ordering::SeqCst);
             s.op1(|_: f64| ())
         }),
@@ -817,7 +817,7 @@ fn record_emitter_errors_keep_constructor_span() {
     ops.register_record(RecordSchema {
         ty: leaf::<()>("Failure"),
         fields: vec![],
-        emit: Arc::new(|_, _, _, _| anyhow::bail!("constructor setup failed")),
+        emit: Box::new(|_, _, _, _| anyhow::bail!("constructor setup failed")),
     })
     .unwrap();
     let source = "Failure {}";
@@ -888,7 +888,7 @@ fn record_array_descriptor_identity_is_exact() {
                 element: Box::new(leaf::<i32>("i32").into()),
             },
         }],
-        emit: Arc::new(|s, _, _, _| {
+        emit: Box::new(|s, _, _, _| {
             s.op1_repr::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>, cel_runtime::Leaf<()>, _>(
                 |_| (),
             )

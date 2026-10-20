@@ -17,6 +17,73 @@ fn shape(source: &str) -> cel_parser::ResolvedType {
         .unwrap()
 }
 
+/// Compiled constructors and operations outlive their uniquely owned emitters.
+#[test]
+fn compiled_segments_outlive_uniquely_owned_emitters() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Owns non-cloneable registration state until the lookup is dropped.
+    struct EmitterState(u32);
+
+    impl EmitterState {
+        /// Returns the offset copied into an executable operation.
+        fn offset(&self) -> u32 {
+            self.0
+        }
+    }
+
+    impl Drop for EmitterState {
+        /// Records release of the registration state.
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Holds the constructed record's value.
+    struct Sample(u32);
+
+    let scalar = ResolvedLeafType::new("u32", ValueType::leaf::<u32>());
+    let sample = ResolvedLeafType::new("Sample", ValueType::leaf::<Sample>());
+    let mut lookup = OpLookup::new();
+    let constructor_state = EmitterState(1);
+    lookup
+        .register_record(RecordSchema {
+            ty: sample.clone(),
+            fields: vec![RecordField {
+                name: "value",
+                ty: scalar.clone().into(),
+            }],
+            emit: Box::new(move |segment, _, _, _| {
+                let offset = constructor_state.offset();
+                segment.op1(move |value: u32| Sample(value + offset))
+            }),
+        })
+        .unwrap();
+    let operation_state = EmitterState(10);
+    lookup
+        .register_operation(OperationSignature {
+            name: "value",
+            operands: vec![sample.into()],
+            result: scalar.into(),
+            emit: Box::new(move |segment, _| {
+                let offset = operation_state.offset();
+                segment.op1(move |sample: Sample| sample.0 + offset)
+            }),
+        })
+        .unwrap();
+
+    let mut parser = CELParser::new(lookup);
+    let mut first = parser.parse_str("Sample { value: 2u32 }.value").unwrap();
+    let mut second = parser.parse_str("Sample { value: 5u32 }.value").unwrap();
+    assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+    drop(parser);
+    assert_eq!(DROPS.load(Ordering::SeqCst), 2);
+    assert_eq!(first.call0::<u32>().unwrap(), 13);
+    assert_eq!(second.call0::<u32>().unwrap(), 16);
+}
+
 /// Overloads and duplicate detection compare every recursive parameter, not erased carriers.
 #[test]
 fn complete_shapes_distinguish_overloads_and_reject_alias_duplicates() {
@@ -32,24 +99,24 @@ fn complete_shapes_distinguish_overloads_and_reject_alias_duplicates() {
     for (source, emitter) in [
         (
             "[(i32,)]",
-            Arc::new(|s: &mut DynSegment, _| {
+            Box::new(|s: &mut DynSegment, _| {
                 s.op1_repr::<ArrayOf<IntTuple>, ArrayOf<IntTuple>, _>(|value| value)
             }) as cel_parser::OperationEmitter,
         ),
         (
             "[(bool,)]",
-            Arc::new(|s: &mut DynSegment, _| {
+            Box::new(|s: &mut DynSegment, _| {
                 s.op1_repr::<ArrayOf<BoolTuple>, ArrayOf<BoolTuple>, _>(|value| value)
             }) as cel_parser::OperationEmitter,
         ),
         (
             "Fn((i32,), i32)",
-            Arc::new(|s: &mut DynSegment, _| s.op1_repr::<IntFn, IntFn, _>(|value| value))
+            Box::new(|s: &mut DynSegment, _| s.op1_repr::<IntFn, IntFn, _>(|value| value))
                 as cel_parser::OperationEmitter,
         ),
         (
             "Fn((bool,), bool)",
-            Arc::new(|s: &mut DynSegment, _| s.op1_repr::<BoolFn, BoolFn, _>(|value| value))
+            Box::new(|s: &mut DynSegment, _| s.op1_repr::<BoolFn, BoolFn, _>(|value| value))
                 as cel_parser::OperationEmitter,
         ),
     ] {
@@ -72,7 +139,7 @@ fn complete_shapes_distinguish_overloads_and_reject_alias_duplicates() {
             name: "identity",
             operands: vec![alias],
             result: shape("String"),
-            emit: Arc::new(|_, _| panic!("alias duplicate emitter must never run")),
+            emit: Box::new(|_, _| panic!("alias duplicate emitter must never run")),
         })
         .is_err()
     );
@@ -87,7 +154,7 @@ fn complete_shapes_distinguish_overloads_and_reject_alias_duplicates() {
                 name: "identity",
                 operands: vec![shape(source)],
                 result: shape("String"),
-                emit: Arc::new(|_, _| panic!("duplicate emitter must never run")),
+                emit: Box::new(|_, _| panic!("duplicate emitter must never run")),
             })
             .is_err()
         );
@@ -130,7 +197,7 @@ fn nullary_function_values_do_not_infer_their_result_until_called() {
         name: "constant",
         operands: vec![],
         result: shape("i32"),
-        emit: Arc::new(|segment, _| {
+        emit: Box::new(|segment, _| {
             segment.just(42i32);
             Ok(())
         }),
@@ -179,7 +246,7 @@ fn shadowing_lookup() -> OpLookup {
         name: "f",
         operands: vec![shape("i32")],
         result: shape("i32"),
-        emit: Arc::new(|segment, _| segment.op1(|value: i32| value)),
+        emit: Box::new(|segment, _| segment.op1(|value: i32| value)),
     })
     .unwrap();
     ops
@@ -247,14 +314,14 @@ fn genuine_registered_marker_aliases_remain_callable() {
             name: "f",
             operands: vec![shape("i32")],
             result: shape("i32"),
-            emit: Arc::new(|s, _| s.op1(|x: i32| x)),
+            emit: Box::new(|s, _| s.op1(|x: i32| x)),
         })
         .unwrap();
         ops.register_operation(OperationSignature {
             name: "g",
             operands: vec![shape("bool")],
             result: shape("bool"),
-            emit: Arc::new(|s, _| s.op1(|x: bool| x)),
+            emit: Box::new(|s, _| s.op1(|x: bool| x)),
         })
         .unwrap();
         ops
@@ -422,7 +489,7 @@ fn numeric(lookup: &mut OpLookup) {
             name: "min",
             operands: vec![leaf::<f64>().into(), leaf::<f64>().into()],
             result: leaf::<f64>().into(),
-            emit: Arc::new(|s, _| s.op2(f64::min)),
+            emit: Box::new(|s, _| s.op2(f64::min)),
         })
         .unwrap();
 }
@@ -435,7 +502,7 @@ fn custom(lookup: &mut OpLookup) {
             name: "min",
             operands: vec![leaf::<TestBox>().into()],
             result: leaf::<f64>().into(),
-            emit: Arc::new(|s, _| s.op1(|b: TestBox| b.0)),
+            emit: Box::new(|s, _| s.op1(|b: TestBox| b.0)),
         })
         .unwrap();
 }
@@ -516,7 +583,7 @@ fn duplicate_operand_signature_is_rejected() {
                 name: "min",
                 operands: vec![leaf::<f64>().into(), leaf::<f64>().into()],
                 result: leaf::<u32>().into(),
-                emit: Arc::new(|s, _| s.op2(|_: f64, _: f64| 0u32)),
+                emit: Box::new(|s, _| s.op2(|_: f64, _: f64| 0u32)),
             })
             .is_err()
     );
@@ -563,7 +630,7 @@ fn zero_arg_function_invokes_operation_not_marker() {
             name: "answer",
             operands: vec![],
             result: leaf::<u32>().into(),
-            emit: Arc::new(|s, _| {
+            emit: Box::new(|s, _| {
                 s.just(42u32);
                 Ok(())
             }),
@@ -600,7 +667,7 @@ fn schema(fields: Vec<RecordField>) -> RecordSchema {
     RecordSchema {
         ty: leaf::<TestBox>(),
         fields,
-        emit: Arc::new(|_, _, _, _| panic!("metadata only")),
+        emit: Box::new(|_, _, _, _| panic!("metadata only")),
     }
 }
 
@@ -660,7 +727,7 @@ fn full_operand_descriptors_control_dispatch() {
             name: "length",
             operands: vec![shape("[f64]")],
             result: leaf::<usize>().into(),
-            emit: Arc::new(|s, _| {
+            emit: Box::new(|s, _| {
                 s.op1_repr::<ArrayOf<Leaf<f64>>, Leaf<usize>, _>(|values| values.len())
             }),
         })
@@ -723,7 +790,7 @@ fn metadata_keeps_distinct_host_type_identities() {
                 name: "corner",
                 operands: vec![ResolvedLeafType::new("Box", ty.element_type().clone()).into()],
                 result: ty.into(),
-                emit: Arc::new(|_, _| Ok(())),
+                emit: Box::new(|_, _| Ok(())),
             })
             .unwrap();
     }
@@ -796,7 +863,7 @@ fn ordinary_call_preserves_ambient_and_drops_marker() {
             name: "text",
             operands: vec![],
             result: leaf::<String>().into(),
-            emit: Arc::new(|s, _| {
+            emit: Box::new(|s, _| {
                 s.just(String::from("result"));
                 Ok(())
             }),
@@ -823,7 +890,7 @@ fn registered_calls_in_closures_preserve_marker_type_checks() {
             name: "other",
             operands: vec![leaf::<f64>().into(), leaf::<f64>().into()],
             result: leaf::<f64>().into(),
-            emit: Arc::new(|s, _| s.op2(f64::max)),
+            emit: Box::new(|s, _| s.op2(f64::max)),
         })
         .unwrap();
     let mut parser = CELParser::new(lookup);

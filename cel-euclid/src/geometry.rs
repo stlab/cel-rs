@@ -6,7 +6,6 @@
 use crate::{Angle, Box2D, Point2D, Rect, Size2D, Transform2D, Vector2D, leaf};
 use anyhow::{Result, ensure};
 use cel_parser::{OpLookup, OperationSignature};
-use std::sync::Arc;
 
 /// Declares one distinct thread-safe callable marker per identifier.
 macro_rules! callables {
@@ -55,7 +54,7 @@ pub(crate) fn unary<A: 'static, R: 'static>(
         name,
         operands: vec![leaf::<A>(std::any::type_name::<A>()).into()],
         result: leaf::<R>(std::any::type_name::<R>()).into(),
-        emit: Arc::new(move |s, _| s.op1(op)),
+        emit: Box::new(move |s, _| s.op1(op)),
     })
 }
 
@@ -77,7 +76,7 @@ pub(crate) fn binary<A: 'static, B: 'static, R: 'static>(
             leaf::<B>(std::any::type_name::<B>()).into(),
         ],
         result: leaf::<R>(std::any::type_name::<R>()).into(),
-        emit: Arc::new(move |s, _| s.op2(op)),
+        emit: Box::new(move |s, _| s.op2(op)),
     })
 }
 
@@ -100,7 +99,7 @@ fn ternary<A: 'static, B: 'static, C: 'static, R: 'static>(
             leaf::<C>(std::any::type_name::<C>()).into(),
         ],
         result: leaf::<R>(std::any::type_name::<R>()).into(),
-        emit: Arc::new(move |s, _| s.op3(op)),
+        emit: Box::new(move |s, _| s.op3(op)),
     })
 }
 
@@ -210,7 +209,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
         name: "normalize",
         operands: vec![leaf::<Vector2D>("Vector2D").into()],
         result: leaf::<Vector2D>("Vector2D").into(),
-        emit: Arc::new(|s, _| s.op1r(normalize)),
+        emit: Box::new(|s, _| s.op1r(normalize)),
     })?;
     Ok(())
 }

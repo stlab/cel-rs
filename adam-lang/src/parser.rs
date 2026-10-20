@@ -2576,7 +2576,6 @@ mod tests {
     fn field_labels_and_member_names_are_not_cell_dependencies() {
         use cel_parser::{OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
         use cel_runtime::ValueType;
-        use std::sync::Arc;
         /// A record independent of any geometry library.
         #[derive(Clone, Debug, PartialEq)]
         struct TestPoint {
@@ -2599,7 +2598,7 @@ mod tests {
                         ty: scalar.clone().into(),
                     },
                 ],
-                emit: Arc::new(|s, order, _, _| {
+                emit: Box::new(|s, order, _, _| {
                     assert_eq!(order, [0, 1]);
                     s.op2(|x: f64, y: f64| TestPoint { x, y })
                 }),
@@ -2610,7 +2609,7 @@ mod tests {
                 name: "x",
                 operands: vec![point.into()],
                 result: scalar.into(),
-                emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.x)),
+                emit: Box::new(|s, _| s.op1(|p: TestPoint| p.x)),
             })
             .unwrap();
         let mut sheet = AdamParser::new(TypeRegistry::new(), lookup)
@@ -3542,7 +3541,7 @@ mod tests {
                     )
                     .into(),
                 }],
-                emit: Arc::new(|segment, _, _, _| segment.op1(|value: bool| value)),
+                emit: Box::new(|segment, _, _, _| segment.op1(|value: bool| value)),
             })
             .unwrap();
         let mut sheet = parser

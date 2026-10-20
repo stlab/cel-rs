@@ -6,7 +6,6 @@
 use anyhow::Result;
 use cel_parser::{OpLookup, OperationSignature, ResolvedLeafType};
 use cel_runtime::ValueType;
-use std::sync::Arc;
 
 /// Marker pushed for a bare `min` lookup; consumed by the paired `"()"` call.
 #[derive(Clone)]
@@ -77,17 +76,17 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             lookup.register_operation(OperationSignature {
                 name: "min", operands: vec![numeric_type::<$t>(); 2],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op2(|a: $t, b: $t| a.min(b))),
+                emit: Box::new(|segment, _| segment.op2(|a: $t, b: $t| a.min(b))),
             })?;
             lookup.register_operation(OperationSignature {
                 name: "max", operands: vec![numeric_type::<$t>(); 2],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op2(|a: $t, b: $t| a.max(b))),
+                emit: Box::new(|segment, _| segment.op2(|a: $t, b: $t| a.max(b))),
             })?;
             lookup.register_operation(OperationSignature {
                 name: "clamp", operands: vec![numeric_type::<$t>(); 3],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op3r(|x: $t, lo: $t, hi: $t| {
+                emit: Box::new(|segment, _| segment.op3r(|x: $t, lo: $t, hi: $t| {
                     if lo <= hi { Ok(x.clamp(lo, hi)) }
                     else { Err(anyhow::anyhow!("invalid clamp bounds")) }
                 })),
@@ -103,7 +102,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             lookup.register_operation(OperationSignature {
                 name: stringify!($method), operands: vec![numeric_type::<$t>()],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op1(|x: $t| x.$method())),
+                emit: Box::new(|segment, _| segment.op1(|x: $t| x.$method())),
             })?;
         )+ };
     }
@@ -112,7 +111,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             lookup.register_operation(OperationSignature {
                 name: "abs", operands: vec![numeric_type::<$t>()],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op1r(|x: $t| {
+                emit: Box::new(|segment, _| segment.op1r(|x: $t| {
                     x.checked_abs().ok_or_else(|| anyhow::anyhow!("arithmetic overflow"))
                 })),
             })?;
@@ -143,7 +142,6 @@ mod tests {
     fn independent_min_overload_composes_with_standard_library() -> Result<()> {
         use cel_parser::{OperationSignature, ResolvedLeafType};
         use cel_runtime::ValueType;
-        use std::sync::Arc;
 
         /// Names the host's independent overload installer.
         #[derive(Clone)]
@@ -162,7 +160,7 @@ mod tests {
                 name: "min",
                 operands: vec![ResolvedLeafType::new("Corner", ValueType::leaf::<Corner>()).into()],
                 result: ResolvedLeafType::new("f64", ValueType::leaf::<f64>()).into(),
-                emit: Arc::new(|segment, _| segment.op1(|corner: Corner| corner.0)),
+                emit: Box::new(|segment, _| segment.op1(|corner: Corner| corner.0)),
             })?;
             if !reverse {
                 install(&mut lookup);

@@ -167,7 +167,6 @@ fn callable_resolution_and_singleton_names() {
 #[test]
 fn host_vector_slice_and_list_registration() {
     use cel_parser::OperationSignature;
-    use std::sync::Arc;
     #[derive(Clone)]
     struct Mirror;
     type Item = Cons<Leaf<i32>, Cons<ArrayOf<Leaf<f64>>, Nil>>;
@@ -176,13 +175,13 @@ fn host_vector_slice_and_list_registration() {
     for (name, emitter) in [
         (
             "mirror",
-            Arc::new(|s: &mut cel_runtime::DynSegment, _| {
+            Box::new(|s: &mut cel_runtime::DynSegment, _| {
                 s.op1_vec::<Item, ArrayOf<Item>, _>(cel_runtime::Array::from_vec)
             }) as cel_parser::OperationEmitter,
         ),
         (
             "borrowed",
-            Arc::new(|s: &mut cel_runtime::DynSegment, _| {
+            Box::new(|s: &mut cel_runtime::DynSegment, _| {
                 s.op1_slice::<Item, ArrayOf<Item>, _>(|values| {
                     cel_runtime::Array::from_vec(values.to_vec())
                 })
@@ -292,7 +291,6 @@ fn known_invalid_projections_and_calls_are_diagnostics() {
 fn registered_callables_mix_with_source_closures() {
     use cel_parser::OperationSignature;
     use cel_runtime::{CNil, CStackList, Callable};
-    use std::sync::Arc;
     type Args = Cons<Leaf<i32>, Nil>;
     type Function = FnOf<Args, ArrayOf<Leaf<i32>>>;
     /// Returns one independently owned array for one native argument.
@@ -305,14 +303,14 @@ fn registered_callables_mix_with_source_closures() {
         name: "native",
         operands: vec![],
         result: resolved("Fn((i32,), [i32])"),
-        emit: Arc::new(|s, _| s.op0_repr::<Function, _>(|| Callable::from_fn(native))),
+        emit: Box::new(|s, _| s.op0_repr::<Function, _>(|| Callable::from_fn(native))),
     })
     .unwrap();
     ops.register_operation(OperationSignature {
         name: "prepared",
         operands: vec![],
         result: resolved("Fn((i32,), [i32])"),
-        emit: Arc::new(|s, _| {
+        emit: Box::new(|s, _| {
             let mut body = cel_runtime::DynSegment::new::<()>();
             body.push_argument(0, cel_runtime::ValueType::cloneable_leaf::<i32>())?;
             body.op1_repr::<Leaf<i32>, ArrayOf<Leaf<i32>>, _>(|value| {

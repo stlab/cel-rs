@@ -6,7 +6,6 @@
 //! ```
 //! use cel_parser::{OpLookup, OperationSignature, ResolvedLeafType};
 //! use cel_runtime::ValueType;
-//! use std::sync::Arc;
 //! #[derive(Clone)]
 //! struct Identity;
 //! let mut lookup = OpLookup::new();
@@ -14,12 +13,12 @@
 //! let ty = ResolvedLeafType::new("u32", ValueType::leaf::<u32>());
 //! lookup.register_operation(OperationSignature {
 //!     name: "identity", operands: vec![ty.clone().into()], result: ty.into(),
-//!     emit: Arc::new(|segment, _| segment.op1(|value: u32| value)),
+//!     emit: Box::new(|segment, _| segment.op1(|value: u32| value)),
 //! }).unwrap();
 //! assert_eq!(lookup.operation_signatures("identity").count(), 1);
 //! ```
 
-use std::{any::TypeId, sync::Arc};
+use std::any::TypeId;
 
 use anyhow::{Result, ensure};
 use cel_runtime::{DynSegment, ValueType};
@@ -31,13 +30,18 @@ use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, ResolvedType, Sour
 /// - Precondition: the stack ends with the declared operand descriptors.
 /// - Postcondition: success replaces those operands with the declared result.
 ///
-/// Emitters validate fallible setup before changing the segment.
-pub type OperationEmitter = Arc<dyn Fn(&mut DynSegment, SourceSpan) -> Result<()> + Send + Sync>;
+/// Emitters validate fallible setup before changing the segment. The lookup uniquely owns
+/// each emitter and invokes it only while compiling; segments own the emitted operations.
+/// Boxing a zero-sized, captureless closure does not allocate.
+pub type OperationEmitter = Box<dyn Fn(&mut DynSegment, SourceSpan) -> Result<()> + Send + Sync>;
 
 /// Consumes source-order fields using source-position to schema-position indices,
 /// the ambient stack byte offset, and the expression span.
+///
+/// The lookup uniquely owns this compile-time callback. Boxing a zero-sized,
+/// captureless closure does not allocate.
 pub type RecordEmitter =
-    Arc<dyn Fn(&mut DynSegment, &[usize], usize, SourceSpan) -> Result<()> + Send + Sync>;
+    Box<dyn Fn(&mut DynSegment, &[usize], usize, SourceSpan) -> Result<()> + Send + Sync>;
 
 /// Describes one named operation with complete concrete operand and result identities.
 ///
@@ -145,12 +149,11 @@ impl OpLookup {
     /// ```
     /// use cel_parser::{CELParser, OpLookup, RecordSchema, ResolvedLeafType};
     /// use cel_runtime::ValueType;
-    /// use std::sync::Arc;
     /// let mut lookup = OpLookup::new();
     /// lookup.register_record(RecordSchema {
     ///     ty: ResolvedLeafType::new("Empty", ValueType::leaf::<()>()),
     ///     fields: vec![],
-    ///     emit: Arc::new(|s, _, _, _| { s.just(()); Ok(()) }),
+    ///     emit: Box::new(|s, _, _, _| { s.just(()); Ok(()) }),
     /// }).unwrap();
     /// CELParser::new(lookup).parse_str("Empty {}").unwrap().call0::<()>().unwrap();
     /// ```
@@ -307,7 +310,7 @@ impl OpLookup {
             self.registered.functions.push(RegisteredFunction {
                 name,
                 marker: ResolvedLeafType::new(name, ValueType::cloneable_leaf::<M>()),
-                emit: Arc::new(move |segment, _| {
+                emit: Box::new(move |segment, _| {
                     segment.just(marker.clone());
                     Ok(())
                 }),
@@ -328,12 +331,11 @@ impl OpLookup {
     /// ```
     /// use cel_parser::{OpLookup, RecordSchema, ResolvedLeafType};
     /// use cel_runtime::ValueType;
-    /// use std::sync::Arc;
     /// let mut lookup = OpLookup::new();
     /// lookup.register_record(RecordSchema {
     ///     ty: ResolvedLeafType::new("Unit", ValueType::leaf::<()>()),
     ///     fields: vec![],
-    ///     emit: Arc::new(|segment, _, _, _| { segment.just(()); Ok(()) }),
+    ///     emit: Box::new(|segment, _, _, _| { segment.just(()); Ok(()) }),
     /// }).unwrap();
     /// assert!(lookup.record_schema("Unit").is_some());
     /// ```

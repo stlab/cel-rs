@@ -6,7 +6,6 @@
 
 use std::any::TypeId;
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use cel_runtime::ValueType;
 
@@ -182,9 +181,17 @@ impl TypeResolver for BuiltinTypeResolver {
 /// A host embedding `cel-parser` with its own [`TypeResolver`] (one that also knows
 /// host-specific custom types) can delegate any name it doesn't itself recognize to this
 /// resolver, so built-in types stay visible inside host-embedded CEL expressions.
+///
+/// The returned resolver is uniquely owned and zero-sized; its box does not allocate.
+///
+/// # Examples
+/// ```
+/// let resolver = cel_parser::builtin_type_resolver();
+/// assert!(resolver.resolve_named_type("u32", &[]).is_some());
+/// ```
 #[must_use]
-pub fn builtin_type_resolver() -> Arc<dyn TypeResolver> {
-    Arc::new(BuiltinTypeResolver)
+pub fn builtin_type_resolver() -> Box<dyn TypeResolver> {
+    Box::new(BuiltinTypeResolver)
 }
 
 /// Resolves `name`/`args` against `cel-parser`'s own built-in type resolver, without allocating
@@ -192,7 +199,7 @@ pub fn builtin_type_resolver() -> Arc<dyn TypeResolver> {
 ///
 /// Equivalent to `builtin_type_resolver().resolve_named_type(name, args)`, but for a host that
 /// only needs a one-off built-in fallback lookup (rather than a `TypeResolver` trait object to
-/// pass around), this avoids constructing a new `Arc` on every call.
+/// pass around), this avoids constructing a trait object.
 #[must_use]
 pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
     BuiltinTypeResolver.resolve_named_type(name, args)
@@ -1178,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_builtin_named_type_matches_the_arc_wrapped_resolver() {
+    fn resolve_builtin_named_type_matches_the_boxed_resolver() {
         let scalar = crate::resolve_builtin_named_type("i32", &[]).unwrap();
         assert_eq!(scalar.type_name(), "i32");
 

@@ -7,7 +7,6 @@ use crate::{Angle, Box2D, Point2D, Rect, Size2D, Transform2D, Vector2D, leaf};
 use anyhow::Result;
 use cel_parser::{OpLookup, RecordField, RecordSchema};
 use cel_runtime::{Cons, IntoRustTuple, Leaf, Nil};
-use std::sync::Arc;
 
 /// Holds two scalars in their evaluated source order.
 type Pair = Cons<Leaf<f64>, Cons<Leaf<f64>, Nil>>;
@@ -55,7 +54,7 @@ fn scalar_pair<T: 'static>(
                 ty: leaf::<f64>("f64").into(),
             })
             .collect(),
-        emit: Arc::new(move |s, mapping, ambient, _| {
+        emit: Box::new(move |s, mapping, ambient, _| {
             let mapping: [usize; 2] = mapping
                 .try_into()
                 .expect("validated two-field scalar schema");
@@ -91,7 +90,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
                 ty: leaf::<Size2D>("Size2D").into(),
             },
         ],
-        emit: Arc::new(|s, mapping, ambient, _| {
+        emit: Box::new(|s, mapping, ambient, _| {
             debug_assert!(matches!(mapping, [0, 1] | [1, 0]));
             s.make_tuple(2, ambient)?;
             if mapping == [0, 1] {
@@ -119,7 +118,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
                 ty: leaf::<Point2D>("Point2D").into(),
             },
         ],
-        emit: Arc::new(|s, mapping, ambient, _| {
+        emit: Box::new(|s, mapping, ambient, _| {
             debug_assert!(matches!(mapping, [0, 1] | [1, 0]));
             let reversed = mapping == [1, 0];
             s.make_tuple(2, ambient)?;
@@ -139,7 +138,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             name: "radians",
             ty: leaf::<f64>("f64").into(),
         }],
-        emit: Arc::new(|s, _, ambient, _| {
+        emit: Box::new(|s, _, ambient, _| {
             s.make_tuple(1, ambient)?;
             s.op1_repr::<Cons<Leaf<f64>, Nil>, Leaf<Angle>, _>(|value| {
                 let (radians,) = value.into_rust_tuple();
@@ -156,7 +155,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
                 ty: leaf::<f64>("f64").into(),
             })
             .collect(),
-        emit: Arc::new(|s, mapping, ambient, _| {
+        emit: Box::new(|s, mapping, ambient, _| {
             let mapping: [usize; 6] = mapping
                 .try_into()
                 .expect("validated six-field matrix schema");

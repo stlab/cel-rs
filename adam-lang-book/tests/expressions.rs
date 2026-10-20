@@ -23,7 +23,6 @@ fn registered_record_and_member_example() {
     use adam_lang::{AdamParser, TypeRegistry};
     use cel_parser::{OpLookup, OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
     use cel_runtime::ValueType;
-    use std::sync::Arc;
 
     /// A host-defined type with a named field.
     #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,7 +41,7 @@ fn registered_record_and_member_example() {
                 name: "value",
                 ty: scalar.clone().into(),
             }],
-            emit: Arc::new(|s, _, _, _| s.op1(|value: f64| Sample { value })),
+            emit: Box::new(|s, _, _, _| s.op1(|value: f64| Sample { value })),
         })
         .unwrap();
     lookup
@@ -50,7 +49,7 @@ fn registered_record_and_member_example() {
             name: "value",
             operands: vec![sample.into()],
             result: scalar.into(),
-            emit: Arc::new(|s, _| s.op1(|sample: Sample| sample.value)),
+            emit: Box::new(|s, _| s.op1(|sample: Sample| sample.value)),
         })
         .unwrap();
     let source = "sheet samples {

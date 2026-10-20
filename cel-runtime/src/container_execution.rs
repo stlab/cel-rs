@@ -153,16 +153,24 @@ impl ContainerPlan {
                 self.length
             };
             unsafe {
-                header.pointer.as_ptr().cast::<RawArray>().write(RawArray {
-                    ptr: allocation.pointer.cast(),
-                    len: self.length,
-                    capacity,
-                });
+                let ValueKind::Array(element) = self.value_type.kind() else {
+                    unreachable!("array header")
+                };
+                header
+                    .pointer
+                    .as_ptr()
+                    .cast::<RawArray>()
+                    .write(RawArray::from_erased(
+                        allocation.pointer.cast(),
+                        self.length,
+                        capacity,
+                        element.clone(),
+                    ));
             }
             prefix.initialized = 0;
             drop(prefix);
             std::mem::forget(allocation);
-            // SAFETY: All children and the descriptor-free header are initialized.
+            // SAFETY: All children and the owning header are initialized.
             Ok(unsafe { OwnedValue::from_allocation(header, self.value_type.clone()) })
         } else {
             prefix.initialized = 0;
@@ -243,6 +251,7 @@ impl StackFramePlan {
             })
         }
         .expect("raw moves cannot return an error");
+        stack.release_top(fields.len());
         unsafe { stack.truncate_to(self.ambient, false) };
         result
     }
@@ -396,6 +405,7 @@ impl ResultPlan {
                 |destination| clone_raw(&self.value_type, source, destination),
             );
         }
+        rollback.stack.own_top(self.value_type.clone());
         rollback.armed = false;
     }
 
@@ -408,6 +418,7 @@ impl ResultPlan {
     pub(crate) unsafe fn take_typed<T>(&self, stack: &mut RawStack) -> T {
         debug_assert_eq!(stack.len(), self.end);
         let value = unsafe { stack.read_at(self.offset, |pointer| pointer.cast::<T>().read()) };
+        stack.release_top(1);
         unsafe { stack.truncate_to(self.ambient, false) };
         value
     }
@@ -443,6 +454,7 @@ impl ResultPlan {
                 |destination| value.move_into(destination),
             );
         }
+        stack.own_top(self.value_type.clone());
     }
 
     /// Removes a matching live result, leaving ambient storage unchanged.
@@ -464,6 +476,7 @@ impl ResultPlan {
                     self.value_type.layout().size(),
                 );
             });
+            stack.release_top(1);
             stack.truncate_to(self.ambient, false);
             OwnedValue::from_allocation(allocation, self.value_type.clone())
         }

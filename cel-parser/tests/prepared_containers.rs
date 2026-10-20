@@ -219,7 +219,7 @@ fn parsed_registered_results_retain_optional_capabilities() {
                 name: "value",
                 ty: ResolvedLeafType::leaf::<i32>("i32").unwrap().into(),
             }],
-            emit: Arc::new(|segment, _, _, _| segment.op1(Payload)),
+            emit: Box::new(|segment, _, _, _| segment.op1(Payload)),
         })
         .unwrap();
     let mut body = CELParser::new(lookup)

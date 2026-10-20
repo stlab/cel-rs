@@ -1,7 +1,5 @@
 //! Contract tests for registry-backed expression checking in every sheet context.
 
-use std::sync::Arc;
-
 use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
 use cel_parser::{OpLookup, OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
 use cel_runtime::ValueType;
@@ -36,7 +34,7 @@ fn environment() -> (TypeRegistry, OpLookup) {
                 name: "x",
                 ty: leaf::<f64>("f64").into(),
             }],
-            emit: Arc::new(|s, _, _, _| s.op1(|x: f64| TestPoint { x })),
+            emit: Box::new(|s, _, _, _| s.op1(|x: f64| TestPoint { x })),
         })
         .unwrap();
     lookup
@@ -44,7 +42,7 @@ fn environment() -> (TypeRegistry, OpLookup) {
             name: "x",
             operands: vec![leaf::<TestPoint>("TestPoint").into()],
             result: leaf::<f64>("f64").into(),
-            emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.x)),
+            emit: Box::new(|s, _| s.op1(|p: TestPoint| p.x)),
         })
         .unwrap();
     (registry, lookup)

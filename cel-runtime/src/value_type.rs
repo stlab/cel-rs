@@ -556,7 +556,7 @@ impl ValueType {
         }))
     }
 
-    /// Describes a homogeneous array using the fixed descriptor-free header.
+    /// Describes a homogeneous array using the fixed owning header.
     ///
     /// Recursive capabilities are present exactly when the element supports them.
     ///

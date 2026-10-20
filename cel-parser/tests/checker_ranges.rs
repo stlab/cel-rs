@@ -127,7 +127,6 @@ fn all_builtin_range_endpoints_agree() {
 fn registered_range_overload_retains_its_result() {
     use cel_parser::{OperationSignature, ResolvedLeafType};
     use cel_runtime::ValueType;
-    use std::sync::Arc;
     let mut lookup = OpLookup::new();
     let int = ResolvedLeafType::new("i32", ValueType::leaf::<i32>());
     lookup
@@ -135,7 +134,7 @@ fn registered_range_overload_retains_its_result() {
             name: "range_inclusive",
             operands: vec![int.clone().into(), int.into()],
             result: ResolvedLeafType::new("bool", ValueType::leaf::<bool>()).into(),
-            emit: Arc::new(|s, _| s.op2(|a: i32, b: i32| a <= b)),
+            emit: Box::new(|s, _| s.op2(|a: i32, b: i32| a <= b)),
         })
         .unwrap();
     let source = "(|x: bool| x)(1i32..=2i32)";

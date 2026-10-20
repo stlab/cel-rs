@@ -7,19 +7,9 @@
 //! operation on the existing `RawSegment`. Its unsafe execution must receive
 //! the exact live frame described by the plan.
 
+use crate::RawSegment;
 use crate::container_execution::stack_position;
-use crate::owned_value::drop_raw;
 use crate::value_type::{ArrayOf, ValueRepr, ValueType};
-use crate::{RawSegment, RawStack};
-use std::rc::Rc;
-
-#[cfg(test)]
-thread_local! {
-    /// Counts retained cleanup-slot descriptors on the current test thread.
-    pub(crate) static LIVE_CLEANUP_SLOTS: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
-}
 
 /// Binds one canonical value to an absolute stack position and its ambient length.
 struct Slot {
@@ -35,8 +25,6 @@ impl Slot {
     /// Rejects an aligned position or end outside allocation bounds.
     fn new(before: usize, value_type: ValueType) -> anyhow::Result<(Self, usize)> {
         let (offset, end) = stack_position(before, value_type.layout())?;
-        #[cfg(test)]
-        LIVE_CLEANUP_SLOTS.with(|count| count.set(count.get() + 1));
         Ok((
             Self {
                 before,
@@ -46,156 +34,19 @@ impl Slot {
             end,
         ))
     }
-
-    /// Moves the last operand into its already validated concrete representation.
-    ///
-    /// # Safety
-    /// The stack must end with this slot's live value; `T` must have been validated
-    /// against its complete descriptor. The caller assumes its sole ownership.
-    /// Reading a mismatched representation or retaining another owner is undefined
-    /// behavior.
-    /// - Complexity: O(s) representation copying for s bytes.
-    unsafe fn take<T>(&self, stack: &mut RawStack) -> T {
-        // SAFETY: Only validated, monomorphized emission calls this private helper,
-        // in reverse operand order, before executing any user callback.
-        unsafe {
-            let value = stack.read_at(self.offset, |pointer| pointer.cast::<T>().read());
-            stack.truncate_to(self.before, false);
-            value
-        }
-    }
 }
 
-#[cfg(test)]
-impl Drop for Slot {
-    /// Removes this descriptor from the thread-local retained metadata count.
-    fn drop(&mut self) {
-        LIVE_CLEANUP_SLOTS.with(|count| count.set(count.get() - 1));
-    }
-}
-
-/// Shares one immutable stack slot and the prefix preceding it.
-struct CleanupNode {
-    slot: Slot,
-    parent: Option<Rc<CleanupNode>>,
-}
-
-impl Drop for CleanupNode {
-    /// Releases uniquely owned prefixes iteratively instead of recursing with depth.
-    ///
-    /// - Complexity: O(n) for n newly unreferenced nodes, with O(1) call space.
-    fn drop(&mut self) {
-        let mut parent = self.parent.take();
-        while let Some(node) = parent {
-            match Rc::try_unwrap(node) {
-                Ok(mut node) => parent = node.parent.take(),
-                Err(_) => break,
-            }
-        }
-    }
-}
-
-/// Binds an immutable shared live prefix above a caller-owned byte origin.
-///
-/// Cloning retains one reference, not a copy of every preceding descriptor.
-#[derive(Clone)]
-pub(crate) struct CleanupPlan {
-    origin: usize,
-    pub(crate) end: usize,
-    alignment: usize,
-    tail: Option<Rc<CleanupNode>>,
-}
-
-impl CleanupPlan {
-    /// Creates an empty owned region above an opaque caller-owned prefix.
-    pub(crate) fn empty(origin: usize) -> Self {
-        Self {
-            origin,
-            end: origin,
-            alignment: 1,
-            tail: None,
-        }
-    }
-
-    /// Extends this immutable prefix with one validated canonical slot.
-    ///
-    /// # Errors
-    /// Rejects noncanonical descriptors or unrepresentable frame positions.
-    /// - Complexity: O(d) validation for d descriptor nodes, O(1) retained metadata.
-    pub(crate) fn push(&self, value_type: ValueType) -> anyhow::Result<Self> {
-        value_type.validate_canonical()?;
-        let alignment = self.alignment.max(value_type.align());
-        let (slot, end) = Slot::new(self.end, value_type)?;
-        Ok(Self {
-            origin: self.origin,
-            end,
-            alignment,
-            tail: Some(Rc::new(CleanupNode {
-                slot,
-                parent: self.tail.clone(),
-            })),
-        })
-    }
-
-    /// Arms reverse destruction without allocating or copying prefix metadata.
-    pub(crate) fn guard<'a>(&'a self, stack: &'a mut RawStack) -> CleanupGuard<'a> {
-        CleanupGuard {
-            stack,
-            remaining: self.tail.as_deref(),
-            origin: self.origin,
-            armed: true,
-        }
-    }
-}
-
-/// Destroys each still-live slot once, advancing before invoking its destructor.
-pub(crate) struct CleanupGuard<'a> {
-    pub(crate) stack: &'a mut RawStack,
-    remaining: Option<&'a CleanupNode>,
-    origin: usize,
-    pub(crate) armed: bool,
-}
-
-impl CleanupGuard<'_> {
-    /// Destroys the remaining prefix in reverse order and restores its origin.
-    ///
-    /// - Complexity: O(n) for n remaining slots, excluding nested destruction.
-    pub(crate) fn destroy(&mut self) {
-        if !self.armed {
-            return;
-        }
-        while let Some(node) = self.remaining {
-            self.remaining = node.parent.as_deref();
-            let slot = &node.slot;
-            // SAFETY: Ownership is removed before user destruction. The shared
-            // prefix names only live ambient slots, never moved operands.
-            unsafe {
-                self.stack.truncate_to(slot.before, false);
-                self.stack
-                    .drop_at(slot.offset, |pointer| drop_raw(&slot.value_type, pointer));
-            }
-        }
-        // SAFETY: All owned values above the opaque origin are now destroyed.
-        unsafe { self.stack.truncate_to(self.origin, false) };
-        self.armed = false;
-    }
-}
-
-impl Drop for CleanupGuard<'_> {
-    /// Resumes cleanup after a callback or an ordinary-error destructor unwinds.
-    fn drop(&mut self) {
-        self.destroy();
-    }
-}
-
-/// Binds complete signatures and ambient destruction before emitting raw operations.
+/// Validates complete signatures and binds the initial frame before raw emission.
 ///
 /// Operands are source ordered. The opaque byte prefix preceding `origin` belongs
 /// to the caller and is never destroyed. On success ambient values survive; on
 /// host error or unwind they are destroyed in reverse stack order. Host operands
 /// are transferred to concrete Rust owners before executing user code.
+/// Emission consumes all descriptor metadata; only the user callback is retained.
 pub(crate) struct OperationPlan {
-    ambient: CleanupPlan,
+    origin: usize,
+    owned_inputs: usize,
+    alignment: usize,
     operands: Vec<Slot>,
     result: ValueType,
 }
@@ -213,38 +64,54 @@ impl OperationPlan {
         operands: &[ValueType],
         result: ValueType,
     ) -> anyhow::Result<Self> {
-        let mut prefix = CleanupPlan::empty(origin);
+        let mut end = origin;
+        let mut alignment = 1;
         for value_type in ambient {
-            prefix = prefix.push(value_type.clone())?;
+            value_type.validate_canonical()?;
+            alignment = alignment.max(value_type.align());
+            (_, end) = stack_position(end, value_type.layout())?;
         }
-        Self::with_cleanup(prefix, operands, result)
+        let mut plan = Self::at(origin, end, ambient.len(), operands, result)?;
+        plan.alignment = plan.alignment.max(alignment);
+        Ok(plan)
     }
 
-    /// Binds operands and a result above an already validated shared live prefix.
+    /// Binds operands and a result above an already validated ambient frame.
+    ///
+    /// - Precondition: `ambient_end` and `ambient_count` describe live canonical
+    ///   values above `origin`; their alignment is already bound to the segment.
     ///
     /// # Errors
     /// Rejects noncanonical descriptors and unrepresentable frame positions.
-    /// - Complexity: O(n) time and space for operand/result descriptor nodes;
-    ///   retaining the ambient cleanup prefix is O(1).
-    pub(crate) fn with_cleanup(
-        ambient: CleanupPlan,
+    /// - Complexity: O(n) time and space for operand/result descriptor nodes.
+    pub(crate) fn at(
+        origin: usize,
+        ambient_end: usize,
+        ambient_count: usize,
         operands: &[ValueType],
         result: ValueType,
     ) -> anyhow::Result<Self> {
+        debug_assert!(origin <= ambient_end);
         result.validate_canonical()?;
-        let mut end = ambient.end;
-        let operands = operands
+        let mut end = ambient_end;
+        let mut alignment = result.align();
+        let operands: Vec<Slot> = operands
             .iter()
             .map(|value_type| {
                 value_type.validate_canonical()?;
+                alignment = alignment.max(value_type.align());
                 let (slot, next) = Slot::new(end, value_type.clone())?;
                 end = next;
                 Ok(slot)
             })
             .collect::<anyhow::Result<_>>()?;
-        stack_position(ambient.end, result.layout())?;
+        stack_position(ambient_end, result.layout())?;
         Ok(Self {
-            ambient,
+            origin,
+            owned_inputs: ambient_count
+                .checked_add(operands.len())
+                .ok_or_else(|| anyhow::anyhow!("canonical operation input count overflow"))?,
+            alignment,
             operands,
             result,
         })
@@ -273,41 +140,10 @@ impl OperationPlan {
         Ok(())
     }
 
-    /// Registers one monomorphized host boundary with frozen ambient cleanup.
-    ///
-    /// # Safety
-    /// The signature must already have been validated against `R` and all concrete
-    /// types used by `invoke`. The callback must first take every operand in reverse
-    /// order without intervening user code, then invoke the host function. The raw
-    /// interpreter caller must supply exactly this plan's live input frame.
-    ///
-    /// - Complexity: O(n) registration alignment checks for n operands;
-    ///   execution is the host cost plus O(a) ambient cleanup on failure.
-    unsafe fn emit<R: ValueRepr, F>(self, segment: &mut RawSegment, invoke: F)
-    where
-        F: Fn(&Self, &mut RawStack) -> anyhow::Result<R::Value> + 'static,
-    {
-        segment.update_base_alignment(self.ambient.alignment);
-        for slot in &self.operands {
-            segment.update_base_alignment(slot.value_type.layout().align());
-        }
-        segment.update_base_alignment(self.result.layout().align());
-        segment.raw0_(move |stack| {
-            let mut cleanup = self.ambient.guard(stack);
-            match invoke(&self, cleanup.stack) {
-                Ok(result) => {
-                    cleanup.stack.push(result);
-                    cleanup.armed = false;
-                    Ok(())
-                }
-                Err(error) => {
-                    // Run outside Drop so an ambient destructor panic resumes
-                    // cleanup through the still-live guard.
-                    cleanup.destroy();
-                    Err(error)
-                }
-            }
-        });
+    /// Binds the initial ownership frame and maximum validated alignment.
+    fn bind(&self, segment: &mut RawSegment) {
+        segment.bind_frame(self.origin, self.owned_inputs);
+        segment.update_base_alignment(self.alignment);
     }
 
     /// Validates and emits a fallible nullary canonical result.
@@ -324,8 +160,8 @@ impl OperationPlan {
         F: Fn() -> anyhow::Result<R::Value> + 'static,
     {
         self.validate::<R>(&[])?;
-        // SAFETY: The full signature matches, with no operands to consume.
-        unsafe { self.emit::<R, _>(segment, move |_, _| function()) };
+        self.bind(segment);
+        segment.raw0(move |_| function());
         Ok(())
     }
 
@@ -343,13 +179,9 @@ impl OperationPlan {
         F: Fn(A::Value) -> anyhow::Result<R::Value> + 'static,
     {
         self.validate::<R>(&[A::value_type()])?;
-        // SAFETY: The signature matches; take precedes every user callback.
-        unsafe {
-            self.emit::<R, _>(segment, move |plan, stack| {
-                let a = plan.operands[0].take::<A::Value>(stack);
-                function(a)
-            });
-        }
+        self.bind(segment);
+        let a = &self.operands[0];
+        segment.raw1(move |_, a| function(a), a.offset != a.before);
         Ok(())
     }
 
@@ -367,14 +199,15 @@ impl OperationPlan {
         F: Fn(A::Value, B::Value) -> anyhow::Result<R::Value> + 'static,
     {
         self.validate::<R>(&[A::value_type(), B::value_type()])?;
-        // SAFETY: All witnesses match, and operands are taken top-first.
-        unsafe {
-            self.emit::<R, _>(segment, move |plan, stack| {
-                let b = plan.operands[1].take::<B::Value>(stack);
-                let a = plan.operands[0].take::<A::Value>(stack);
-                function(a, b)
-            });
-        }
+        self.bind(segment);
+        let [a, b] = self.operands.as_slice() else {
+            unreachable!("validated binary signature")
+        };
+        segment.raw2(
+            move |_, a, b| function(a, b),
+            a.offset != a.before,
+            b.offset != b.before,
+        );
         Ok(())
     }
 
@@ -392,15 +225,16 @@ impl OperationPlan {
         F: Fn(A::Value, B::Value, C::Value) -> anyhow::Result<R::Value> + 'static,
     {
         self.validate::<R>(&[A::value_type(), B::value_type(), C::value_type()])?;
-        // SAFETY: All witnesses match, and operands are taken top-first.
-        unsafe {
-            self.emit::<R, _>(segment, move |plan, stack| {
-                let c = plan.operands[2].take::<C::Value>(stack);
-                let b = plan.operands[1].take::<B::Value>(stack);
-                let a = plan.operands[0].take::<A::Value>(stack);
-                function(a, b, c)
-            });
-        }
+        self.bind(segment);
+        let [a, b, c] = self.operands.as_slice() else {
+            unreachable!("validated ternary signature")
+        };
+        segment.raw3(
+            move |_, a, b, c| function(a, b, c),
+            a.offset != a.before,
+            b.offset != b.before,
+            c.offset != c.before,
+        );
         Ok(())
     }
 
@@ -488,23 +322,81 @@ mod tests {
         OperationPlan::new(origin, ambient, &[A::value_type()], R::value_type()).unwrap()
     }
 
-    /// Checks sharing across a fork and bounded call-space release of a deep prefix.
+    /// Executes successive canonical operations within the initial owned frame.
     #[test]
-    fn cleanup_prefix_sharing_and_iterative_release() {
-        let before = LIVE_CLEANUP_SLOTS.with(Cell::get);
-        let mut prefix = CleanupPlan::empty(0);
-        for _ in 0..50_000 {
-            prefix = prefix.push(ValueType::leaf::<i32>()).unwrap();
-        }
-        let fork = prefix.clone();
-        for _ in 0..50_000 {
-            prefix = prefix.push(ValueType::leaf::<i32>()).unwrap();
-        }
-        LIVE_CLEANUP_SLOTS.with(|count| assert_eq!(count.get() - before, 100_000));
-        drop(prefix);
-        LIVE_CLEANUP_SLOTS.with(|count| assert_eq!(count.get() - before, 50_000));
-        drop(fork);
-        LIVE_CLEANUP_SLOTS.with(|count| assert_eq!(count.get(), before));
+    fn successive_operations_share_the_initial_frame() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let initialize = events.clone();
+        let mut segment = RawSegment::new();
+        OperationPlan::new(1, &[], &[], ValueType::leaf::<Tracked>())
+            .unwrap()
+            .emit0::<Leaf<Tracked>, _>(&mut segment, move || {
+                Ok(Tracked::new("ambient", &initialize))
+            })
+            .unwrap();
+        OperationPlan::new(1, &[ValueType::leaf::<Tracked>()], &[], Nil::value_type())
+            .unwrap()
+            .emit0::<Nil, _>(&mut segment, || Err(anyhow::anyhow!("later operation")))
+            .unwrap();
+        let mut stack = RawStack::with_base_alignment(segment.base_alignment());
+        stack.push(7u8);
+        assert_eq!(
+            unsafe { segment.call0_stack(&mut stack) }
+                .unwrap_err()
+                .to_string(),
+            "later operation"
+        );
+        assert_eq!(stack.len(), 1);
+        assert_eq!(unsafe { stack.pop::<u8>(false) }, 7);
+        assert_eq!(&*events.borrow(), &["new ambient", "drop ambient"]);
+    }
+
+    /// Retains no callback-state payload for stateless operations of every arity.
+    #[test]
+    fn stateless_operations_retain_no_callback_state() {
+        let integer = ValueType::leaf::<i32>();
+        let mut segment = RawSegment::new();
+        OperationPlan::new(0, &[], &[], integer.clone())
+            .unwrap()
+            .emit0::<Leaf<i32>, _>(&mut segment, || Ok(3))
+            .unwrap();
+        plan::<Leaf<i32>, Leaf<i32>>(0, &[])
+            .emit1::<Leaf<i32>, Leaf<i32>, _>(&mut segment, Ok)
+            .unwrap();
+        OperationPlan::new(0, std::slice::from_ref(&integer), &[], integer.clone())
+            .unwrap()
+            .emit0::<Leaf<i32>, _>(&mut segment, || Ok(4))
+            .unwrap();
+        OperationPlan::new(0, &[], &[integer.clone(), integer.clone()], integer.clone())
+            .unwrap()
+            .emit2::<Leaf<i32>, Leaf<i32>, Leaf<i32>, _>(&mut segment, |a, b| {
+                Ok(a.checked_add(b).unwrap())
+            })
+            .unwrap();
+        OperationPlan::new(0, std::slice::from_ref(&integer), &[], integer.clone())
+            .unwrap()
+            .emit0::<Leaf<i32>, _>(&mut segment, || Ok(5))
+            .unwrap();
+        OperationPlan::new(0, &[integer.clone(), integer.clone()], &[], integer.clone())
+            .unwrap()
+            .emit0::<Leaf<i32>, _>(&mut segment, || Ok(6))
+            .unwrap();
+        OperationPlan::new(
+            0,
+            &[],
+            &[integer.clone(), integer.clone(), integer.clone()],
+            integer,
+        )
+        .unwrap()
+        .emit3::<Leaf<i32>, Leaf<i32>, Leaf<i32>, Leaf<i32>, _>(&mut segment, |a, b, c| {
+            Ok(a.checked_add(b).unwrap().checked_add(c).unwrap())
+        })
+        .unwrap();
+        assert_eq!(segment.storage_size(), 0);
+        let mut stack = RawStack::with_base_alignment(segment.base_alignment());
+        unsafe { segment.call0_stack(&mut stack).unwrap() };
+        assert_eq!(unsafe { stack.pop::<i32>(false) }, 18);
+        assert_eq!(stack.len(), 0);
     }
 
     /// Constructs a nested array whose destruction order is visible.
@@ -944,6 +836,7 @@ mod tests {
             let initialize = events.clone();
             let fail = events.clone();
             let mut segment = RawSegment::new();
+            segment.set_frame(1, 0);
             segment.push_op0(move || nested(&initialize));
             OperationPlan::new(
                 1,

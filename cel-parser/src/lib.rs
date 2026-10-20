@@ -163,7 +163,6 @@
 //! coercion occurs. [`ty::check_expr`] remains the primitive convenience entry with an empty lookup.
 //!
 //! ```rust
-//! use std::sync::Arc;
 //! use cel_parser::{AstContext, OpLookup, OperationSignature, Parser, ResolvedLeafType, Ty};
 //! use cel_runtime::ValueType;
 //!
@@ -173,7 +172,7 @@
 //!     name: "twice",
 //!     operands: vec![scalar.clone().into()],
 //!     result: scalar.into(),
-//!     emit: Arc::new(|s, _| s.op1(|value: f64| value * 2.0)),
+//!     emit: Box::new(|s, _| s.op1(|value: f64| value * 2.0)),
 //! }).unwrap();
 //! let expr = Parser::<AstContext>::new(OpLookup::new())
 //!     .parse_str_ast("3.0.twice() + true").unwrap();
@@ -353,7 +352,6 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
-use std::sync::Arc;
 
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -623,7 +621,7 @@ pub struct Parser<C: ParserContext> {
     tokens: Option<Peekable<LexLexer>>,
     context: C,
     op_lookup: OpLookup,
-    type_resolver: Arc<dyn TypeResolver>,
+    type_resolver: Box<dyn TypeResolver>,
     last_span: Span,
     /// Net count of `Delimiter::Brace`/`Delimiter::Bracket`/`Delimiter::Parenthesis` tokens
     /// consumed since the last [`set_tokens`](Self::set_tokens)/
@@ -671,7 +669,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// * `op_lookup` - Operation lookup for resolving operators and identifiers
     pub fn new(op_lookup: OpLookup) -> Self {
-        Self::with_shared_type_resolver(op_lookup, type_expr::builtin_type_resolver())
+        Self::with_boxed_type_resolver(op_lookup, type_expr::builtin_type_resolver())
     }
 
     /// Creates a new CEL parser with the given operation lookup and leaf type resolver.
@@ -703,13 +701,11 @@ impl<C: ParserContext> Parser<C> {
     where
         R: TypeResolver + 'static,
     {
-        Self::with_shared_type_resolver(op_lookup, Arc::new(type_resolver))
+        Self::with_boxed_type_resolver(op_lookup, Box::new(type_resolver))
     }
 
-    fn with_shared_type_resolver(
-        op_lookup: OpLookup,
-        type_resolver: Arc<dyn TypeResolver>,
-    ) -> Self {
+    /// Creates a parser that uniquely owns its compile-time type resolver.
+    fn with_boxed_type_resolver(op_lookup: OpLookup, type_resolver: Box<dyn TypeResolver>) -> Self {
         Parser {
             tokens: None,
             context: C::new_context(),
@@ -748,7 +744,7 @@ impl<C: ParserContext> Parser<C> {
     where
         R: TypeResolver + 'static,
     {
-        self.type_resolver = Arc::new(type_resolver);
+        self.type_resolver = Box::new(type_resolver);
     }
 
     /// Resolves `expr` through this parser's configured leaf type resolver.
@@ -2101,9 +2097,9 @@ impl<C: ParserContext> Parser<C> {
             ));
         }
 
-        let type_resolver = Arc::clone(&self.type_resolver);
+        let type_resolver = self.type_resolver.as_ref();
         let mut resolve_array_type = |type_expr: &TypeExpr| {
-            let resolved = type_expr.resolve(type_resolver.as_ref())?;
+            let resolved = type_expr.resolve(type_resolver)?;
             ResolvedArrayType::from_resolved_type(resolved, type_expr.span())
         };
         self.context.make_annotated_array(

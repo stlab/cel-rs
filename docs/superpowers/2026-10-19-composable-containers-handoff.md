@@ -12,6 +12,34 @@ Task 9 starts at `0e11c409010af69eb22cdc00881e4a7f9ba2a335`.
 Earlier specs retain their original proposals with dated status/link notes.
 Use the current books and library tutorials for final API spellings.
 
+## 2026-10-20 ownership follow-up
+
+Parser registrations and resolver ownership now use unique `Box` owners instead
+of reference-counted callbacks. Stateful emitters can still build segments that
+outlive registration. Reviewing the remaining boxed callback dispatch is tracked
+in [#256](https://github.com/stlab/cel-rs/issues/256); this change does not claim to
+replace every trait-object callback with a function pointer.
+
+`RawStack` now owns its live values through a flat stack of destructor function
+pointers. Typed operations retain only their actual closure state, not recursive
+`ValueType` descriptors or ambient cleanup graphs. Segment-level scopes release
+owned values on errors and panics while preserving fragment caller prefixes,
+including zero-sized values. Raw transfers explicitly release source ownership
+and register destination ownership after successful initialization.
+
+`RawArray` now carries its own member destructor. Typed arrays bind concrete drop
+glue; erased arrays retain element descriptors for layout and destruction.
+`ValueType`'s `Arc` trees remain for construction-time stack information and
+genuinely erased ownership. Typed tuples keep their inline `CStackList`
+representation. Safe `RawStack::push` requires `'static` values because the owning
+stack cannot represent shorter destructor borrow lifetimes.
+
+`StackResult` replaces operation-local `DropStack` cleanup and extracts typed
+results without popping a nonexistent slot for empty-result segments. Regression
+coverage includes error/panic cleanup, destructor panic continuation, alignment,
+zero-sized owners, raw-header destruction, and captureless typed operations
+retaining no instruction-state payload.
+
 ## What's done
 
 | Task | Delivered |

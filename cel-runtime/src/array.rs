@@ -20,27 +20,106 @@ use std::ptr::NonNull;
 
 /// Stores an array's pointer, element count, and element capacity, in that order.
 ///
-/// The `repr(C)` header contains no descriptor and has no destructor. The pointer
-/// is non-null and aligned for the concrete element type, including empty and
+/// The pointer is non-null and aligned for the concrete element type, including empty and
 /// zero-sized arrays. Length and capacity count elements, not bytes; length does
 /// not exceed capacity. The first `len` elements are initialized. For non-zero-sized
 /// elements with nonzero capacity, the pointer uniquely owns a global-allocator
 /// allocation compatible with `Vec<T>` at exactly this capacity and element type.
 ///
-/// A typed owner or a future erased descriptor must supply the concrete element
-/// type and destroy the elements and allocation exactly once. This layout is
-/// defined independently of Rust's unspecified `Vec<T>` header layout.
+/// The header owns its member destruction operation. Erased arrays additionally
+/// own an element descriptor; typed arrays bind concrete drop glue without one.
+/// This layout is independent of Rust's unspecified `Vec<T>` header layout.
 #[repr(C)]
 pub(crate) struct RawArray {
     pub(crate) ptr: NonNull<()>,
     pub(crate) len: usize,
     pub(crate) capacity: usize,
+    drop_members: unsafe fn(&mut RawArray),
+    pub(crate) element_type: Option<crate::ValueType>,
+}
+
+impl RawArray {
+    /// Adopts an erased array allocation with its live element destruction metadata.
+    ///
+    /// # Safety
+    /// The raw parts must uniquely own `len` initialized elements of `element_type`,
+    /// using its layout and the global allocator at exactly `capacity`.
+    pub(crate) unsafe fn from_erased(
+        ptr: NonNull<()>,
+        len: usize,
+        capacity: usize,
+        element_type: crate::ValueType,
+    ) -> Self {
+        Self {
+            ptr,
+            len,
+            capacity,
+            drop_members: drop_erased_members,
+            element_type: Some(element_type),
+        }
+    }
+}
+
+impl Drop for RawArray {
+    /// Destroys live members in reverse order and releases their allocation.
+    ///
+    /// - Complexity: O(n) member destructions for n live members.
+    fn drop(&mut self) {
+        // SAFETY: Each constructor binds destruction to the allocation's exact layout.
+        unsafe { (self.drop_members)(self) };
+    }
+}
+
+/// Destroys concrete members and frees their original vector allocation.
+///
+/// # Safety
+/// The header must uniquely own the raw parts of a `Vec<T>`.
+/// - Complexity: O(n) member destructions for n live members.
+unsafe fn drop_typed_members<T>(raw: &mut RawArray) {
+    let mut guard = ReverseDrop(unsafe {
+        Vec::from_raw_parts(raw.ptr.cast::<T>().as_ptr(), raw.len, raw.capacity)
+    });
+    raw.len = 0;
+    while let Some(value) = guard.0.pop() {
+        drop(value);
+    }
+}
+
+/// Destroys erased members using metadata owned by their array header.
+///
+/// # Safety
+/// The header's descriptor must match every initialized element and its allocation.
+/// - Complexity: O(n) member destructions plus recursive member destruction.
+unsafe fn drop_erased_members(raw: &mut RawArray) {
+    let element = raw
+        .element_type
+        .as_ref()
+        .expect("erased element descriptor");
+    let layout = std::alloc::Layout::from_size_align(
+        element
+            .size()
+            .checked_mul(raw.capacity)
+            .expect("valid array capacity"),
+        element.align(),
+    )
+    .expect("valid array layout");
+    let _allocation = crate::owned_value::Allocation {
+        pointer: raw.ptr.cast(),
+        layout,
+    };
+    let mut prefix = crate::owned_value::Prefix {
+        base: raw.ptr.as_ptr().cast(),
+        children: crate::owned_value::Children::Elements(element),
+        initialized: raw.len,
+    };
+    raw.len = 0;
+    unsafe { prefix.destroy() };
 }
 
 /// Owns homogeneous, contiguous elements without bounds on the element type.
 ///
-/// The transparent representation is a pointer/length/capacity `RawArray`
-/// header, with no descriptor. Its elements have the concrete layout of `T`.
+/// The transparent representation is an owning `RawArray` header, including
+/// member destruction dispatch. Its elements have the concrete layout of `T`.
 /// Nested arrays use `Array<Array<T>>`, not nested vectors.
 ///
 /// Dropping an array destroys its elements exactly once in reverse index order,
@@ -116,6 +195,8 @@ impl<T> Array<T> {
                 ptr: unsafe { NonNull::new_unchecked(ptr.cast()) },
                 len,
                 capacity,
+                drop_members: drop_typed_members::<T>,
+                element_type: None,
             },
             marker: PhantomData,
         }
@@ -138,7 +219,8 @@ impl<T> Array<T> {
     /// ```
     #[must_use]
     pub fn into_vec(self) -> Vec<T> {
-        let owner = ManuallyDrop::new(self);
+        let mut owner = ManuallyDrop::new(self);
+        drop(owner.raw.element_type.take());
         // SAFETY: The header preserves Vec<T>'s raw parts, and ManuallyDrop
         // prevents the old owner from destroying the transferred allocation.
         unsafe {
@@ -211,25 +293,6 @@ impl<T> Array<T> {
     }
 }
 
-impl<T> Drop for Array<T> {
-    /// Destroys elements in reverse order and frees storage in O(n) time.
-    fn drop(&mut self) {
-        // SAFETY: This owner uniquely holds the original Vec<T> raw parts and
-        // no longer accesses them after the reconstructed vector is destroyed.
-        let mut guard = ReverseDrop(unsafe {
-            Vec::from_raw_parts(
-                self.raw.ptr.cast::<T>().as_ptr(),
-                self.raw.len,
-                self.raw.capacity,
-            )
-        });
-        // The guard resumes reverse cleanup if an element destructor unwinds.
-        while let Some(value) = guard.0.pop() {
-            drop(value);
-        }
-    }
-}
-
 /// Owns remaining elements during cleanup and frees storage even during unwinding.
 struct ReverseDrop<T>(Vec<T>);
 
@@ -297,5 +360,36 @@ impl<T: fmt::Debug> fmt::Debug for Array<T> {
             .debug_tuple("Array")
             .field(&self.as_slice())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// Releases members when only the erased owning header remains.
+    #[test]
+    fn raw_header_owns_its_members() {
+        /// Records the destruction of one member.
+        struct Tracked(Rc<Cell<usize>>);
+
+        impl Drop for Tracked {
+            /// Records release of this member.
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0));
+        let array = ManuallyDrop::new(Array::from_vec(vec![
+            Tracked(drops.clone()),
+            Tracked(drops.clone()),
+        ]));
+        // SAFETY: The suppressed typed owner transfers its header exactly once.
+        let raw = unsafe { std::ptr::read(&array.raw) };
+        drop(raw);
+        assert_eq!(drops.get(), 2);
     }
 }

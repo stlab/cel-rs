@@ -8,20 +8,32 @@ use anyhow::{Result, ensure};
 use std::any::TypeId;
 use std::result::Result::Ok;
 
-/// Drops the head of a type-level stack from a [`RawStack`] during unwinding.
-pub trait DropStack: List {
-    /// Drops values corresponding to `Self` from the supplied [`RawStack`].
-    fn drop_stack(stack: &mut RawStack);
+/// Extracts a typed segment's result or its empty-stack marker.
+///
+/// # Examples
+/// ```
+/// use cel_runtime::{Segment, SegmentCallable};
+/// assert!(Segment::<()>::new().call(()).is_ok());
+/// ```
+pub trait StackResult: List {
+    /// Moves the final result out, or returns the empty-stack marker.
+    ///
+    /// # Safety
+    /// The raw stack's live values must match this type-level stack exactly.
+    unsafe fn take_result(stack: &mut RawStack) -> Self::Head;
 }
 
-impl DropStack for CNil<()> {
-    fn drop_stack(_stack: &mut RawStack) {}
+impl StackResult for CNil<()> {
+    /// Returns the empty-stack marker without reading a nonexistent slot.
+    unsafe fn take_result(_stack: &mut RawStack) -> crate::list_traits::Undefined {
+        crate::list_traits::Undefined
+    }
 }
 
-impl<H: 'static, T: DropStack + CStackListHeadLimit> DropStack for CStackList<H, T> {
-    fn drop_stack(stack: &mut RawStack) {
-        unsafe { stack.drop::<H>(Self::HEAD_PADDED) };
-        T::drop_stack(stack);
+impl<H: 'static, T: List + CStackListHeadLimit> StackResult for CStackList<H, T> {
+    /// Transfers the concrete head out of its owned stack slot.
+    unsafe fn take_result(stack: &mut RawStack) -> H {
+        unsafe { stack.pop::<H>(Self::HEAD_PADDED) }
     }
 }
 
@@ -116,7 +128,7 @@ where
 
 impl<Args: IntoList + 'static, Stack> Segment<Args, Stack>
 where
-    Stack: DropStack + 'static,
+    Stack: StackResult + 'static,
     Stack::Tail: CStackListHeadLimit,
 {
     /// Private method to change the stack type.
@@ -148,8 +160,7 @@ where
         F: Fn() -> Result<R> + 'static,
         R: 'static,
     {
-        self.segment
-            .raw0(move |stack| op().inspect_err(|_| Stack::drop_stack(stack)));
+        self.segment.raw0(move |_| op());
         self.into()
     }
 
@@ -168,14 +179,10 @@ where
     pub fn op1r<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
         Stack: CStackListHeadPadded,
-        Stack::Tail: DropStack,
         F: Fn(Stack::Head) -> Result<R> + 'static,
         R: 'static,
     {
-        self.segment.raw1(
-            move |stack, x| op(x).inspect_err(|_| Stack::Tail::drop_stack(stack)),
-            Stack::HEAD_PADDED,
-        );
+        self.segment.raw1(move |_, x| op(x), Stack::HEAD_PADDED);
         self.into()
     }
     /// Pushes a binary operation that takes the top two stack values and returns a new value.
@@ -198,16 +205,31 @@ where
     }
 
     /// Executes all operations in the segment and returns the final result.
-    pub(crate) fn call0<U: 'static>(&self) -> Result<U> {
-        unsafe { self.segment.call0() }
+    pub(crate) fn call0(&self) -> Result<Stack::Head> {
+        self.finish(RawStack::with_base_alignment(self.segment.base_alignment()))
     }
 
-    pub(crate) fn call1<U: 'static, A>(&self, args: A) -> Result<U> {
-        unsafe { self.segment.call1(args) }
+    /// Executes the owned frame and extracts its statically described result.
+    fn finish(&self, mut stack: RawStack) -> Result<Stack::Head> {
+        unsafe {
+            self.segment.call0_stack(&mut stack)?;
+            Ok(Stack::take_result(&mut stack))
+        }
     }
 
-    pub(crate) fn call2<U: 'static, A, B>(&self, args: (A, B)) -> Result<U> {
-        unsafe { self.segment.call2(args) }
+    /// Executes a one-argument segment and returns its statically described result.
+    pub(crate) fn call1<A: 'static>(&self, (a,): (A,)) -> Result<Stack::Head> {
+        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        stack.push(a);
+        self.finish(stack)
+    }
+
+    /// Executes a two-argument segment and returns its statically described result.
+    pub(crate) fn call2<A: 'static, B: 'static>(&self, (a, b): (A, B)) -> Result<Stack::Head> {
+        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        stack.push(a);
+        stack.push(b);
+        self.finish(stack)
     }
 }
 
@@ -229,7 +251,7 @@ pub trait SegmentCallable<Args> {
     fn call(&self, args: Args) -> Self::Output;
 }
 
-impl<T: DropStack + 'static> SegmentCallable<()> for Segment<(), T>
+impl<T: StackResult + 'static> SegmentCallable<()> for Segment<(), T>
 where
     T::Tail: EmptyList + CStackListHeadLimit,
 {
@@ -239,7 +261,7 @@ where
     }
 }
 
-impl<T: DropStack + 'static, A: 'static> SegmentCallable<(A,)> for Segment<(A,), T>
+impl<T: StackResult + 'static, A: 'static> SegmentCallable<(A,)> for Segment<(A,), T>
 where
     T::Tail: EmptyList + CStackListHeadLimit,
 {
@@ -249,7 +271,8 @@ where
     }
 }
 
-impl<T: DropStack + 'static, A: 'static, B: 'static> SegmentCallable<(A, B)> for Segment<(A, B), T>
+impl<T: StackResult + 'static, A: 'static, B: 'static> SegmentCallable<(A, B)>
+    for Segment<(A, B), T>
 where
     T::Tail: EmptyList + CStackListHeadLimit,
 {
@@ -283,6 +306,21 @@ mod tests {
         let segment = Segment::new();
         let result = segment.call(());
         assert!(result.is_ok());
+    }
+
+    /// Returns the empty-stack marker after consuming one or two input values.
+    #[test]
+    fn consumed_arguments_allow_empty_results() {
+        let mut one = DynSegment::new::<(String,)>();
+        one.drop_value().unwrap();
+        let one = Segment::<(String,), CNil<()>>::try_from(one).unwrap();
+        assert!(one.call((String::from("one"),)).is_ok());
+
+        let mut two = DynSegment::new::<(u8, String)>();
+        two.drop_value().unwrap();
+        two.drop_value().unwrap();
+        let two = Segment::<(u8, String), CNil<()>>::try_from(two).unwrap();
+        assert!(two.call((1, String::from("two"))).is_ok());
     }
 
     #[test]
