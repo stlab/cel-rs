@@ -121,3 +121,33 @@ fn registered_member_resolution_ignores_same_named_values() {
         .is_empty()
     );
 }
+
+/// Recursive cell annotations and dependencies retain exact leaf and tuple identities.
+#[test]
+fn compound_annotations_are_checked_in_every_sheet_context() {
+    for source in [
+        "sheet s { cell xs: [(TestPoint, [f64])] = [(TestPoint { x: 1.0 }, [2.0])]; out ys: [(TestPoint, [f64])] := xs; }",
+        "sheet s { source xs: [(TestPoint, [f64])]; cell ys: [(TestPoint, [f64])]; relationship { ys := xs; } }",
+        "sheet s { cell xs: [(TestPoint, [f64])] filter _; }",
+        "sheet s { cell f: Fn((i32,), [TestPoint]) = |n: i32| [TestPoint { x: 1.0 }]; }",
+    ] {
+        assert!(
+            diagnostics(source).is_empty(),
+            "{source}: {:?}",
+            diagnostics(source)
+        );
+    }
+    for source in [
+        "sheet s { cell xs: [(TestPoint, [f64])]; out ys: [(OtherPoint, [f64])] := xs; }",
+        "sheet s { cell xs: [(TestPoint, [f64])]; cell ys: [(TestPoint, [i32])]; relationship { ys := xs; } }",
+        "sheet s { cell xs: [(TestPoint, [f64])] filter [(OtherPoint { x: 1.0 }, [2.0])]; }",
+        "sheet s { cell f: Fn((i32,), [OtherPoint]) = |n: i32| [TestPoint { x: 1.0 }]; }",
+    ] {
+        let errors = diagnostics(source);
+        assert!(!errors.is_empty(), "{source}");
+        assert!(
+            errors.iter().all(|error| error.span().start().column > 0),
+            "{errors:?}"
+        );
+    }
+}

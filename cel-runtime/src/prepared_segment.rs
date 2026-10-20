@@ -13,6 +13,83 @@ use std::marker::PhantomData;
 use crate::container_execution::{ArgumentPlan, ResultPlan};
 use crate::{DynSegment, ValueRepr};
 
+/// Owns the same frozen raw engine as [`PreparedSegment`] with runtime-bound witnesses.
+///
+/// Hosts validate their storage adapters once, then lend exact canonical pointers.
+pub struct PreparedRawSegment {
+    body: DynSegment,
+    result: ResultPlan,
+    arity: usize,
+}
+
+impl PreparedRawSegment {
+    /// Binds every argument read and the complete result before any operation executes.
+    ///
+    /// # Errors
+    /// Rejects dependent bodies, undeclared or mismatched reads, missing cloning,
+    /// and a mismatched result.
+    /// - Complexity: O(n) in descriptor nodes and emitted reads.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{DynSegment, ValueType, prepared_segment::PreparedRawSegment};
+    /// let mut body = DynSegment::new::<()>();
+    /// body.just(7i32);
+    /// let mut body = PreparedRawSegment::new(body, &[], &ValueType::leaf::<i32>())?;
+    /// let result = unsafe { body.call(&[]) }?;
+    /// assert_eq!(result.try_into_typed::<cel_runtime::Leaf<i32>>()?, 7);
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn new(
+        body: DynSegment,
+        arguments: &[crate::ValueType],
+        result: &crate::ValueType,
+    ) -> anyhow::Result<Self> {
+        body.validate_independent_body()?;
+        for (index, read) in &body.argument_reads {
+            let expected = arguments
+                .get(*index)
+                .ok_or_else(|| anyhow::anyhow!("undeclared argument {index}"))?;
+            anyhow::ensure!(
+                expected.same_shape(read),
+                "argument {index} representation mismatch"
+            );
+            anyhow::ensure!(
+                read.can_clone(),
+                "argument {index} clone capability unavailable"
+            );
+        }
+        anyhow::ensure!(
+            body.result_type()?.same_shape(result),
+            "result representation mismatch"
+        );
+        let result = ResultPlan::new(0, body.result_type()?.clone())?;
+        Ok(Self {
+            body,
+            result,
+            arity: arguments.len(),
+        })
+    }
+
+    /// Executes the bound raw frame without conversions or descriptor comparisons.
+    ///
+    /// # Safety
+    /// `arguments` must have the prepared arity. Each pointer must borrow a live,
+    /// aligned value of its exact preparation descriptor throughout this call.
+    /// No pointer may alias mutable storage accessed by an operation.
+    /// # Errors
+    /// Propagates operation errors after frame cleanup.
+    /// - Complexity: Body execution and emitted clone costs.
+    ///
+    /// # Examples
+    /// See [`Self::new`].
+    pub unsafe fn call(&mut self, arguments: &[*const u8]) -> anyhow::Result<crate::OwnedValue> {
+        debug_assert_eq!(arguments.len(), self.arity);
+        let mut output = unsafe { self.body.execute_raw(arguments)? };
+        Ok(unsafe { self.result.take(&mut output) })
+    }
+}
+
 /// Owns a frozen raw body with exact canonical argument/result witnesses.
 ///
 /// Calls borrow arguments, clone only emitted reads, and return independent owners.
@@ -105,6 +182,58 @@ mod tests {
         crate::value_type::SHAPE_COMPARISONS.with(|count| assert_eq!(count.get(), 0));
         assert_ne!(first.as_slice().as_ptr(), second.as_slice().as_ptr());
         assert_ne!(input.1.as_slice().as_ptr(), first.as_slice().as_ptr());
+    }
+
+    /// Runtime-bound frames use the identical frozen execution and equality plans.
+    #[test]
+    fn erased_prepared_calls_never_compare_descriptors() {
+        type Pair = Cons<Leaf<i32>, Cons<ArrayOf<Leaf<f64>>, Nil>>;
+        type Argument = ArrayOf<Pair>;
+        let descriptor = Argument::value_type()
+            .with_clone::<Argument>()
+            .unwrap()
+            .with_equality::<Argument>()
+            .unwrap();
+        let mut body = DynSegment::new::<()>();
+        body.push_argument(0, descriptor.clone()).unwrap();
+        let mut body =
+            PreparedRawSegment::new(body, std::slice::from_ref(&descriptor), &descriptor).unwrap();
+        let input = Array::from_vec(vec![(1, Array::from_vec(vec![2.0])).into_c_stack_list()]);
+        let pointer = std::ptr::from_ref(&input).cast::<u8>();
+        crate::value_type::SHAPE_COMPARISONS.with(|count| count.set(0));
+        // SAFETY: Input uses exactly the witness bound at construction.
+        let first = unsafe { body.call(&[pointer]) }.unwrap();
+        let second = unsafe { body.call(&[pointer]) }.unwrap();
+        // SAFETY: Both values come from the same comparable bound result plan.
+        assert!(unsafe { first.eq_bound(&second) });
+        crate::value_type::SHAPE_COMPARISONS.with(|count| assert_eq!(count.get(), 0));
+        let first = first.try_into_typed::<Argument>().unwrap();
+        let second = second.try_into_typed::<Argument>().unwrap();
+        assert_ne!(input.as_slice().as_ptr(), first.as_slice().as_ptr());
+        assert_ne!(first.as_slice().as_ptr(), second.as_slice().as_ptr());
+        assert_ne!(
+            first.as_slice()[0].0.1.as_slice().as_ptr(),
+            second.as_slice()[0].0.1.as_slice().as_ptr()
+        );
+    }
+
+    /// Erased preparation rejects mismatched reads and results before executing effects.
+    #[test]
+    fn erased_preparation_checks_complete_signature_before_effects() {
+        let mut body = DynSegment::new::<()>();
+        body.push_arg::<i32>(0);
+        assert!(
+            PreparedRawSegment::new(body, &[ValueType::leaf::<u32>()], &ValueType::leaf::<i32>())
+                .is_err()
+        );
+        let mut body = DynSegment::new::<()>();
+        body.push_arg::<i32>(0);
+        assert!(PreparedRawSegment::new(body, &[], &ValueType::leaf::<i32>()).is_err());
+        let mut body = DynSegment::new::<()>();
+        body.just(1i32);
+        assert!(PreparedRawSegment::new(body, &[], &ValueType::leaf::<u32>()).is_err());
+        let body = DynSegment::new::<(i32,)>();
+        assert!(PreparedRawSegment::new(body, &[], &ValueType::leaf::<i32>()).is_err());
     }
 
     /// Exact argument/result identities, independent origins, and clone plans bind once.

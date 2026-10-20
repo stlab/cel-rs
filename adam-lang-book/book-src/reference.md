@@ -17,7 +17,8 @@ cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
 cell_filter        = "filter" expression.
 source_decl        = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 
-type_expr          = identifier
+type_expr          = identifier [ "(" type_expr { "," type_expr } ")" ]
+                    | "[" type_expr "]"
                     | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 
 relationship_decl  = "relationship" "{" { binding } "}".
@@ -68,9 +69,11 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
   reference any other cell. The cell's type is inferred from `expr`'s result type.
 - `cell name: T = expr;`: both forms combined; `expr`'s inferred type must equal `T` exactly,
   or the sheet fails to parse with a "type mismatch" error.
-- A tuple-typed cell (`T` a parenthesized list, [tuple types](cells.md#tuple-types)) is stored as a
-  [`DynamicSequence`](../cel_runtime/dynamic_sequence/struct.DynamicSequence.html) regardless of arity or
-  element types.
+- Compound cells ([tuple types](cells.md#tuple-types), arrays, and callable signatures) use
+  canonical whole-value ownership. Host code accesses them through `ParsedSheet::read_compound`,
+  `write_compound`, and `source_compound` with exact recursive representation witnesses.
+  Arrays default to empty, tuples default recursively, and callables require an initializer.
+  Every stored cell requires cloning and value equality.
 - `source name: T;` / `source name = expr;` / `source name: T = expr;`: identical rules to the
   three `cell` forms above, evaluated the same way — a `source` declaration is a `cell`
   declaration in every respect except its fixed `CellKind` (below).
@@ -191,7 +194,7 @@ See [conditionals](conditionals.md).
   diagnostic-only: it never corrects the value, only flags a mismatch, queryable by a host; see
   [the host embedding API](#the-host-embedding-api). The same is true, unconditionally, of a filter
   on an `out` cell, since an `out` cell is always derived.
-- At most one filter per cell; a filter cannot (yet) attach to a tuple-typed cell.
+- At most one filter per cell. Compound filters must produce the cell's exact recursive shape.
 
 See the [filters chapter](filters.md) for the full model and worked examples.
 
@@ -229,11 +232,11 @@ Selected messages, verbatim:
 | `type \`T\` has no default; provide \`= ...\`` | a bare `: T` cell where `T` has no `Default` |
 | `type mismatch: expected \`T\`, got \`U\`` | a declared type disagreeing with an inferred one |
 | `expression produced no value` | a body expression that isn't a value-producing CEL expression |
-| `cannot infer a type for this expression; register a type name for it or add an explicit \`: type_expr\` annotation` | an expression whose result type isn't registered |
+| `cannot infer a type: unregistered type \`T\`` | a result containing a leaf without an Adam registration |
 | `filter must reference \`_\`` | a non-range filter body that never mentions `_` |
 | `filter must produce \`T\`` | a filter body whose result type doesn't match the cell |
 | `filter range bounds must be \`T\`` | a `lo..=hi` filter whose element type doesn't match the cell |
-| `filter on a tuple-typed cell is not yet supported` | `filter` attached to a tuple-typed `cell` |
+| `Adam cell equality capability unavailable for \`T\`` | a compound value, such as a callable, lacking value equality |
 | `output \`name\`: type mismatch: ...` | a `relationship` binding output's declared vs. actual type |
 | `output expression has arity N but M output(s) declared` | a destructuring binding's tuple arity mismatch |
 | `requirement[ \`name\`]: expected \`bool\`, got \`T\`` | a `require`ment body that isn't boolean — the `` `name` `` segment appears only when the requirement is labeled; the colon is always present |

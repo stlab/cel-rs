@@ -77,7 +77,9 @@ table above has a default, so this only matters for a host-registered custom typ
 ## Tuple types
 
 ```text
-type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
+type_expr = identifier [ "(" type_expr { "," type_expr } ")" ]
+          | "[" type_expr "]"
+          | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 ```
 
 A parenthesized type list is a tuple type. `()` is the empty tuple (an inert, zero-element
@@ -90,10 +92,28 @@ genuine one-element tuple; `(T, U, ...)` is the general case:
 {{#include examples/cells/tuple_typed_cell.adm2}}
 ```
 
-Every tuple shape (regardless of arity or element types) shares the same underlying storage
-type, `cel_runtime::DynamicSequence`; that's the type to `read`/`write` a tuple-typed cell with
-from host code. Tuples nest: `(i32, (f64, String))` is a 2-tuple whose second element is itself
-a 2-tuple.
+Tuples nest: `(i32, (f64, String))` is a 2-tuple whose second element is itself a 2-tuple.
+Compound cells own canonical CEL values. Host code uses `ParsedSheet::read_compound` and
+`write_compound` with representation witnesses, not `DynamicSequence`. For example,
+`Cons<Leaf<i32>, Cons<Leaf<f64>, Nil>>` witnesses `(i32, f64)`. Reads return independent
+owned clones; writes validate the complete recursive shape before changing the cell.
+`source_compound` reads the original aspiration independently of any filter result.
+Concrete registered leaves retain the ordinary Rust `read::<T>` / `write` APIs.
+
+## Arrays, generic leaves, and callables
+
+Arrays and tuples compose recursively: `[(i32, [f64])]` is an array of pairs whose second
+field is another array. An array defaults to empty without requiring an element default;
+a tuple defaults each child recursively. A missing leaf default names that leaf.
+Register a generic foreign leaf under its full source name, such as `RangeInclusive(i32)`;
+containing array and tuple shapes need no additional registration.
+
+`Fn((A, B), R)` describes a callable with two parameters; `(A,)` and `()` describe one
+and zero parameters. A callable has no default and requires an initializer. Every Adam
+cell also requires cloning and value equality: CEL can store callable values, but Adam
+rejects a callable cell when its descriptor lacks equality. Adam does not invent function
+identity or suppress propagation. Registered host function markers retain the concrete
+capabilities their type registration supplies.
 
 ## Names and declaration order
 

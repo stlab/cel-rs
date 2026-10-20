@@ -103,7 +103,7 @@ impl Labels {
     /// per-type behavior.
     ///
     /// - Precondition: `id` is a live cell in the sheet this `Labels` will be used with, holding
-    ///   a `cel_runtime::DynamicSequence`.
+    ///   canonical adam-lang tuple storage.
     pub fn add_tuple_cell(&mut self, id: CellId, label: &str) {
         self.cells.insert(
             id,
@@ -113,10 +113,7 @@ impl Labels {
                 is_numeric: false,
                 is_integer: false,
                 display: Box::new(move |sheet| {
-                    sheet
-                        .read::<cel_runtime::DynamicSequence>(id)
-                        .map(|v| format!("{v:?}"))
-                        .unwrap_or_else(|_| "?".to_owned())
+                    adam_lang::debug_compound_cell(sheet, id).unwrap_or_else(|_| "?".to_owned())
                 }),
                 write_str: Box::new(|_sheet, _s| {
                     Err(Error::MethodFailed {
@@ -192,6 +189,7 @@ impl_to_f64_display!(
 /// (`TypeShape::Tuple`) appears with a Debug-formatted, display-only entry via
 /// [`Labels::add_tuple_cell`]. Cells whose `TypeId` is none of the built-in
 /// primitives are silently skipped, so they simply won't appear in the sidebar.
+/// Arrays and callable signatures are skipped pending compound Inspector support.
 ///
 /// - Complexity: O(n) in the number of cells.
 pub fn labels_from_cell_names(
@@ -207,6 +205,7 @@ pub fn labels_from_cell_names(
                 labels.add_tuple_cell(id, name);
                 continue;
             }
+            TypeShape::Array(_) | TypeShape::Callable(_, _) => continue,
         };
         macro_rules! try_numeric_ty {
             ($T:ty) => {
@@ -521,8 +520,8 @@ mod tests {
 
     #[test]
     fn labels_from_cell_names_includes_tuple_typed_cells() {
-        let mut sheet = AdamSheet::new();
-        let pair = sheet.add_cell(cel_runtime::DynamicSequence::from_tuple((3i32, 4.5f64)));
+        let sheet = tuple_sheet();
+        let pair = sheet.cell_names["pair"].0;
 
         let mut cell_names = IndexMap::new();
         cell_names.insert(
@@ -541,6 +540,21 @@ mod tests {
         assert_eq!(labels.cells.len(), 1);
         assert_eq!((labels.cells[&pair].display)(&sheet), "(3, 4.5)");
         assert!(!labels.cells[&pair].is_bool);
+    }
+
+    /// Compound storage migration preserves tuple labels without adding array presentation.
+    #[test]
+    fn labels_skip_arrays_and_keep_empty_tuple_display() {
+        let sheet =
+            adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
+                .parse_str("sheet s { cell xs: [i32]; cell unit: (); }")
+                .unwrap();
+        let labels = labels_from_cell_names(&sheet, &sheet.cell_names);
+        assert_eq!(labels.cells.len(), 1);
+        assert_eq!(
+            (labels.cells[&sheet.cell_names["unit"].0].display)(&sheet),
+            "()"
+        );
     }
 
     #[test]
@@ -633,8 +647,8 @@ mod tests {
 
     #[test]
     fn add_tuple_cell_display_returns_rust_debug_formatted_string() {
-        let mut sheet = AdamSheet::new();
-        let cell_id = sheet.add_cell(cel_runtime::DynamicSequence::from_tuple((3i32, 4.5f64)));
+        let sheet = tuple_sheet();
+        let cell_id = sheet.cell_names["pair"].0;
         let mut labels = Labels::new();
         labels.add_tuple_cell(cell_id, "pair");
         let meta = labels.cells.get(&cell_id).unwrap();
@@ -643,18 +657,22 @@ mod tests {
 
     #[test]
     fn add_tuple_cell_write_str_always_errs_without_mutating_the_sheet() {
-        let mut sheet = AdamSheet::new();
-        let cell_id = sheet.add_cell(cel_runtime::DynamicSequence::from_tuple((3i32, 4.5f64)));
+        let mut sheet = tuple_sheet();
+        let cell_id = sheet.cell_names["pair"].0;
         let mut labels = Labels::new();
         labels.add_tuple_cell(cell_id, "pair");
         let meta = labels.cells.get(&cell_id).unwrap();
-        let before = sheet
-            .read::<cel_runtime::DynamicSequence>(cell_id)
-            .unwrap()
-            .clone();
+        let before = adam_lang::debug_compound_cell(&sheet, cell_id).unwrap();
         let result = (meta.write_str)(&mut sheet, "(1, 2.0)");
         assert!(result.is_err());
-        let after = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
-        assert_eq!(&before, after);
+        let after = adam_lang::debug_compound_cell(&sheet, cell_id).unwrap();
+        assert_eq!(before, after);
+    }
+
+    /// Builds real canonical tuple storage for host-display boundary contracts.
+    fn tuple_sheet() -> adam_lang::ParsedSheet {
+        adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
+            .parse_str("sheet s { cell pair: (i32, f64) = (3, 4.5); }")
+            .unwrap()
     }
 }

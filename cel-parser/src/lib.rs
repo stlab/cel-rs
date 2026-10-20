@@ -76,9 +76,11 @@
 //! arrays can contain tuples or callables, and tuples and callable signatures can contain
 //! further compound types. `Fn((A, B), R)` names a callable with two parameters and result
 //! `R`; use `Fn((A,), R)` for one parameter and `Fn((), R)` for none.
-//! Adam-lang's current persistent cell storage has a narrower boundary: it does not yet
-//! support `[T]` or `Name(args)` cell types. Migrating that storage to recursive compound
-//! types is separate follow-up work — see <https://github.com/stlab/cel-rs/issues/227>.
+//! Adam-lang shares this recursive resolution for persistent cells, including registered
+//! generic leaves. Adam requires cloning and value equality before storing a cell:
+//! callable values remain valid CEL values, but a callable without equality cannot become
+//! an Adam cell. Compound host access uses explicit canonical representation witnesses;
+//! registered primitive and foreign leaf cells retain their concrete Rust access APIs.
 //!
 //! # Examples
 //!

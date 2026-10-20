@@ -19,7 +19,8 @@ use cel_runtime::DynSegment;
 use proc_macro2::{Span, TokenStream};
 
 use crate::TypeRegistry;
-use crate::type_registry::{AddConditionalFn, CallDynFn, PushArgFn, TypeShape};
+use crate::cell_value::{CellValue, Frame, RawFrame};
+use crate::type_registry::{AddConditionalFn, TypeShape};
 
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -100,6 +101,86 @@ impl std::fmt::Debug for ParsedSheet {
 }
 
 impl ParsedSheet {
+    /// Clones a compound cell into its exact canonical witness representation.
+    ///
+    /// # Errors
+    /// Rejects unknown cells, concrete leaf storage, and recursive shape mismatches.
+    /// - Complexity: O(n + v) validation and cloning for n shape nodes and v values.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_lang::{AdamParser, TypeRegistry};
+    /// use cel_runtime::{ArrayOf, Leaf};
+    /// let sheet = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+    ///     .parse_str("sheet s { cell xs: [i32]; }").unwrap();
+    /// assert!(sheet.read_compound::<ArrayOf<Leaf<i32>>>(sheet.cell_names["xs"].0)?.is_empty());
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn read_compound<R: cel_runtime::ValueRepr>(&self, id: CellId) -> anyhow::Result<R::Value> {
+        let cell = self.sheet.read::<CellValue>(id)?;
+        anyhow::ensure!(
+            cell.0.value_type().same_shape(&R::value_type()),
+            "compound cell representation mismatch"
+        );
+        // SAFETY: The checked host boundary just validated the complete witness.
+        Ok(unsafe { cell.0.try_clone()?.into_typed_bound::<R>() })
+    }
+
+    /// Writes a compound aspiration after validating its complete witness identity.
+    ///
+    /// Existing cell capabilities, rather than witness defaults, govern propagation.
+    /// # Errors
+    /// Rejects unknown cells, leaf storage, or any recursive shape mismatch before writing.
+    /// - Complexity: O(n) validation and descriptor construction for n shape nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_lang::{AdamParser, TypeRegistry};
+    /// use cel_runtime::{Array, ArrayOf, Leaf};
+    /// let mut sheet = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+    ///     .parse_str("sheet s { source xs: [i32]; }").unwrap();
+    /// sheet.write_compound::<ArrayOf<Leaf<i32>>>(sheet.cell_names["xs"].0, Array::from_vec(vec![1]))?;
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn write_compound<R: cel_runtime::ValueRepr>(
+        &mut self,
+        id: CellId,
+        value: R::Value,
+    ) -> anyhow::Result<()> {
+        let descriptor = self.sheet.read::<CellValue>(id)?.0.value_type().clone();
+        let value = cel_runtime::OwnedValue::new::<R>(value).with_value_type(descriptor)?;
+        self.sheet.write(id, CellValue(value))?;
+        Ok(())
+    }
+
+    /// Clones the original compound aspiration, independently of any filter result.
+    ///
+    /// # Errors
+    /// Rejects unknown cells, concrete leaf storage, or a mismatched recursive witness.
+    /// - Complexity: O(n + v) for n descriptor nodes and v cloned values.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_lang::{AdamParser, TypeRegistry};
+    /// use cel_runtime::{ArrayOf, Leaf};
+    /// let sheet = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+    ///     .parse_str("sheet s { source xs: [i32]; }").unwrap();
+    /// assert!(sheet.source_compound::<ArrayOf<Leaf<i32>>>(sheet.cell_names["xs"].0)?.is_empty());
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn source_compound<R: cel_runtime::ValueRepr>(
+        &self,
+        id: CellId,
+    ) -> anyhow::Result<R::Value> {
+        let cell = self.sheet.source::<CellValue>(id)?;
+        anyhow::ensure!(
+            cell.0.value_type().same_shape(&R::value_type()),
+            "compound cell representation mismatch"
+        );
+        // SAFETY: The complete witness was just checked at this host boundary.
+        Ok(unsafe { cell.0.try_clone()?.into_typed_bound::<R>() })
+    }
+
     /// Resolves each of `e`'s `ErrorSite`s to a source span and a human label, primary first.
     ///
     /// Sites whose span is not recorded are skipped, so the result may be shorter than
@@ -362,7 +443,10 @@ impl AdamParser {
         let has_initializer = ctx.consume_punct("=");
         let (shape, cell_id) = if has_initializer {
             let segment = self.parse_cel_expression(ctx)?;
-            let (actual_shape, cell_id) = self.build_cell_from_segment(segment, ctx)?;
+            self.validate_initializer(&segment, declared_shape.as_ref(), &name, name_span)?;
+            let (actual_shape, cell_id) = self
+                .build_cell_from_segment(segment, ctx)
+                .map_err(|e| ParseError::new(e.message(), name_span))?;
             if let Some(declared) = &declared_shape
                 && declared != &actual_shape
             {
@@ -450,7 +534,10 @@ impl AdamParser {
         let has_initializer = ctx.consume_punct("=");
         let (shape, cell_id) = if has_initializer {
             let segment = self.parse_cel_expression(ctx)?;
-            let (actual_shape, cell_id) = self.build_source_cell_from_segment(segment, ctx)?;
+            self.validate_initializer(&segment, declared_shape.as_ref(), &name, name_span)?;
+            let (actual_shape, cell_id) = self
+                .build_source_cell_from_segment(segment, ctx)
+                .map_err(|e| ParseError::new(e.message(), name_span))?;
             if let Some(declared) = &declared_shape
                 && declared != &actual_shape
             {
@@ -517,8 +604,8 @@ impl AdamParser {
     /// here: the caller attaches the returned `Filter` to it afterwards, via `Sheet::add_filter`.
     ///
     /// # Errors
-    /// Returns `Err` if `declared_shape` is a tuple (not yet supported by this builder), if an
-    /// identifier inside the expression names neither `_` nor an already-declared cell, if `_`
+    /// Returns `Err` if an identifier inside the expression names neither `_` nor an
+    /// already-declared cell, if `_`
     /// is never referenced, if the expression's inferred type doesn't match `declared_shape`, or,
     /// if the expression is `RangeInclusive`-typed, if its element type doesn't match
     /// `declared_shape`.
@@ -532,13 +619,6 @@ impl AdamParser {
         cell_span: Span,
         declared_shape: &TypeShape,
     ) -> Result<adam_rs::Filter> {
-        if matches!(declared_shape, TypeShape::Tuple(_)) {
-            return Err(ParseError::new(
-                format!("cell `{cell_name}`: filter on a tuple-typed cell is not yet supported"),
-                cell_span,
-            ));
-        }
-
         let (segment, inputs, underscore_used) = self.parse_filter_expr(ctx, declared_shape)?;
 
         let value_type_id = cell_type_id(declared_shape);
@@ -554,6 +634,8 @@ impl AdamParser {
             .iter()
             .map(|(_, _, shape)| cell_type_id(shape))
             .collect();
+        let mut input_shapes = vec![declared_shape.clone()];
+        input_shapes.extend(inputs.iter().map(|(_, _, shape)| shape.clone()));
 
         // A `RangeInclusive<T>`-shaped output is checked and built independently of
         // `underscore_used`: a genuine range filter body (`lo..=hi`) essentially never references
@@ -577,7 +659,11 @@ impl AdamParser {
                 .default_fn
                 .expect("numeric range-filter cell type has a default");
             let placeholder = default_fn();
-            let segment = std::rc::Rc::new(RefCell::new(segment));
+            let result = segment.peek_stack_infos(1)[0].value_type.clone();
+            let segment = std::rc::Rc::new(RefCell::new(
+                RawFrame::new(segment, &input_shapes, &result, &self.types)
+                    .map_err(|e| ParseError::new(e.to_string(), cell_span))?,
+            ));
             let clamp_segment = std::rc::Rc::clone(&segment);
             let bounds_segment = std::rc::Rc::clone(&segment);
             let clamp_fn = range_shape.clamp_fn;
@@ -587,9 +673,20 @@ impl AdamParser {
                 value_type_id,
                 arg_ids,
                 arg_type_ids,
-                move |value, args| clamp_fn(&mut clamp_segment.borrow_mut(), value, args),
+                move |value, args| {
+                    clamp_fn(
+                        clamp_segment.borrow_mut().call_with_prefix(value, args)?,
+                        value,
+                    )
+                },
                 move |args| {
-                    bounds_fn(&mut bounds_segment.borrow_mut(), placeholder.as_ref(), args).ok()
+                    bounds_fn(
+                        bounds_segment
+                            .borrow_mut()
+                            .call_with_prefix(placeholder.as_ref(), args)
+                            .ok()?,
+                    )
+                    .ok()
                 },
             ));
         }
@@ -601,7 +698,10 @@ impl AdamParser {
             ));
         }
 
-        if output_type_id != value_type_id {
+        if !segment.peek_stack_infos(1)[0]
+            .value_type
+            .same_shape(&self.types.value_type(declared_shape))
+        {
             return Err(ParseError::new(
                 format!(
                     "cell `{cell_name}`: filter must produce `{}`",
@@ -611,81 +711,106 @@ impl AdamParser {
             ));
         }
 
-        // `call_dyn_fn` is the same monomorphized-per-registered-type dispatcher `build_method`/
-        // `build_match_expr` already use for a deduced expression's scalar output.
-        let call_fn = self
-            .types
-            .entry_by_type_id(value_type_id)
-            .expect("declared cell type registered")
-            .call_dyn_fn;
-
-        // `RefCell`, not a plain `move` capture: `call_fn` takes `&mut DynSegment`, unlike
-        // `DynClosure::call_boxed`'s `&self` the old closure-literal path used.
-        let segment = RefCell::new(segment);
+        let frame = RefCell::new(
+            Frame::new(
+                segment,
+                &input_shapes,
+                std::slice::from_ref(declared_shape),
+                false,
+                &self.types,
+            )
+            .map_err(|e| ParseError::new(e.to_string(), cell_span))?,
+        );
 
         Ok(adam_rs::Filter::new(
             value_type_id,
             arg_ids,
             arg_type_ids,
             move |value, args| {
-                let mut call_args: Vec<&dyn Any> = Vec::with_capacity(1 + args.len());
-                call_args.push(value);
-                call_args.extend_from_slice(args);
-                call_fn(&mut segment.borrow_mut(), &call_args)
+                Ok(frame
+                    .borrow_mut()
+                    .call_with_prefix(value, args)?
+                    .pop()
+                    .expect("one result"))
             },
         ))
     }
 
-    /// Evaluates `segment` eagerly with no inputs, inferring its result's `TypeShape` from the
-    /// segment's own tuple stack info (read *before* consuming the segment) for a tuple result,
-    /// or from `peek_output_type_id` for a scalar result. Returns the result boxed (`Box<dyn
-    /// Any>` holding either a scalar `T` or a `DynamicSequence`) — adding it to a `Sheet` or
-    /// using it as a conditional branch key is the caller's job (see
-    /// [`build_cell_from_segment`](Self::build_cell_from_segment)).
+    /// Prepares and evaluates a nullary expression into concrete leaf or canonical ownership.
     ///
     /// - Precondition: `segment` requires no pre-loaded arguments (a `cell` initializer never
     ///   has an input-cell scope pushed, unlike a `relationship` binding's, `out` declaration's, or
     ///   `require`ment's body).
     ///
     /// # Errors
-    /// Returns `Err` if the segment's result type isn't registered (scalar case) or contains an
-    /// unregistered leaf type at any nesting depth (tuple case).
-    fn eval_segment_boxed(&self, mut segment: DynSegment) -> Result<(TypeShape, Box<dyn Any>)> {
-        if segment.peek_tuple_arity().is_some() {
-            let associated = segment.peek_stack_infos(1)[0]
-                .value_type
-                .tuple_elements()
-                .map(<[_]>::to_vec)
-                .unwrap_or_default();
-            let shape = self
-                .shape_of_associated(&associated)
-                .map_err(|msg| ParseError::new(msg, Span::call_site()))?;
-            let seq = segment
-                .call_dyn_as_dynamic_sequence(&[])
-                .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
-            Ok((shape, Box::new(seq) as Box<dyn Any>))
-        } else {
-            let type_id = segment.peek_output_type_id().ok_or_else(|| {
-                ParseError::new("expression produced no value", Span::call_site())
-            })?;
-            let entry = self.types.entry_by_type_id(type_id).ok_or_else(|| {
-                ParseError::new(
-                    "cannot infer a type for this expression; register a type name for it or \
-                     add an explicit `: type_expr` annotation",
-                    Span::call_site(),
-                )
-            })?;
-            let boxed = (entry.call_dyn_fn)(&mut segment, &[])
-                .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
-            Ok((TypeShape::Named(type_id), boxed))
-        }
+    /// Rejects unregistered leaves, missing cell capabilities, or evaluation errors.
+    /// - Complexity: O(n) preparation for n descriptor nodes, plus execution costs.
+    fn eval_segment_boxed(&self, segment: DynSegment) -> Result<(TypeShape, Box<dyn Any>)> {
+        let shape = self.segment_shape(&segment)?;
+        let mut frame = Frame::new(
+            segment,
+            &[],
+            std::slice::from_ref(&shape),
+            false,
+            &self.types,
+        )
+        .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
+        let value = frame
+            .call(&[])
+            .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?
+            .pop()
+            .expect("one result");
+        Ok((shape, value))
     }
 
-    /// Evaluates `segment` via [`eval_segment_boxed`](Self::eval_segment_boxed) and adds a
-    /// matching cell to `ctx.sheet`, using the registered `add_cell_fn` for a `TypeShape::Named`
-    /// result, or `Sheet::add_cell::<DynamicSequence>` directly for a `TypeShape::Tuple` result
-    /// (tuple-typed cells are never themselves registered in `TypeRegistry` — every distinct
-    /// shape shares the one concrete storage type, `DynamicSequence`).
+    /// Infers complete recursive identity without executing the expression.
+    ///
+    /// # Errors
+    /// Rejects absent results or unregistered leaves.
+    /// - Complexity: O(n) in result descriptor nodes.
+    fn segment_shape(&self, segment: &DynSegment) -> Result<TypeShape> {
+        let info = segment
+            .peek_stack_infos(1)
+            .first()
+            .ok_or_else(|| ParseError::new("expression produced no value", Span::call_site()))?;
+        self.types
+            .shape_of(&info.value_type)
+            .map_err(|message| ParseError::new(message, Span::call_site()))
+    }
+
+    /// Validates an initializer's complete shape before any initializer effects.
+    ///
+    /// # Errors
+    /// Reports a ranged type mismatch or missing cell capability.
+    /// - Complexity: O(n) in result descriptor nodes.
+    fn validate_initializer(
+        &self,
+        segment: &DynSegment,
+        declared: Option<&TypeShape>,
+        name: &str,
+        span: Span,
+    ) -> Result<()> {
+        let actual = self.segment_shape(segment)?;
+        if let Some(expected) = declared
+            && expected != &actual
+        {
+            return Err(ParseError::new(
+                format!(
+                    "cell `{name}`: type mismatch: expected `{}`, got `{}`",
+                    self.types.display_name(expected),
+                    self.types.display_name(&actual)
+                ),
+                span,
+            ));
+        }
+        if !matches!(actual, TypeShape::Named(_)) {
+            CellValue::validate(&self.types.value_type(&actual))
+                .map_err(|e| ParseError::new(e.to_string(), span))?;
+        }
+        Ok(())
+    }
+
+    /// Adds a prepared initializer as concrete leaf storage or private canonical ownership.
     ///
     /// - Precondition: see [`eval_segment_boxed`](Self::eval_segment_boxed).
     ///
@@ -702,24 +827,12 @@ impl AdamParser {
                 let entry = self.types.entry_by_type_id(*type_id).expect("registered");
                 (entry.add_cell_fn)(&mut ctx.sheet, boxed)
             }
-            TypeShape::Tuple(_) => {
-                let seq = *boxed
-                    .downcast::<cel_runtime::DynamicSequence>()
-                    .expect("eval_segment_boxed: a Tuple shape always boxes a DynamicSequence");
-                ctx.sheet.add_cell(seq)
+            _ => {
+                let value = *boxed.downcast::<CellValue>().expect("canonical compound");
+                ctx.sheet.add_cell(value)
             }
         };
         Ok((shape, cell_id))
-    }
-
-    /// Returns the DSL name `self.types` registered `type_id` under, or `"?"` when it is
-    /// unregistered.
-    ///
-    /// Keeps an "expected"/"got" pair in one naming scheme: `TypeRegistry::display_name` renders
-    /// the expected side from registered names, while a live value's `ValueType::type_name` is a
-    /// Rust type path (`alloc::string::String` for the type registered as `String`).
-    fn registered_type_name(&self, type_id: TypeId) -> &str {
-        self.types.registered_name(type_id).unwrap_or("?")
     }
 
     /// Returns one live tuple element's type name in the same registered naming scheme
@@ -728,45 +841,10 @@ impl AdamParser {
     ///
     /// - Complexity: O(n) in the number of (nested) elements.
     fn associated_display_name(&self, elem: &cel_runtime::AssociatedType) -> String {
-        match elem.value_type.tuple_elements() {
-            Some(children) => self
-                .shape_of_associated(children)
-                .map(|shape| self.types.display_name(&shape))
-                .unwrap_or_else(|_| elem.value_type.type_name().to_string()),
-            None => self
-                .types
-                .registered_name(elem.value_type.type_id())
-                .unwrap_or_else(|| elem.value_type.type_name())
-                .to_string(),
-        }
-    }
-
-    /// Recursively converts a live tuple's `AssociatedType` shape into a `TypeShape`, by looking
-    /// up each leaf's `TypeId` against `self.types`.
-    ///
-    /// # Errors
-    /// Returns an error naming any element's `TypeId` (at any nesting depth) that isn't
-    /// registered.
-    fn shape_of_associated(
-        &self,
-        associated: &[cel_runtime::AssociatedType],
-    ) -> std::result::Result<TypeShape, String> {
-        let elements = associated
-            .iter()
-            .map(|elem| {
-                if let Some(children) = elem.value_type.tuple_elements() {
-                    self.shape_of_associated(children)
-                } else {
-                    self.types
-                        .entry_by_type_id(elem.value_type.type_id())
-                        .map(|entry| TypeShape::Named(entry.type_id))
-                        .ok_or_else(|| {
-                            format!("unregistered type `{}`", elem.value_type.type_name())
-                        })
-                }
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(TypeShape::Tuple(elements))
+        self.types
+            .shape_of(&elem.value_type)
+            .map(|shape| self.types.display_name(&shape))
+            .unwrap_or_else(|_| elem.value_type.type_name().to_string())
     }
 
     /// Builds a default-valued cell for `shape` (scalar or tuple, recursively), adding it to
@@ -794,20 +872,20 @@ impl AdamParser {
                 })?;
                 Ok((entry.add_cell_fn)(&mut ctx.sheet, default_fn()))
             }
-            TypeShape::Tuple(_) => {
-                let seq = self
-                    .types
-                    .default_dynamic_sequence(shape)
-                    .map_err(|msg| ParseError::new(msg, span))?;
-                Ok(ctx.sheet.add_cell(seq))
+            _ => {
+                let mut body = DynSegment::new::<()>();
+                self.types
+                    .emit_default(shape, &mut body)
+                    .map_err(|e| ParseError::new(e.to_string(), span))?;
+                self.build_cell_from_segment(body, ctx)
+                    .map(|(_, id)| id)
+                    .map_err(|error| ParseError::new(error.message(), span))
             }
         }
     }
 
-    /// Evaluates `segment` via [`eval_segment_boxed`](Self::eval_segment_boxed) and adds a
-    /// matching *source* cell to `ctx.sheet` (see [`Sheet::add_source`]), using the registered
-    /// `add_source_fn` for a `TypeShape::Named` result, or `Sheet::add_source::<DynamicSequence>`
-    /// directly for a `TypeShape::Tuple` result. Mirrors
+    /// Evaluates `segment` and adds concrete leaf or canonical compound source storage.
+    /// Mirrors
     /// [`build_cell_from_segment`](Self::build_cell_from_segment) exactly, routed through
     /// `Sheet::add_source` instead of `Sheet::add_cell`.
     ///
@@ -826,11 +904,9 @@ impl AdamParser {
                 let entry = self.types.entry_by_type_id(*type_id).expect("registered");
                 (entry.add_source_fn)(&mut ctx.sheet, boxed)
             }
-            TypeShape::Tuple(_) => {
-                let seq = *boxed
-                    .downcast::<cel_runtime::DynamicSequence>()
-                    .expect("eval_segment_boxed: a Tuple shape always boxes a DynamicSequence");
-                ctx.sheet.add_source(seq)
+            _ => {
+                let value = *boxed.downcast::<CellValue>().expect("canonical compound");
+                ctx.sheet.add_source(value)
             }
         };
         Ok((shape, cell_id))
@@ -862,12 +938,14 @@ impl AdamParser {
                 })?;
                 Ok((entry.add_source_fn)(&mut ctx.sheet, default_fn()))
             }
-            TypeShape::Tuple(_) => {
-                let seq = self
-                    .types
-                    .default_dynamic_sequence(shape)
-                    .map_err(|msg| ParseError::new(msg, span))?;
-                Ok(ctx.sheet.add_source(seq))
+            _ => {
+                let mut body = DynSegment::new::<()>();
+                self.types
+                    .emit_default(shape, &mut body)
+                    .map_err(|e| ParseError::new(e.to_string(), span))?;
+                self.build_source_cell_from_segment(body, ctx)
+                    .map(|(_, id)| id)
+                    .map_err(|error| ParseError::new(error.message(), span))
             }
         }
     }
@@ -988,7 +1066,7 @@ impl AdamParser {
         let end_span = ctx.expect_punct(";")?;
         let compiled = self.compile_outputs(ctx, &segment, &outputs, destructure)?;
         Ok((
-            build_method(inputs, outputs, segment, compiled),
+            build_method(inputs, outputs, segment, compiled, &self.types)?,
             start_span,
             end_span,
         ))
@@ -1033,15 +1111,7 @@ impl AdamParser {
             .cell_names
             .iter()
             .map(|(name, (cell_id, shape))| {
-                let push = match shape {
-                    TypeShape::Named(type_id) => InputPush::Scalar(
-                        self.types
-                            .entry_by_type_id(*type_id)
-                            .expect("declared cell type registered")
-                            .push_arg_fn,
-                    ),
-                    TypeShape::Tuple(_) => InputPush::Tuple(self.types.associated_prototype(shape)),
-                };
+                let push = self.types.value_type(shape);
                 (name.clone(), (*cell_id, shape.clone(), push))
             })
             .collect();
@@ -1068,12 +1138,7 @@ impl AdamParser {
                         }
                     }
                 };
-                match push {
-                    InputPush::Scalar(fn_ptr) => fn_ptr(segment, idx),
-                    InputPush::Tuple(associated) => {
-                        segment.push_arg_as_dynamic_sequence_tuple(idx, associated.clone())?
-                    }
-                }
+                segment.push_argument(idx, push.clone())?;
                 Ok(true)
             });
 
@@ -1109,30 +1174,12 @@ impl AdamParser {
             .cell_names
             .iter()
             .map(|(name, (cell_id, shape))| {
-                let push = match shape {
-                    TypeShape::Named(type_id) => InputPush::Scalar(
-                        self.types
-                            .entry_by_type_id(*type_id)
-                            .expect("declared cell type registered")
-                            .push_arg_fn,
-                    ),
-                    TypeShape::Tuple(_) => InputPush::Tuple(self.types.associated_prototype(shape)),
-                };
+                let push = self.types.value_type(shape);
                 (name.clone(), (*cell_id, shape.clone(), push))
             })
             .collect();
 
-        let value_push = match declared_shape {
-            TypeShape::Named(type_id) => InputPush::Scalar(
-                self.types
-                    .entry_by_type_id(*type_id)
-                    .expect("declared cell type registered")
-                    .push_arg_fn,
-            ),
-            TypeShape::Tuple(_) => {
-                InputPush::Tuple(self.types.associated_prototype(declared_shape))
-            }
-        };
+        let value_push = self.types.value_type(declared_shape);
 
         let accumulator: Arc<Mutex<NamedCells>> = Arc::new(Mutex::new(Vec::new()));
         let scope_accumulator = Arc::clone(&accumulator);
@@ -1149,12 +1196,7 @@ impl AdamParser {
                     *scope_underscore_used
                         .lock()
                         .expect("scope mutex not poisoned") = true;
-                    match &value_push {
-                        InputPush::Scalar(fn_ptr) => fn_ptr(segment, 0),
-                        InputPush::Tuple(associated) => {
-                            segment.push_arg_as_dynamic_sequence_tuple(0, associated.clone())?
-                        }
-                    }
+                    segment.push_argument(0, value_push.clone())?;
                     return Ok(true);
                 }
                 let Some((cell_id, shape, push)) = push_table.get(name) else {
@@ -1170,12 +1212,7 @@ impl AdamParser {
                         }
                     }
                 };
-                match push {
-                    InputPush::Scalar(fn_ptr) => fn_ptr(segment, idx),
-                    InputPush::Tuple(associated) => {
-                        segment.push_arg_as_dynamic_sequence_tuple(idx, associated.clone())?
-                    }
-                }
+                segment.push_argument(idx, push.clone())?;
                 Ok(true)
             });
 
@@ -1238,55 +1275,37 @@ impl AdamParser {
             .map(|(_, _, shape)| cell_type_id(shape))
             .collect();
 
-        if segment.peek_tuple_arity().is_some() {
-            let associated = segment.peek_stack_infos(1)[0]
-                .value_type
-                .tuple_elements()
-                .map(<[_]>::to_vec)
-                .unwrap_or_default();
-            let shape = self
-                .shape_of_associated(&associated)
-                .map_err(|msg| ParseError::new(msg, match_span))?;
-            let segment = RefCell::new(segment);
-
-            let function =
-                move |args: &[&dyn Any]| -> std::result::Result<Box<dyn Any>, anyhow::Error> {
-                    let seq = segment.borrow_mut().call_dyn_as_dynamic_sequence(args)?;
-                    Ok(Box::new(seq) as Box<dyn Any>)
-                };
-
-            fn dynamic_sequence_eq(a: &dyn Any, b: &dyn Any) -> bool {
-                a.downcast_ref::<cel_runtime::DynamicSequence>()
-                    == b.downcast_ref::<cel_runtime::DynamicSequence>()
+        let shape = self.segment_shape(&segment)?;
+        let eq_fn = match &shape {
+            TypeShape::Named(id) => {
+                self.types
+                    .entry_by_type_id(*id)
+                    .expect("registered")
+                    .eq_dyn_fn
             }
-
-            let match_expr = MatchExpr::new(
-                input_ids,
-                input_types,
-                TypeId::of::<cel_runtime::DynamicSequence>(),
-                dynamic_sequence_eq,
-                function,
-            );
-            Ok((shape, match_expr))
-        } else {
-            let type_id = segment
-                .peek_output_type_id()
-                .ok_or_else(|| ParseError::new("match expression produced no value", match_span))?;
-            let entry = self.types.entry_by_type_id(type_id).ok_or_else(|| {
-                ParseError::new("match expression type not in TypeRegistry", match_span)
-            })?;
-            let call_fn = entry.call_dyn_fn;
-            let eq_fn = entry.eq_dyn_fn;
-            let segment = RefCell::new(segment);
-
-            let function =
-                move |args: &[&dyn Any]| -> std::result::Result<Box<dyn Any>, anyhow::Error> {
-                    call_fn(&mut segment.borrow_mut(), args)
-                };
-
-            let match_expr = MatchExpr::new(input_ids, input_types, type_id, eq_fn, function);
-            Ok((TypeShape::Named(type_id), match_expr))
-        }
+            _ => compound_eq,
+        };
+        let frame = RefCell::new(
+            Frame::new(
+                segment,
+                &inputs
+                    .iter()
+                    .map(|(_, _, shape)| shape.clone())
+                    .collect::<Vec<_>>(),
+                std::slice::from_ref(&shape),
+                false,
+                &self.types,
+            )
+            .map_err(|e| ParseError::new(e.to_string(), match_span))?,
+        );
+        let match_expr = MatchExpr::new(
+            input_ids,
+            input_types,
+            cell_type_id(&shape),
+            eq_fn,
+            move |args| Ok(frame.borrow_mut().call(args)?.pop().expect("one result")),
+        );
+        Ok((shape, match_expr))
     }
 
     /// `conditional_decl = "conditional" expression "{" { conditional_branch } "}".`
@@ -1351,24 +1370,16 @@ impl AdamParser {
                 add_cond_fn(&mut ctx.sheet, match_expr, branches, default_rel_ids)
                     .map_err(|e| Self::sheet_error(ctx, match_span, e))?;
             }
-            TypeShape::Tuple(_) => {
-                let typed_branches: Vec<(Vec<cel_runtime::DynamicSequence>, Vec<RelationshipId>)> =
-                    branches
-                        .into_iter()
-                        .map(|(val, rel_ids)| {
-                            let seq = *val.downcast::<cel_runtime::DynamicSequence>().expect(
-                                "eval_segment_boxed: a Tuple shape always boxes a \
-                                     DynamicSequence",
-                            );
-                            (vec![seq], rel_ids)
-                        })
-                        .collect();
+            _ => {
+                let typed_branches: Vec<(Vec<CellValue>, Vec<RelationshipId>)> = branches
+                    .into_iter()
+                    .map(|(val, rel_ids)| {
+                        let seq = *val.downcast::<CellValue>().expect("canonical compound");
+                        (vec![seq], rel_ids)
+                    })
+                    .collect();
                 ctx.sheet
-                    .add_conditional::<cel_runtime::DynamicSequence>(
-                        match_expr,
-                        typed_branches,
-                        default_rel_ids,
-                    )
+                    .add_conditional::<CellValue>(match_expr, typed_branches, default_rel_ids)
                     .map_err(|e| Self::sheet_error(ctx, match_span, e))?;
             }
         }
@@ -1499,26 +1510,7 @@ impl AdamParser {
         // real cell inputs (via `push_arg`) and must stay live for repeated re-evaluation by the
         // `Method` built below on every `Sheet::propagate` — so only its *shape* is inferred
         // here, from stack info, never actually executed.
-        let actual_shape = if segment.peek_tuple_arity().is_some() {
-            let associated = segment.peek_stack_infos(1)[0]
-                .value_type
-                .tuple_elements()
-                .map(<[_]>::to_vec)
-                .unwrap_or_default();
-            self.shape_of_associated(&associated)
-                .map_err(|msg| ctx.err_at(msg))?
-        } else {
-            let type_id = segment
-                .peek_output_type_id()
-                .ok_or_else(|| ctx.err_at(format!("out `{name}`: expression produced no value")))?;
-            if self.types.entry_by_type_id(type_id).is_none() {
-                return Err(ctx.err_at(format!(
-                    "out `{name}`: cannot infer a type for this expression; register a type \
-                     name for it or add an explicit `: type_expr` annotation"
-                )));
-            }
-            TypeShape::Named(type_id)
-        };
+        let actual_shape = self.segment_shape(&segment)?;
 
         let out_shape = match &declared_shape {
             Some(declared) => {
@@ -1534,6 +1526,10 @@ impl AdamParser {
             None => actual_shape,
         };
 
+        if !matches!(out_shape, TypeShape::Named(_)) {
+            CellValue::validate(&self.types.value_type(&out_shape))
+                .map_err(|error| ParseError::new(error.to_string(), name_span))?;
+        }
         let cell_id = self.build_default_cell(&out_shape, name_span, ctx)?;
         ctx.cell_spans
             .insert(cell_id, SourceSpan::from_proc_macro2(name_span));
@@ -1548,23 +1544,14 @@ impl AdamParser {
         ctx.cell_names
             .insert(name.clone(), (cell_id, out_shape.clone()));
 
-        let compiled = match &out_shape {
-            TypeShape::Named(type_id) => {
-                let call_fn = self
-                    .types
-                    .entry_by_type_id(*type_id)
-                    .expect("output cell type registered")
-                    .call_dyn_fn;
-                CompiledOutputs::Single(call_fn)
-            }
-            TypeShape::Tuple(_) => CompiledOutputs::SingleTuple,
-        };
+        let compiled = CompiledOutputs::Single;
         let writer = build_method(
             inputs,
             vec![(name.clone(), cell_id, out_shape)],
             segment,
             compiled,
-        );
+            &self.types,
+        )?;
 
         let requirements = if ctx.is_keyword("require") {
             self.parse_requirement_block(ctx)?
@@ -1681,23 +1668,27 @@ impl AdamParser {
             }));
         }
 
-        let call_fn = self
-            .types
-            .get("bool")
-            .expect("bool always registered")
-            .call_dyn_fn;
         let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
         let input_types: Vec<TypeId> = inputs
             .iter()
             .map(|(_, _, shape)| cell_type_id(shape))
             .collect();
-        let segment = RefCell::new(segment);
+        let frame = RefCell::new(
+            RawFrame::new(
+                segment,
+                &inputs
+                    .iter()
+                    .map(|(_, _, shape)| shape.clone())
+                    .collect::<Vec<_>>(),
+                &cel_runtime::ValueType::leaf::<bool>(),
+                &self.types,
+            )
+            .map_err(|e| ctx.err_at(e.to_string()))?,
+        );
         let requirement = Requirement::new(input_ids, input_types, move |args| {
-            let seg = &mut *segment.borrow_mut();
-            let boxed = call_fn(seg, args)?;
-            Ok(*boxed
-                .downcast::<bool>()
-                .expect("checked TypeId::of::<bool>() above"))
+            let value = frame.borrow_mut().call(args)?;
+            // SAFETY: The complete result was bound as the concrete bool leaf.
+            Ok(unsafe { value.into_typed_bound::<cel_runtime::Leaf<bool>>() })
         });
 
         Ok((name, requirement))
@@ -1709,12 +1700,8 @@ impl AdamParser {
     /// future N-output construct can reuse it; `out` declarations are always single-output,
     /// never destructuring, and currently use their own simpler, separate dispatch instead.
     ///
-    /// A non-destructuring single output (`destructure` false; always `outputs.len() == 1`)
-    /// takes the segment's single result directly (scalar via `call_dyn`, tuple-typed via
-    /// `call_dyn_as_dynamic_sequence`, including source unit). A destructuring binding
-    /// (`destructure` true, one or more outputs — see `ast::BindingDecl::destructure`) requires
-    /// the result to be a tuple of matching arity and element shapes, split element-wise via
-    /// `call_dyn_tuple_mixed`.
+    /// Direct bindings move the whole result, including source unit. Destructuring requires
+    /// a tuple of exactly matching recursive field shapes and moves its field owners.
     ///
     /// # Errors
     /// Returns `Err` if any output's declared shape doesn't structurally match the body's actual
@@ -1730,55 +1717,15 @@ impl AdamParser {
     ) -> Result<CompiledOutputs> {
         if outputs.len() == 1 && !destructure {
             let (out_name, _, out_shape) = &outputs[0];
-            match out_shape {
-                TypeShape::Named(out_type_id) => {
-                    let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
-                        ctx.err_at(format!("output `{out_name}`: expression produced no value"))
-                    })?;
-                    if actual_type_id != *out_type_id {
-                        let expected = self.types.display_name(out_shape);
-                        let got = self.registered_type_name(actual_type_id);
-                        return Err(ctx.err_at(format!(
-                            "output `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
-                        )));
-                    }
-                    let call_fn = self
-                        .types
-                        .entry_by_type_id(*out_type_id)
-                        .expect("registered")
-                        .call_dyn_fn;
-                    Ok(CompiledOutputs::Single(call_fn))
-                }
-                TypeShape::Tuple(elements) if elements.is_empty() => {
-                    if segment.peek_tuple_arity() != Some(0) {
-                        return Err(ctx.err_at(format!(
-                            "output `{out_name}`: type mismatch: expected `()`, got a non-`()` \
-                             value"
-                        )));
-                    }
-                    Ok(CompiledOutputs::SingleTuple)
-                }
-                TypeShape::Tuple(_) => {
-                    let stack_info = segment.peek_stack_infos(1).first();
-                    let matches = stack_info.is_some_and(|info| {
-                        info.value_type.tuple_elements().is_some_and(|elements| {
-                            tuple_shape_matches_associated(out_shape, elements)
-                        })
-                    });
-                    if !matches {
-                        let actual = stack_info
-                            .and_then(|info| info.value_type.tuple_elements())
-                            .and_then(|elements| self.shape_of_associated(elements).ok())
-                            .map(|s| self.types.display_name(&s))
-                            .unwrap_or_else(|| "a non-matching value".to_string());
-                        return Err(ctx.err_at(format!(
-                            "output `{out_name}`: type mismatch: expected `{}`, got `{actual}`",
-                            self.types.display_name(out_shape)
-                        )));
-                    }
-                    Ok(CompiledOutputs::SingleTuple)
-                }
+            let actual = self.segment_shape(segment)?;
+            if &actual != out_shape {
+                return Err(ctx.err_at(format!(
+                    "output `{out_name}`: type mismatch: expected `{}`, got `{}`",
+                    self.types.display_name(out_shape),
+                    self.types.display_name(&actual)
+                )));
             }
+            Ok(CompiledOutputs::Single)
         } else {
             let arity = segment.peek_tuple_arity().unwrap_or(0);
             if arity != outputs.len() {
@@ -1792,33 +1739,21 @@ impl AdamParser {
                 .tuple_elements()
                 .map(<[_]>::to_vec)
                 .unwrap_or_default();
-            let mut extractors = Vec::with_capacity(outputs.len());
             for (i, ((out_name, _, out_shape), elem)) in outputs.iter().zip(&associated).enumerate()
             {
-                if !element_shape_matches(out_shape, elem) {
+                if !self
+                    .types
+                    .value_type(out_shape)
+                    .same_shape(&elem.value_type)
+                {
                     return Err(ctx.err_at(format!(
                         "output {i} `{out_name}`: type mismatch: expected `{}`, got `{}`",
                         self.types.display_name(out_shape),
                         self.associated_display_name(elem)
                     )));
                 }
-                extractors.push(match out_shape {
-                    TypeShape::Named(type_id) => {
-                        let entry = self.types.entry_by_type_id(*type_id).expect("registered");
-                        cel_runtime::DynExtractor::Scalar(*type_id, entry.extract_box_fn)
-                    }
-                    TypeShape::Tuple(_) => {
-                        let table = self.types.element_descriptors_for(out_shape);
-                        cel_runtime::DynExtractor::Tuple(Box::new(move |type_id: TypeId| {
-                            table
-                                .iter()
-                                .find(|(tid, ..)| *tid == type_id)
-                                .map(|(_, d, c, e, dbg)| (*d, *c, *e, *dbg))
-                        }))
-                    }
-                });
             }
-            Ok(CompiledOutputs::Tuple(extractors))
+            Ok(CompiledOutputs::Tuple)
         }
     }
 
@@ -1872,58 +1807,22 @@ impl AdamParser {
 // Free functions
 // ---------------------------------------------------------------------------
 
-/// How one input cell's identifier scope entry pushes its value onto a deduced-expression body's
-/// segment: a scalar cell via a plain `push_arg`-family function pointer, or a
-/// tuple-typed cell via `cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple` (given the
-/// declared shape's `AssociatedType` prototype, so ordinary CEL tuple indexing/operators work on
-/// it exactly as on an inline tuple literal).
-enum InputPush {
-    /// A scalar input cell's `push_arg` function pointer.
-    Scalar(PushArgFn),
-    /// A tuple-typed input cell's declared shape, as an `AssociatedType` prototype (cloned per
-    /// call, since `push_arg_as_dynamic_sequence_tuple` consumes its argument by value).
-    Tuple(Vec<cel_runtime::AssociatedType>),
-}
+/// Complete metadata for an input cell's canonical borrowed argument read.
+type InputPush = cel_runtime::ValueType;
 
-/// Returns whether one live tuple element `a` structurally matches one declared leaf/tuple
-/// `shape` — the base case `tuple_shape_matches_associated` recurses into.
-fn element_shape_matches(shape: &TypeShape, a: &cel_runtime::AssociatedType) -> bool {
-    match shape {
-        TypeShape::Named(type_id) => a.value_type.type_id() == *type_id,
-        TypeShape::Tuple(_) => a
-            .value_type
-            .tuple_elements()
-            .is_some_and(|children| tuple_shape_matches_associated(shape, children)),
-    }
-}
-
-/// Returns whether a whole tuple's element list `associated` structurally matches
-/// `shape`'s own top-level element list (same arity, each pair checked via
-/// `element_shape_matches`) — `shape` must be `TypeShape::Tuple`.
-fn tuple_shape_matches_associated(
-    shape: &TypeShape,
-    associated: &[cel_runtime::AssociatedType],
-) -> bool {
-    let TypeShape::Tuple(elements) = shape else {
-        return false;
-    };
-    elements.len() == associated.len()
-        && elements
-            .iter()
-            .zip(associated)
-            .all(|(e, a)| element_shape_matches(e, a))
+/// Compares private compound conditional keys at an already validated boundary.
+///
+/// - Complexity: O(v) for v contained values.
+fn compound_eq(a: &dyn Any, b: &dyn Any) -> bool {
+    a.downcast_ref::<CellValue>() == b.downcast_ref::<CellValue>()
 }
 
 /// How to turn one compiled `expression`'s result into per-output values.
 enum CompiledOutputs {
-    /// One output, scalar: the segment's single result, boxed via `call_dyn`.
-    Single(CallDynFn),
-    /// One output, tuple-typed: the segment's whole tuple result, moved into one
-    /// `DynamicSequence` via `call_dyn_as_dynamic_sequence`.
-    SingleTuple,
-    /// A destructuring binding (one or more outputs): the segment's tuple result, split
-    /// element-wise via `call_dyn_tuple_mixed`.
-    Tuple(Vec<cel_runtime::DynExtractor>),
+    /// Moves the segment's whole result into one cell.
+    Single,
+    /// Moves the segment's tuple fields into source-ordered output cells.
+    Tuple,
 }
 
 /// Builds a [`Method`] from parsed inputs, outputs, the compiled body segment, and how
@@ -1933,7 +1832,8 @@ fn build_method(
     outputs: NamedCells,
     segment: DynSegment,
     compiled: CompiledOutputs,
-) -> Method {
+    types: &TypeRegistry,
+) -> Result<Method> {
     let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
     let output_ids: Vec<CellId> = outputs.iter().map(|(_, id, _)| *id).collect();
     let input_types: Vec<TypeId> = inputs
@@ -1945,40 +1845,35 @@ fn build_method(
         .map(|(_, _, shape)| cell_type_id(shape))
         .collect();
 
-    // Wrap in RefCell: MethodFn is Fn (not FnMut), so interior mutability is required
-    // to call call_dyn/call_dyn_tuple(&mut self) from an immutable closure reference.
-    let segment = RefCell::new(segment);
-
-    let f =
-        move |inputs_any: &[&dyn Any]| -> std::result::Result<Vec<Box<dyn Any>>, anyhow::Error> {
-            let seg = &mut *segment.borrow_mut();
-            match &compiled {
-                CompiledOutputs::Single(call_fn) => Ok(vec![call_fn(seg, inputs_any)?]),
-                CompiledOutputs::SingleTuple => {
-                    let seq = seg.call_dyn_as_dynamic_sequence(inputs_any)?;
-                    Ok(vec![Box::new(seq) as Box<dyn Any>])
-                }
-                CompiledOutputs::Tuple(extractors) => {
-                    // Safety: every DynExtractor::Scalar extractor here is extract_box_impl::<T>
-                    // (via TypeEntry::extract_box_fn), which clones rather than moves --
-                    // satisfying call_dyn_tuple_mixed's contract, exactly like the pre-tuple
-                    // call_dyn_tuple call site this replaces.
-                    unsafe { seg.call_dyn_tuple_mixed(inputs_any, extractors) }
-                }
-            }
-        };
-
-    Method::new(input_ids, output_ids, input_types, output_types, f)
+    let frame = RefCell::new(
+        Frame::new(
+            segment,
+            &inputs.iter().map(|(_, _, s)| s.clone()).collect::<Vec<_>>(),
+            &outputs
+                .iter()
+                .map(|(_, _, s)| s.clone())
+                .collect::<Vec<_>>(),
+            matches!(compiled, CompiledOutputs::Tuple),
+            types,
+        )
+        .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?,
+    );
+    Ok(Method::new(
+        input_ids,
+        output_ids,
+        input_types,
+        output_types,
+        move |inputs| frame.borrow_mut().call(inputs),
+    ))
 }
 
 /// Flattens a declared cell's `TypeShape` to the single `TypeId` `adam_rs` itself needs for its
-/// own (CEL-agnostic) type bookkeeping — a `Tuple` shape always flattens to
-/// `TypeId::of::<cel_runtime::DynamicSequence>()`, since every tuple shape shares that one
-/// concrete storage type regardless of arity/element types.
+/// own (CEL-agnostic) storage bookkeeping. Compound shape identity remains separate from
+/// the private common storage carrier and is validated before constructing any adapter.
 fn cell_type_id(shape: &TypeShape) -> TypeId {
     match shape {
         TypeShape::Named(type_id) => *type_id,
-        TypeShape::Tuple(_) => TypeId::of::<cel_runtime::DynamicSequence>(),
+        _ => TypeId::of::<CellValue>(),
     }
 }
 
@@ -2168,16 +2063,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_cell_initializer_rejects_persistent_array_cells_explicitly() {
+    fn parse_cell_initializer_preserves_persistent_array_cells() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        let err = parser
+        let parsed = parser
             .parse_str("sheet s { cell values = []: [(i32, f64)]; }")
-            .expect_err("persistent aggregate cells belong to Task 7");
-
+            .unwrap();
+        type Pairs = cel_runtime::ArrayOf<
+            cel_runtime::Cons<
+                cel_runtime::Leaf<i32>,
+                cel_runtime::Cons<cel_runtime::Leaf<f64>, cel_runtime::Nil>,
+            >,
+        >;
         assert!(
-            err.message().contains("cannot infer a type"),
-            "got: {}",
-            err.message()
+            parsed
+                .read_compound::<Pairs>(parsed.cell_names["values"].0)
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -2478,10 +2379,12 @@ mod tests {
     }
 
     #[test]
-    fn cell_filter_on_a_tuple_typed_cell_is_a_parse_error() {
+    fn cell_filter_on_a_tuple_typed_cell_is_supported() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        let err = parser.parse_str("sheet s { cell a: (i32, i32) filter (_.0, _.1); }");
-        assert!(err.is_err());
+        let sheet = parser
+            .parse_str("sheet s { cell a: (i32, i32) filter (_.0, _.1); }")
+            .unwrap();
+        assert!(sheet.filter_kind(sheet.cell_names["a"].0).is_some());
     }
 
     #[test]
@@ -3161,8 +3064,13 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let (cell_id, _) = sheet.cell_names["pair"].clone();
-        let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
-        let (a, b): (i32, i32) = value.try_to_tuple().unwrap();
+        let value = sheet
+            .read_compound::<cel_runtime::Cons<
+                cel_runtime::Leaf<i32>,
+                cel_runtime::Cons<cel_runtime::Leaf<i32>, cel_runtime::Nil>,
+            >>(cell_id)
+            .unwrap();
+        let (a, b) = (value.1, value.0.1);
         assert_eq!((a, b), (3, 4));
     }
 
@@ -3184,8 +3092,13 @@ mod tests {
         sheet.propagate().unwrap();
         let (pair_id, _) = sheet.cell_names["pair"].clone();
         let (extra_id, _) = sheet.cell_names["extra"].clone();
-        let pair = sheet.read::<cel_runtime::DynamicSequence>(pair_id).unwrap();
-        let (a, b): (i32, i32) = pair.try_to_tuple().unwrap();
+        let pair = sheet
+            .read_compound::<cel_runtime::Cons<
+                cel_runtime::Leaf<i32>,
+                cel_runtime::Cons<cel_runtime::Leaf<i32>, cel_runtime::Nil>,
+            >>(pair_id)
+            .unwrap();
+        let (a, b) = (pair.1, pair.0.1);
         assert_eq!((a, b), (3, 4));
         assert_eq!(*sheet.read::<i32>(extra_id).unwrap(), 3);
     }
@@ -3265,8 +3178,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let (cell_id, _) = sheet.cell_names["nothing"].clone();
-        let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
-        assert_eq!(value.arity(), 0);
+        sheet.read_compound::<cel_runtime::Nil>(cell_id).unwrap();
     }
 
     #[test]
@@ -3714,7 +3626,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let cell_id = *sheet.output_names.get("pair").unwrap();
-        let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
+        let value = sheet.read::<CellValue>(cell_id).unwrap();
         assert_eq!(format!("{value:?}"), "(3, 3)");
     }
 
@@ -3917,7 +3829,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_with_no_annotation_and_unregistered_type_is_error() {
+    fn parse_out_infers_structural_array_without_registration() {
         let result = parser().parse_str(
             r#"
             sheet s {
@@ -3926,9 +3838,15 @@ mod tests {
             }
         "#,
         );
+        let mut sheet = result.unwrap();
+        sheet.propagate().unwrap();
         assert!(
-            result.is_err(),
-            "an out with no annotation whose writer body produces an unregistered type must be an error"
+            sheet
+                .read_compound::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>(
+                    sheet.cell_names["x"].0
+                )
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -3988,10 +3906,12 @@ mod tests {
             ])
         );
         let value = parsed
-            .sheet
-            .read::<cel_runtime::DynamicSequence>(cell_id)
+            .read_compound::<cel_runtime::Cons<
+                cel_runtime::Leaf<i32>,
+                cel_runtime::Cons<cel_runtime::Leaf<f64>, cel_runtime::Nil>,
+            >>(cell_id)
             .unwrap();
-        let (a, b): (i32, f64) = value.try_to_tuple().unwrap();
+        let (a, b) = (value.1, value.0.1);
         assert_eq!((a, b), (1, 2.5));
     }
 
@@ -4002,10 +3922,12 @@ mod tests {
             .unwrap();
         let (cell_id, _) = parsed.cell_names["a"].clone();
         let value = parsed
-            .sheet
-            .read::<cel_runtime::DynamicSequence>(cell_id)
+            .read_compound::<cel_runtime::Cons<
+                cel_runtime::Leaf<i32>,
+                cel_runtime::Cons<cel_runtime::Leaf<f64>, cel_runtime::Nil>,
+            >>(cell_id)
             .unwrap();
-        let (a, b): (i32, f64) = value.try_to_tuple().unwrap();
+        let (a, b) = (value.1, value.0.1);
         assert_eq!((a, b), (0, 0.0));
     }
 
@@ -4021,13 +3943,15 @@ mod tests {
             .parse_str("sheet s { cell a: (i32, (f64, String)) = (1, (2.5, \"x\")); }")
             .unwrap();
         let (cell_id, _) = parsed.cell_names["a"].clone();
-        let value = parsed
-            .sheet
-            .read::<cel_runtime::DynamicSequence>(cell_id)
-            .unwrap();
-        let (a, nested): (i32, cel_runtime::DynamicSequence) = value.try_to_tuple().unwrap();
-        assert_eq!(a, 1);
-        let (b, c): (f64, String) = nested.try_to_tuple().unwrap();
+        type Inner = cel_runtime::Cons<
+            cel_runtime::Leaf<f64>,
+            cel_runtime::Cons<cel_runtime::Leaf<String>, cel_runtime::Nil>,
+        >;
+        type Outer =
+            cel_runtime::Cons<cel_runtime::Leaf<i32>, cel_runtime::Cons<Inner, cel_runtime::Nil>>;
+        let value = parsed.read_compound::<Outer>(cell_id).unwrap();
+        assert_eq!(value.1, 1);
+        let (b, c) = (value.0.1.1, value.0.1.0.1);
         assert_eq!((b, c), (2.5, "x".to_string()));
     }
 
@@ -4045,8 +3969,13 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let cell_id = *sheet.output_names.get("pair").unwrap();
-        let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
-        let (a, b): (i32, i32) = value.try_to_tuple().unwrap();
+        let value = sheet
+            .read_compound::<cel_runtime::Cons<
+                cel_runtime::Leaf<i32>,
+                cel_runtime::Cons<cel_runtime::Leaf<i32>, cel_runtime::Nil>,
+            >>(cell_id)
+            .unwrap();
+        let (a, b) = (value.1, value.0.1);
         assert_eq!((a, b), (3, 3));
     }
 
@@ -4059,11 +3988,7 @@ mod tests {
         let result = parser().parse_str("sheet s { cell x = 1i32..5i32; }");
         assert!(result.is_err());
         let err = result.expect_err("expected Err");
-        assert_eq!(
-            err.message(),
-            "cannot infer a type for this expression; register a type name for it or add an \
-             explicit `: type_expr` annotation"
-        );
+        assert!(err.message().contains("cannot infer a type"));
     }
 
     #[test]

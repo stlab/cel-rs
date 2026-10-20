@@ -842,8 +842,13 @@ impl ValueType {
         self.0.cloneable
     }
 
-    /// Returns whether the frozen plan can compare every required child.
-    pub(crate) fn can_compare(&self) -> bool {
+    /// Returns whether this complete descriptor supplies value equality.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(!cel_runtime::ValueType::leaf::<i32>().can_compare());
+    /// ```
+    pub fn can_compare(&self) -> bool {
         self.0.comparable
     }
 

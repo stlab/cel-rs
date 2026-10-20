@@ -358,6 +358,22 @@ impl OwnedValue {
         }
     }
 
+    /// Moves into an exact previously bound concrete representation.
+    ///
+    /// # Safety
+    /// This owner's complete descriptor must match `R`, not merely its carrier.
+    /// - Complexity: O(s) for s representation bytes.
+    ///
+    /// # Examples
+    /// Prefer [`Self::try_into_typed`] at checked host boundaries.
+    pub unsafe fn into_typed_bound<R: ValueRepr>(mut self) -> R::Value {
+        let mut destination = MaybeUninit::<R::Value>::uninit();
+        unsafe {
+            self.move_into(destination.as_mut_ptr().cast());
+            destination.assume_init()
+        }
+    }
+
     /// Clones through the frozen plan without consuming or mutating this value.
     ///
     /// If a leaf clone panics, every completed cloned prefix is destroyed and
@@ -463,9 +479,28 @@ impl OwnedValue {
     /// Borrows the raw representation for trusted, already validated execution.
     ///
     /// The pointer remains live only while this owner remains borrowed.
-    pub(crate) fn as_ptr(&self) -> *const u8 {
+    ///
+    /// # Examples
+    /// ```
+    /// let owner = cel_runtime::OwnedValue::new::<cel_runtime::Leaf<i32>>(1);
+    /// assert!(!owner.as_ptr().is_null());
+    /// ```
+    pub fn as_ptr(&self) -> *const u8 {
         debug_assert!(self.live);
         self.allocation.pointer.as_ptr()
+    }
+
+    /// Compares values whose complete identity has already been bound by a host.
+    ///
+    /// # Safety
+    /// Both owners must have exactly the same complete shape, and this owner's
+    /// descriptor must support equality.
+    /// - Complexity: O(v) for v contained values, excluding leaf comparison costs.
+    ///
+    /// # Examples
+    /// Use [`Self::try_eq`] at checked host boundaries.
+    pub unsafe fn eq_bound(&self, other: &Self) -> bool {
+        unsafe { equal_raw(&self.value_type, self.as_ptr(), other.as_ptr()) }
     }
 
     /// Transfers the representation without any runtime identity checks.

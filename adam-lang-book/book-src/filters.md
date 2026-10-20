@@ -122,7 +122,8 @@ per-kind restriction.
 
 ## Errors
 
-Two filter-declaration mistakes are caught while parsing the sheet, before it is ever
-resolved: a non-range filter body that never references `_` fails with "filter must
-reference `_`", and a `filter` attached to a tuple-typed cell fails with "filter on a
-tuple-typed cell is not yet supported". At most one filter may be attached per cell.
+The parser catches filter-declaration mistakes before resolving the sheet: a non-range
+filter body that never references `_` fails with "filter must reference `_`", and a body
+with the wrong complete type fails with "filter must produce `T`". Filters accept tuples
+and arrays as well as concrete leaves; compound results must match every nested field and
+element type. At most one filter may be attached per cell.

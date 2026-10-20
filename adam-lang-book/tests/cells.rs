@@ -10,9 +10,10 @@ fn tuple_typed_cell() {
         ))
         .unwrap();
     let point = parsed.cell_names["point"].0;
-    let value = parsed
-        .read::<cel_runtime::DynamicSequence>(point)
-        .unwrap()
-        .clone();
-    assert_eq!(value.try_to_tuple::<(f64, f64)>().unwrap(), (0.0, 0.0));
+    type Point = cel_runtime::Cons<
+        cel_runtime::Leaf<f64>,
+        cel_runtime::Cons<cel_runtime::Leaf<f64>, cel_runtime::Nil>,
+    >;
+    let value = parsed.read_compound::<Point>(point).unwrap();
+    assert_eq!((value.1, value.0.1), (0.0, 0.0));
 }

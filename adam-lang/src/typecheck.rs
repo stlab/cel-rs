@@ -216,6 +216,14 @@ fn shape_to_ty(shape: &TypeShape, registry: &TypeRegistry) -> Ty {
                 .map(|element| shape_to_ty(element, registry))
                 .collect(),
         ),
+        TypeShape::Array(element) => Ty::Array(Box::new(shape_to_ty(element, registry))),
+        TypeShape::Callable(parameters, result) => Ty::Callable(
+            parameters
+                .iter()
+                .map(|p| shape_to_ty(p, registry))
+                .collect(),
+            Box::new(shape_to_ty(result, registry)),
+        ),
     }
 }
 
@@ -433,13 +441,8 @@ fn expr_matches_shape(
                 expr.span().end,
             ));
         }
-        (_, TypeShape::Named(type_id)) => {
-            let Some(entry) = registry.entry_by_type_id(*type_id) else {
-                diagnostics
-                    .extend(check_expr_with_type_resolver(expr, resolve, resolve_type, lookup).1);
-                return; // unrecognized custom type: never statically checked, matches Ty::Any
-            };
-            let declared = shape_to_ty(&TypeShape::Named(entry.type_id), registry);
+        (_, TypeShape::Named(_) | TypeShape::Array(_) | TypeShape::Callable(_, _)) => {
+            let declared = shape_to_ty(shape, registry);
             let (actual, body_diags) =
                 check_expr_with_type_resolver(expr, resolve, resolve_type, lookup);
             let valid = body_diags.is_empty();
@@ -605,9 +608,8 @@ fn is_range_inclusive_body(expr: &Expr) -> bool {
     matches!(expr, Expr::Op { name, .. } if name == "range_inclusive")
 }
 
-/// Checks one filtered cell's `filter` clause, if present: a tuple-typed filtered cell is
-/// rejected outright (mirroring the runtime parser's own rejection — not yet supported by either
-/// layer); otherwise, the body's inferred type must unify with this cell's own declared/inferred
+/// Checks one filtered cell's `filter` clause, if present: the body's inferred type must
+/// unify with this cell's own declared/inferred
 /// shape (`_`'s type, via `body_resolve`'s special case below), and the body must reference `_`
 /// — the value being filtered — at least once. Every other identifier is resolved exactly as any
 /// other deduced expression in this file (a `relationship` binding, an `out` initializer): via
@@ -637,18 +639,6 @@ fn check_filter(
     };
 
     let shape = expected_shape(name, declared);
-    if matches!(shape, Some(TypeShape::Tuple(_))) {
-        // Mirrors `adam_lang::parser::AdamParser::parse_cell_filter`'s runtime rejection of a
-        // tuple-typed filtered cell — not yet supported by either layer, so both must agree
-        // rather than the CST checker accepting a construct the runtime cannot build.
-        diagnostics.push(ParseError::new_range(
-            format!("cell `{name}`: filter on a tuple-typed cell is not yet supported"),
-            filter.span.start,
-            filter.span.end,
-        ));
-        return;
-    }
-
     let own_ty = resolve(name);
     let body_resolve = |ident: &str| -> Ty {
         if ident == "_" {
@@ -659,8 +649,7 @@ fn check_filter(
     };
 
     match shape {
-        Some(TypeShape::Tuple(_)) => unreachable!("handled above"),
-        Some(TypeShape::Named(_)) => {
+        Some(_) => {
             let (body_ty, body_diags) =
                 check_expr_with_type_resolver(&filter.body, &body_resolve, resolve_type, lookup);
             diagnostics.extend(body_diags);
@@ -1491,12 +1480,10 @@ mod tests {
     }
 
     #[test]
-    fn filter_on_a_tuple_typed_cell_is_a_diagnostic() {
-        // Mirrors the runtime parser's own rejection (`adam_lang::parser::AdamParser::
-        // parse_cell_filter`) — a tuple-typed filtered cell isn't yet supported by either layer.
+    fn filter_on_a_tuple_typed_cell_is_supported() {
         let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0, _.1); }");
         let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
-        assert_eq!(diags.len(), 1);
+        assert!(diags.is_empty());
     }
 
     #[test]
