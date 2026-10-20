@@ -866,7 +866,41 @@ impl TypeRegistry {
         })
     }
 
+    /// Checks default availability without constructing any values.
+    ///
+    /// Arrays need no element defaults; tuple fields are checked in source order.
+    /// # Errors
+    /// Names the first missing leaf default or callable requiring an initializer.
+    /// - Complexity: O(n) in constructed shape nodes.
+    pub(crate) fn validate_default(&self, shape: &TypeShape) -> anyhow::Result<()> {
+        match shape {
+            TypeShape::Named(id) => {
+                anyhow::ensure!(
+                    self.entry_by_type_id(*id)
+                        .expect("resolved leaf")
+                        .default_fn
+                        .is_some(),
+                    "type `{}` has no default; provide `= ...`",
+                    self.display_name(shape)
+                );
+            }
+            TypeShape::Tuple(fields) => {
+                for field in fields {
+                    self.validate_default(field)?;
+                }
+            }
+            TypeShape::Array(_) => {}
+            TypeShape::Callable(_, _) => {
+                anyhow::bail!("callable has no default; provide an initializer `= ...`")
+            }
+        }
+        Ok(())
+    }
+
     /// Emits recursive defaults, leaving arrays empty without constructing their elements.
+    ///
+    /// Cell builders preflight default availability and cell capabilities for the entire
+    /// descriptor before calling this effectful emitter.
     ///
     /// # Errors
     /// Names the precise missing default leaf; callables require an initializer.

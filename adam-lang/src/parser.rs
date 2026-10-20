@@ -847,17 +847,33 @@ impl AdamParser {
             .unwrap_or_else(|_| elem.value_type.type_name().to_string())
     }
 
-    /// Builds a default-valued cell for `shape` (scalar or tuple, recursively), adding it to
+    /// Validates an entire default cell before invoking any registered defaults.
+    ///
+    /// Missing defaults take precedence over missing clone/equality capabilities.
+    /// # Errors
+    /// Names the first missing default in source order, or an unavailable cell capability.
+    /// - Complexity: O(n) in shape nodes.
+    fn validate_default_cell(&self, shape: &TypeShape, span: Span) -> Result<()> {
+        self.types
+            .validate_default(shape)
+            .and_then(|()| CellValue::validate(&self.types.value_type(shape)))
+            .map_err(|error| ParseError::new(error.to_string(), span))
+    }
+
+    /// Builds a default-valued cell for `shape` (scalar or compound, recursively), adding it to
     /// `ctx.sheet`.
     ///
+    /// - Complexity: O(n) in shape nodes, plus registered default construction costs.
+    ///
     /// # Errors
-    /// Returns `Err` naming the type/leaf that has no registered default.
+    /// Rejects missing defaults or cell capabilities before invoking any defaults or adding a cell.
     fn build_default_cell(
         &self,
         shape: &TypeShape,
         span: Span,
         ctx: &mut ParseContext,
     ) -> Result<CellId> {
+        self.validate_default_cell(shape, span)?;
         match shape {
             TypeShape::Named(type_id) => {
                 let entry = self
@@ -889,6 +905,8 @@ impl AdamParser {
     /// [`build_cell_from_segment`](Self::build_cell_from_segment) exactly, routed through
     /// `Sheet::add_source` instead of `Sheet::add_cell`.
     ///
+    /// - Complexity: O(n) in shape nodes, plus registered default construction costs.
+    ///
     /// - Precondition: see [`eval_segment_boxed`](Self::eval_segment_boxed).
     ///
     /// # Errors
@@ -912,19 +930,20 @@ impl AdamParser {
         Ok((shape, cell_id))
     }
 
-    /// Builds a default-valued *source* cell for `shape` (scalar or tuple, recursively), adding
+    /// Builds a default-valued *source* cell for `shape` (scalar or compound, recursively), adding
     /// it to `ctx.sheet` (see [`Sheet::add_source`]). Mirrors
     /// [`build_default_cell`](Self::build_default_cell) exactly, routed through
     /// `Sheet::add_source` instead of `Sheet::add_cell`.
     ///
     /// # Errors
-    /// Returns `Err` naming the type/leaf that has no registered default.
+    /// Rejects missing defaults or cell capabilities before invoking any defaults or adding a cell.
     fn build_default_source_cell(
         &self,
         shape: &TypeShape,
         span: Span,
         ctx: &mut ParseContext,
     ) -> Result<CellId> {
+        self.validate_default_cell(shape, span)?;
         match shape {
             TypeShape::Named(type_id) => {
                 let entry = self.types.entry_by_type_id(*type_id).expect(
