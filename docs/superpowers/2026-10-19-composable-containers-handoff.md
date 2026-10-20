@@ -4,8 +4,6 @@ Status snapshot: 2026-10-19. All nine tasks are implemented and reviewed.
 The whole-branch review's two findings are fixed and its scoped re-review
 approves both corrections. The complete required local gate passes again after
 those fixes. No push or PR was requested.
-The final two-finding fixwave below passes affected checks; scoped re-review
-remains pending until the controller supplies its verdict and fresh full gate.
 
 Approved contract:
 [design](specs/2026-10-19-cel-composable-containers-design.md) and
