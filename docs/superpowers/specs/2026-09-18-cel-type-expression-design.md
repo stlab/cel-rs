@@ -1,5 +1,10 @@
 # A unified, generic-capable `type_expression` grammar
 
+> **Historical status (2026-10-19):** The unified grammar, singleton tuples,
+> structural `Fn`, and complete `ResolvedType` / `Ty` shapes are implemented.
+> Earlier narrow descriptor/registration details below are historical; see the
+> [current handoff](../2026-10-19-composable-containers-handoff.md).
+
 ## Status
 
 Proposed design for the `type_expr` grammar production referenced (but never defined) at

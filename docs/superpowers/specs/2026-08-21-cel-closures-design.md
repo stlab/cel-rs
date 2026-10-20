@@ -1,5 +1,10 @@
 # First-class closures in CEL, for adam-lang `filter` clauses
 
+> **Historical status (2026-10-19):** CEL now supports structural `Fn` types,
+> `Callable<Args, R>` / `FnOf`, canonical compound parameters/results, and
+> prepared invocation. The original closure/filter proposal below is history;
+> see the [current handoff](../2026-10-19-composable-containers-handoff.md).
+
 ## Problem
 
 adam-lang needs a way to declare a per-cell input filter (idempotent domain constraint, e.g.

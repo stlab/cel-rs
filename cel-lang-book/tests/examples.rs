@@ -106,7 +106,7 @@ fn if_expression_selects_the_true_branch() {
 }
 
 #[test]
-fn array_literal_round_trips_through_dynamic_array() {
+fn array_literal_round_trips_through_canonical_array() {
     let mut segment = CELParser::new(OpLookup::new())
         .parse_str("[0, 1, 2]")
         .unwrap();

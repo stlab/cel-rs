@@ -17,7 +17,7 @@ closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|")
 closure_param = identifier ":" type_expression .
 type_expression = identifier [ "(" type_expression { "," type_expression } ")" ]
                 | "[" type_expression "]"
-                | "(" [ type_expression { "," type_expression } ] ")" .
+                | "(" [ type_expression [ "," [ type_expression { "," type_expression } ] ] ] ")" .
 ```
 
 ## Worked examples
@@ -29,6 +29,8 @@ type_expression = identifier [ "(" type_expression { "," type_expression } ")" ]
 (|x: f64| x)(1.0)
 (|pair: (i32, i32)| pair.0 + pair.1)((2, 3))
 (|rows: [[i32]]| rows)([[1], [2]])
+|f: Fn((i32,), [i32])| f(42)
+[]: [Fn((i32,), [i32])]
 ```
 
 ## Exact rules
@@ -40,8 +42,8 @@ Closures:
 - `|a: T, b: U| body` declares multiple typed parameters in source order.
 - An annotation uses the host's configured type environment: built-in
   scalars and generic types, registered cloneable leaves, recursive tuple
-  types, and recursive array types. Arrays retain the existing restriction
-  that their elements cannot be tuples.
+  types, recursive array types, and structural `Fn` signatures. Container
+  shapes require no separate registration.
 - `|pair: (i32, i32)| pair.0 + pair.1` declares one tuple-typed
   parameter, not two separate parameters.
 - The closure body is one expression.
@@ -72,9 +74,33 @@ for existing host integrations. `DynClosure::typed` and
 `DynSegment::push_closure` additionally retain the complete metadata
 needed by general CEL invocation.
 
+## Typed callable interoperability
+
+`Fn((A, B), R)` has two parameters, `Fn((A,), R)` has one, and `Fn((), R)`
+has none. The parameter list is always a tuple type: `Fn(A, R)` does not
+stand for one parameter. A parameter can itself be a tuple, array, or callable.
+Arrays compare whole signatures when checking element homogeneity.
+
+`Callable<Args, R>` uses concrete canonical list arguments and an owned result.
+`FnOf<ArgsWitness, ResultWitness>` supplies its complete structural witness.
+`Callable::from_fn` binds a native function pointer;
+`Callable::from_prepared` binds a matching `PreparedSegment`. Both expose the
+same `call(&args)` interface with no signature comparisons during invocation.
+Clones share execution state; recursive entry into the same carrier returns an
+error. Body errors propagate. This interface prepares for a future compiled
+backend; that backend is not implemented.
+
+This example checks a typed empty array and calls native and interpreted
+functions through the same Rust interface. Callables need no equality capability
+to be array elements:
+
+```rust
+{{#include ../tests/composable_containers.rs:callable-arrays}}
+```
+
 ## Edge cases
 
 - Closure parameter lists do not accept a trailing comma.
-- `(i32,)` is not accepted as a one-element closure tuple type.
+- `(i32,)` is a one-element tuple type; `(i32)` groups the scalar type.
 - Closure bodies do not introduce statement blocks or local binding
   syntax.

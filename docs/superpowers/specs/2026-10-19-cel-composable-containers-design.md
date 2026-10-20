@@ -2,7 +2,11 @@
 
 **Date:** 2026-10-19
 **Branch:** `worktree-simple-straighten`
-**Status:** Approved by the user on 2026-10-19. Implementation has not started.
+**Status:** Approved by the user on 2026-10-19. Tasks 1–8 implemented and
+reviewed; Task 9 executable documentation and final gate tracked in the
+[handoff](../2026-10-19-composable-containers-handoff.md).
+The original design below remains the historical approved contract; the handoff
+records final API spellings, verification, and any completion limits.
 
 **Builder check:** A source-backed review found no additional planning blockers.
 The user approved the complete design, including the nested-array mapping,

@@ -16,6 +16,38 @@
 //! Operations are added using the form `op#[r]` where # is the arity of the operation and the
 //! optional `r` signifies that the operation returns a [`std::result::Result`] type and may fail.
 //!
+//! # Composable canonical values
+//!
+//! [`Array<T>`] owns actual contiguous `T` values. [`Array::into_vec`] and
+//! [`Array::from_vec`] transfer allocations in O(1); [`Array::as_slice`] borrows
+//! them. A nested array uses `Array<Array<T>>`: its vector view is
+//! `Vec<Array<T>>`, not `Vec<Vec<T>>`. Deep native conversion builds a new outer
+//! vector. Tuples use source-ordered [`CStackList`] values ending in [`CNil<()>`],
+//! bridged to native tuples by [`IntoCStackList`] and [`IntoRustTuple`].
+//! Source unit uses [`Nil`], not an opaque host [`Leaf<()>`].
+//!
+//! [`ValueType`] records complete recursive identity/layout and optional
+//! capabilities; [`ArrayOf`], [`Cons`], [`Nil`], [`Leaf`], and [`FnOf`] witness
+//! concrete representations. Moving storage requires no clone/equality/debug
+//! bounds. [`OwnedValue`] checks arbitrary erased external values, whereas
+//! [`DynSegment::prepare`] binds a [`PreparedSegment`] once. Repeated prepared
+//! calls borrow arguments and return independent owners without comparing
+//! descriptors or downcasting. Runtime-bound hosts can instead prepare a
+//! [`prepared_segment::PreparedRawSegment`] and uphold its unsafe pointer contract.
+//! [`Callable`] binds native or prepared bodies to the same typed interface.
+//! This is interoperability with native Rust, not a macro-compiled CEL backend.
+//!
+//! ```
+//! use cel_runtime::{ArrayOf, Cons, IntoCStackList, IntoRustTuple, Leaf, Nil, DynSegment};
+//! type Row = Cons<Leaf<i32>, Cons<Leaf<bool>, Nil>>;
+//! let mut body = DynSegment::new::<()>();
+//! body.just(7i32); body.just(true); body.make_tuple(2, 0).unwrap();
+//! body.make_array(1, 0).unwrap();
+//! let mut prepared = body.prepare::<Nil, ArrayOf<Row>>().unwrap();
+//! let row = prepared.call(&().into_c_stack_list()).unwrap().into_vec().pop().unwrap();
+//! assert_eq!(row.into_rust_tuple(), (7, true));
+//! ```
+//!
 //! # Examples
 //!
 //! ```rust

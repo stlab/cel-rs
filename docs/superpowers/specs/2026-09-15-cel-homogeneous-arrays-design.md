@@ -1,5 +1,12 @@
 # CEL Homogeneous Arrays
 
+> **Historical status (2026-10-19, supersedes the September note below):**
+> Tuple arrays, recursive containers, typed empty callable arrays, and complete
+> shape checks are implemented. The old array carrier below has been removed;
+> `Array<T>` is the single array representation. See the
+> [current handoff](../2026-10-19-composable-containers-handoff.md).
+> Earlier status notes and the original proposal are retained as history.
+
 **Date:** 2026-09-15
 **Branch:** `worktree-cell-parser/arrays`
 

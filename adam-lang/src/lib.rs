@@ -51,6 +51,25 @@
 //! [`ParsedSheet::source_compound`] with canonical representation witnesses. Relationships,
 //! filters, outputs, conditionals, and requirements validate complete frames at construction
 //! and run the existing raw CEL engine without recursively checking types on propagation.
+//! The private `CellValue` owns one complete compound value, not individual erased
+//! array elements. Checked host writes reject mismatched recursive witnesses before
+//! mutation. Reads clone independent owners; source reads preserve aspirations.
+//! Formatting is a separate capability: [`prepare_compound_cell_formatter`] binds
+//! it without adding equality or clone requirements.
+//!
+//! ```
+//! use adam_lang::{AdamParser, TypeRegistry};
+//! use cel_parser::OpLookup;
+//! use cel_runtime::{Array, ArrayOf, Cons, IntoCStackList, Leaf, Nil};
+//! type Rows = ArrayOf<Cons<Leaf<i32>, Cons<Leaf<bool>, Nil>>>;
+//! let mut parsed = AdamParser::new(TypeRegistry::new(), OpLookup::new())
+//!     .parse_str("sheet s { source rows: [(i32, bool)]; out copy := rows; }").unwrap();
+//! let id = parsed.cell_names["rows"].0;
+//! parsed.write_compound::<Rows>(id, Array::from_vec(vec![(7, true).into_c_stack_list()])).unwrap();
+//! parsed.propagate().unwrap();
+//! assert_eq!(parsed.read_compound::<Rows>(parsed.output_names["copy"]).unwrap().len(), 1);
+//! assert_eq!(parsed.source_compound::<Rows>(id).unwrap().as_slice()[0].1, 7);
+//! ```
 //!
 //! A `cell_filter`'s `expression` names no explicit parameter list: `_` always refers to the
 //! candidate value being conformed (of the filtered cell's own declared type), and every other

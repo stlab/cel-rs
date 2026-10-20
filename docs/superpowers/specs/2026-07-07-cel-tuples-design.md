@@ -1,5 +1,10 @@
 # Design: Tuple Types in CEL
 
+> **Historical status (2026-10-19):** The tuple syntax remains, but canonical
+> source-ordered lists and complete recursive descriptors now replace the
+> original packing/marker details. See the [current handoff](../2026-10-19-composable-containers-handoff.md).
+> The original design below is preserved as history.
+
 **Date:** 2026-07-07
 **Branch:** `worktree-cel-tuples`
 

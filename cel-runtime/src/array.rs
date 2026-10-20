@@ -2,6 +2,9 @@
 //!
 //! Transfers to and from vectors preserve their allocations. Nested arrays use
 //! `Array<Array<T>>`, so each outer element is itself a typed array owner.
+//! Its outer allocation transfers to `Vec<Array<T>>`, not `Vec<Vec<T>>`;
+//! explicitly converting each inner owner builds a new outer vector. Borrowing
+//! exposes `&[Array<T>]` without consuming the outer or inner owners.
 //!
 //! ```
 //! use cel_runtime::Array;

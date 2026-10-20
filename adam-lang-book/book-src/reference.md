@@ -74,6 +74,16 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
   `write_compound`, and `source_compound` with exact recursive representation witnesses.
   Arrays default to empty, tuples default recursively, and callables require an initializer.
   Every stored cell requires cloning and value equality.
+- Compound reads return independent owners; `source_compound` reads the original
+  aspiration, even when filtering changes the effective value. Wrong complete
+  read/write witnesses fail at the external boundary before a write mutates state.
+  The private `CellValue` retains one canonical owner, not per-element erasure.
+- Prepared relationship, output, filter, and requirement frames bind recursive
+  storage once during sheet construction. Propagation executes the raw CEL
+  engine without recursive shape checks. Value-dependent failures still propagate.
+- `Fn((A,), R)` and `Fn((), R)` denote one and zero parameters. Callable cells,
+  including empty arrays of callables, fail without equality; CEL container
+  storage alone does not require equality. Debug formatting is independent.
 - `source name: T;` / `source name = expr;` / `source name: T = expr;`: identical rules to the
   three `cell` forms above, evaluated the same way — a `source` declaration is a `cell`
   declaration in every respect except its fixed `CellKind` (below).

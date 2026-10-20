@@ -49,7 +49,7 @@ array_expression = "[" [ expression { "," expression } ] "]"
                  [ ":" type_expr ] .
 type_expr = identifier [ "(" type_expr { "," type_expr } ")" ]
           | "[" type_expr "]"
-          | "(" [ type_expr { "," type_expr } ] ")" .
+          | "(" [ type_expr [ "," [ type_expr { "," type_expr } ] ] ] ")" .
 if_expression = "if" expression "{" expression "}"
               [ "else" ( "{" expression "}" | if_expression ) ] .
 closure_expression = "||" expression
@@ -84,6 +84,7 @@ true as i32
 | --- | --- | --- |
 | Built-in scalar types | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64`, `bool`, `String` | These are the named cast targets. Closure annotations also accept registered cloneable leaves and built-in generic types through the configured type resolver. |
 | Other value forms | `char`, byte strings, C strings, unit, tuples, arrays, ranges, closures | Expressions can use these values, but they are not extra built-in scalar type names. |
+| Structural types | `()`, `(T,)`, `(T, U)`, `[T]`, `Fn((A, B), R)` | Compose recursively without registering each aggregate. `(T)` groups a type. `Fn((), R)` has no parameters; `Fn((T,), R)` has one. |
 
 ## Literal table
 
@@ -168,6 +169,8 @@ when the evaluation environment installs it. See
 | Array | `[a, b, ...]` | Unannotated arrays are non-empty, homogeneous, and comma-separated. |
 | Typed array | `[a, b]: [T]`, `[]: [T]` | The annotation states the complete array type and permits empty arrays. |
 | Nested array | `[[0], [1]]`, `[]: [[i32]]` | Each element must still have the same array element type. |
+| Tuple array | `[(0, true)]`, `[]: [(i32, bool)]` | Each positional type participates in homogeneity. |
+| Callable array | `[]: [Fn((i32,), [i32])]` | Empty arrays retain full signatures; equality is not required for storage. |
 | Range | `a..b`, `a..=b`, `a..`, `..b`, `..=b`, `..` | Endpoint-bearing forms require homogeneous numeric endpoints. |
 
 ## Closure table
@@ -188,9 +191,18 @@ when the evaluation environment installs it. See
 - Tuple indexing uses `.N` with an unsuffixed integer and may be chained.
 - Unannotated arrays are non-empty and homogeneous. A complete type
   annotation permits an empty array and must match the element type exactly.
-- Tuple-valued array element annotations are not supported.
-- Tuples and arrays are distinct forms, and tuple values are not valid
-  array elements.
+- Tuples and arrays are distinct forms and compose recursively, including
+  registered leaves, source unit, and callable values.
+- Rust interoperability uses `Array<T>`, source-ordered canonical lists
+  (`Nil`/`Cons` witnesses), and `Callable<Args, R>` (`FnOf` witness).
+  `Array<Array<T>>` converts to `Vec<Array<T>>`, not allocation-preserving
+  deep native vectors. See [collections](collections.md#rust-interoperability).
+- Arbitrary erased external values require complete shape checks.
+  `PreparedSegment` and `prepared_segment::PreparedRawSegment` validate at
+  preparation, not each invocation. Clone, equality, and formatting are
+  explicit independent capabilities.
+- Native Rust operations can serve interpreted CEL through typed adapters.
+  A macro-compiled CEL backend does not yet exist.
 - Comparison expressions consume one comparison operator.
 - Range forms do not chain.
 - `expr.name` and `expr.name()` invoke the same host-provided unary operation.
@@ -221,8 +233,7 @@ when the evaluation environment installs it. See
   operator.
 - A closure body resolves its own parameters and does not capture free
   variables from the enclosing expression.
-- A closure parameter tuple type does not have a 1-element form, so
-  `(T,)` is not accepted there.
+- A one-element tuple type requires `(T,)`; `(T)` is grouping.
 
 ## Edge cases
 
@@ -235,4 +246,4 @@ when the evaluation environment installs it. See
 - `1..2..3` is not valid.
 - `..=` is not valid without a right endpoint.
 - `[]` is not valid.
-- `[(0, 1)]` is not valid.
+- `[(0, 1), (true, 2)]` is not valid because element shapes differ.

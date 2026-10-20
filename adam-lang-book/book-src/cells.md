@@ -115,6 +115,34 @@ rejects a callable cell when its descriptor lacks equality. Adam does not invent
 identity or suppress propagation. Registered host function markers retain the concrete
 capabilities their type registration supplies.
 
+## Executable host boundary
+
+`CellValue` is Adam's private whole-value compound owner, not a wrapper around
+each array element. A host supplies `ArrayOf`, `Cons`, `Nil`, and `Leaf` witnesses
+to the checked `ParsedSheet` boundary. A wrong nested shape fails before mutation.
+Cloning and equality are required for persistence/propagation; debug formatting
+is an independent capability. Containers themselves do not impose those bounds.
+Even an empty array of callable elements lacks equality when its element
+descriptor lacks equality; emptiness does not manufacture that capability.
+
+This example defaults recursive compounds, writes an array of concrete tuple
+lists, propagates it to an output, and reads the source aspiration:
+
+```rust
+{{#include ../tests/composable_containers.rs:compound-cells}}
+```
+
+The corresponding capability error is also executable:
+
+```rust
+{{#include ../tests/composable_containers.rs:callable-cell-capability}}
+```
+
+The Inspector formats arrays and tuples recursively when debug capabilities
+exist, including typed empty arrays and unit. Compound edits are explicitly
+unsupported and leave the cell unchanged; primitive editors retain their
+ordinary behavior. Formatting does not imply an editable source round trip.
+
 ## Names and declaration order
 
 A cell's name must be unique across the whole sheet: `cell`s and [`out`](outputs.md)

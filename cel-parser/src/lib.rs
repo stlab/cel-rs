@@ -4,6 +4,31 @@
 //! The parser follows the CEL grammar specification and provides detailed error reporting
 //! with source location information.
 //!
+//! # Canonical typed execution
+//!
+//! Arrays, tuples, unit, registered leaves, and `Fn` signatures compose
+//! recursively without registering each aggregate shape. [`ResolvedType`] and
+//! [`Ty`] retain complete shapes; shared physical carrier IDs are not identities.
+//! Preparation validates concrete witnesses before the body executes:
+//!
+//! ```
+//! use cel_parser::{CELParser, OpLookup};
+//! use cel_runtime::{ArrayOf, Cons, IntoCStackList, IntoRustTuple, Leaf, Nil};
+//! type Pair = Cons<Leaf<i32>, Cons<Leaf<bool>, Nil>>;
+//! let body = CELParser::new(OpLookup::new()).parse_str("[(7, true)]").unwrap();
+//! let mut prepared = body.prepare::<Nil, ArrayOf<Pair>>().unwrap();
+//! let pairs = prepared.call(&().into_c_stack_list()).unwrap().into_vec();
+//! assert_eq!(pairs.into_iter().next().unwrap().into_rust_tuple(), (7, true));
+//! ```
+//!
+//! Repeated prepared calls do not repeat recursive type checks. Arbitrary
+//! erased host imports remain checked external boundaries. Cloning borrowed
+//! argument reads, comparing values, and formatting values require their own
+//! capabilities; merely moving a value into a container does not. Source
+//! `Fn((A,), R)` names one parameter and `Fn((), R)` names none. The typed
+//! Rust carrier is [`cel_runtime::Callable`], witnessed by [`cel_runtime::FnOf`].
+//! `cel-rs-macros` validates source; no native macro backend is implemented.
+//!
 //! # Error Handling
 //!
 //! Parse errors are returned as [`ParseError`], which carries a `proc_macro2::Span` for precise diagnostics.

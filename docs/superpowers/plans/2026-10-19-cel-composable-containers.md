@@ -1,5 +1,12 @@
 # Composable CEL Containers Implementation Plan
 
+> **Execution status (2026-10-19):** Tasks 1–8 are implemented and reviewed.
+> Task 4 was decomposed into bounded prerequisites and one atomic canonical
+> cutover. Task 9 verifies the final APIs rather than copying prerequisite-era
+> names. See the [handoff](../2026-10-19-composable-containers-handoff.md)
+> for actual commands/results and remaining gate/review limits. The original
+> approved plan and checkboxes below are preserved as history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make CEL arrays and tuples compose over all expressible value types with concrete Rust interoperability and construction-validated, check-free segment execution.
