@@ -12,7 +12,6 @@
 
 use std::any::{Any, TypeId};
 use std::cell::Cell;
-use std::mem::MaybeUninit;
 
 use anyhow::{Result, anyhow, ensure};
 
@@ -943,6 +942,7 @@ impl DynSegment {
     ///
     /// The stack holds the array followed by an opaque index of type `I`.
     /// No clone capability is required, including for nested tuple/array elements.
+    /// Moving the validated index into its concrete type does not allocate.
     /// # Errors
     /// Rejects absent/nonmatching operands during registration. Execution rejects
     /// negative/unrepresentable or out-of-bounds indices and cleans every operand.
@@ -977,11 +977,9 @@ impl DynSegment {
         self.segment.update_base_alignment(element.align());
         self.segment.raw0_(move |stack| {
             let mut guard = cleanup.guard(stack);
-            let mut index_owner = unsafe { index.take(guard.stack) };
+            // SAFETY: Construction validates the exact opaque I descriptor.
+            let native = unsafe { index.take_typed::<I>(guard.stack) };
             let array_owner = unsafe { array.take(guard.stack) };
-            let mut native = MaybeUninit::<I>::uninit();
-            unsafe { index_owner.move_into(native.as_mut_ptr().cast()) };
-            let native = unsafe { native.assume_init() };
             let selected = native
                 .try_into()
                 .map_err(|_| anyhow!("array index is negative or unrepresentable"))
@@ -1368,6 +1366,9 @@ impl DynSegment {
 
     /// Invokes a canonical callable below its source-ordered evaluated arguments.
     ///
+    /// Moving the bound callee into its concrete carrier does not allocate.
+    /// Argument and result transfers retain their erased ownership.
+    ///
     /// # Errors
     /// Rejects unavailable/mismatched callable metadata or insufficient operands.
     /// Execution propagates body errors, retaining their original context.
@@ -1426,10 +1427,8 @@ impl DynSegment {
             // Move every operand to independent guarded owners before user code.
             let mut guard = cleanup.guard(stack);
             let arguments = unsafe { frame.take(guard.stack) };
-            let mut callee_owner = unsafe { callee.take(guard.stack) };
-            let mut closure = MaybeUninit::<crate::DynClosure>::uninit();
-            unsafe { callee_owner.move_into(closure.as_mut_ptr().cast()) };
-            let closure = unsafe { closure.assume_init() };
+            // SAFETY: Every validated callable descriptor uses the DynClosure carrier.
+            let closure = unsafe { callee.take_typed::<crate::DynClosure>(guard.stack) };
             // Compiler-produced carriers retain a freeze lease; typed native
             // and prepared payloads have no mutable compiler-facing escape.
             let allocation = crate::owned_value::Allocation::new(output_type.layout());
@@ -1748,6 +1747,255 @@ mod performance_tests {
                 drop(body);
                 crate::canonical_operation::LIVE_CLEANUP_SLOTS
                     .with(|count| assert_eq!(count.get(), before));
+            }
+        }
+    }
+
+    /// Checks that prepared calls allocate only their erased argument and result frames.
+    #[test]
+    fn prepared_callees_avoid_temporary_operand_allocations() {
+        use crate::{Callable, FnOf};
+
+        type Args = Cons<Leaf<u64>, Nil>;
+        type Function = FnOf<Args, Leaf<u64>>;
+        /// Adds one through a native borrowed argument frame.
+        fn increment(args: &<Args as ValueRepr>::Value) -> Result<u64> {
+            args.1.checked_add(1).ok_or_else(|| anyhow!("overflow"))
+        }
+        let mut interpreted = DynSegment::new::<()>();
+        interpreted.push_arg::<u64>(0);
+        interpreted.just(1u64);
+        interpreted
+            .op2r(|a: u64, b: u64| a.checked_add(b).ok_or_else(|| anyhow!("overflow")))
+            .unwrap();
+        let interpreted =
+            Callable::from_prepared(interpreted.prepare::<Args, Leaf<u64>>().unwrap());
+        for function in [Callable::from_fn(increment), interpreted] {
+            for calls in [1u64, 10, 100] {
+                let mut body = DynSegment::new::<()>();
+                body.just(17u64);
+                for _ in 0..calls {
+                    let function = function.clone();
+                    body.op0_repr::<Function, _>(move || function.clone())
+                        .unwrap();
+                    body.push_arg::<u64>(0);
+                    body.invoke_closure(1).unwrap();
+                    body.op2r(|a: u64, b: u64| a.checked_add(b).ok_or_else(|| anyhow!("overflow")))
+                        .unwrap();
+                }
+                let mut prepared = body.prepare::<Args, Leaf<u64>>().unwrap();
+                let args = (7u64,).into_c_stack_list();
+                let expected = 17 + calls * 8;
+                assert_eq!(prepared.call(&args).unwrap(), expected);
+                crate::owned_value::ALLOCATIONS.with(|count| count.set(0));
+                for _ in 0..100 {
+                    assert_eq!(prepared.call(&args).unwrap(), expected);
+                }
+                let allocations = crate::owned_value::ALLOCATIONS.with(Cell::get);
+                assert_eq!(allocations, 200 * calls as usize, "{calls} calls");
+            }
+        }
+    }
+
+    /// Checks that prepared indexing allocates only the erased array and selected value.
+    #[test]
+    fn prepared_indices_avoid_temporary_operand_allocations() {
+        for accesses in [1u64, 10, 100] {
+            let mut body = DynSegment::new::<()>();
+            body.just(17u64);
+            for _ in 0..accesses {
+                let array = Array::from_vec(vec![7u64]);
+                body.op0_repr::<ArrayOf<Leaf<u64>>, _>(move || array.clone())
+                    .unwrap();
+                body.push_arg::<i32>(0);
+                body.array_index::<i32>().unwrap();
+                body.op2r(|a: u64, b: u64| a.checked_add(b).ok_or_else(|| anyhow!("overflow")))
+                    .unwrap();
+            }
+            let mut prepared = body.prepare::<Cons<Leaf<i32>, Nil>, Leaf<u64>>().unwrap();
+            let args = (0i32,).into_c_stack_list();
+            let expected = 17 + accesses * 7;
+            assert_eq!(prepared.call(&args).unwrap(), expected);
+            crate::owned_value::ALLOCATIONS.with(|count| count.set(0));
+            for _ in 0..100 {
+                assert_eq!(prepared.call(&args).unwrap(), expected);
+            }
+            let allocations = crate::owned_value::ALLOCATIONS.with(Cell::get);
+            assert_eq!(allocations, 200 * accesses as usize, "{accesses} accesses");
+        }
+    }
+
+    /// Checks callee, argument, and aligned ambient ownership across retries and unwinding.
+    #[test]
+    fn prepared_callee_moves_preserve_error_and_unwind_cleanup() {
+        use crate::{Callable, FnOf};
+
+        type Args = Cons<Leaf<CloneDrop>, Nil>;
+        type Function = FnOf<Args, Leaf<u64>>;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mode = Rc::new(Cell::new(0u8));
+        let leaf = |name| CloneDrop {
+            name,
+            events: events.clone(),
+            fail: Rc::new(Cell::new(false)),
+            owned: true,
+        };
+        let mut body = DynSegment::new::<()>();
+        let ambient = leaf("ambient");
+        body.op0(move || ambient.clone());
+        body.just(9u8);
+        let callee_events = events.clone();
+        let callee_mode = mode.clone();
+        body.op0_repr::<Function, _>(move || {
+            let sentinel = CloneDrop {
+                name: "callee",
+                events: callee_events.clone(),
+                fail: Rc::new(Cell::new(false)),
+                owned: true,
+            };
+            let mode = callee_mode.clone();
+            let mut inner = DynSegment::new::<()>();
+            inner.push_arg::<CloneDrop>(0);
+            inner
+                .op1r(move |argument: CloneDrop| {
+                    let _sentinel = &sentinel;
+                    drop(argument);
+                    match mode.get() {
+                        0 => Ok(7u64),
+                        1 => Err(anyhow!("callee failure")),
+                        _ => panic!("callee panic"),
+                    }
+                })
+                .unwrap();
+            Callable::from_prepared(inner.prepare::<Args, Leaf<u64>>().unwrap())
+        })
+        .unwrap();
+        let argument = leaf("argument");
+        body.op0(move || argument.clone());
+        body.invoke_closure(1).unwrap();
+        body.op3(|ambient: CloneDrop, marker: u8, value: u64| {
+            assert_eq!(marker, 9);
+            drop(ambient);
+            value
+        })
+        .unwrap();
+        let mut prepared = body.prepare::<Nil, Leaf<u64>>().unwrap();
+        let args = ().into_c_stack_list();
+        for _ in 0..2 {
+            for next in [0, 1, 0, 2, 0] {
+                mode.set(next);
+                let result = catch_unwind(AssertUnwindSafe(|| prepared.call(&args)));
+                match next {
+                    0 => assert_eq!(result.unwrap().unwrap(), 7),
+                    1 => assert_eq!(result.unwrap().unwrap_err().to_string(), "callee failure"),
+                    _ => assert!(result.is_err()),
+                }
+                let expected = if next == 2 {
+                    ["argument", "callee", "argument", "ambient"]
+                } else {
+                    ["argument", "argument", "callee", "ambient"]
+                };
+                assert_eq!(&*events.borrow(), &expected);
+                events.borrow_mut().clear();
+            }
+        }
+    }
+
+    /// Owns an over-aligned index whose conversion can succeed, fail, or unwind.
+    #[repr(align(128))]
+    struct TrackedIndex {
+        mode: u8,
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl TryFrom<TrackedIndex> for usize {
+        type Error = ();
+
+        /// Converts valid indices, reports conversion failure, or triggers a test unwind.
+        fn try_from(index: TrackedIndex) -> std::result::Result<Self, Self::Error> {
+            match index.mode {
+                0 => Ok(1),
+                1 => Err(()),
+                2 => panic!("index conversion panic"),
+                _ => Ok(2),
+            }
+        }
+    }
+
+    impl Drop for TrackedIndex {
+        /// Records destruction of the uniquely owned index on every exit.
+        fn drop(&mut self) {
+            self.events.borrow_mut().push("index");
+        }
+    }
+
+    /// Checks index, array, and misaligned ambient ownership across all conversion exits.
+    #[test]
+    fn prepared_index_moves_preserve_error_and_unwind_cleanup() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mode = Rc::new(Cell::new(0u8));
+        let mut body = DynSegment::new::<()>();
+        let log = events.clone();
+        body.op0(move || CloneDrop {
+            name: "ambient",
+            events: log.clone(),
+            fail: Rc::new(Cell::new(false)),
+            owned: true,
+        });
+        body.just(9u8);
+        let origin = body.current_stack_offset();
+        for name in ["first", "last"] {
+            let log = events.clone();
+            body.op0(move || CloneDrop {
+                name,
+                events: log.clone(),
+                fail: Rc::new(Cell::new(false)),
+                owned: true,
+            });
+        }
+        body.make_array(2, origin).unwrap();
+        let index_events = events.clone();
+        let index_mode = mode.clone();
+        body.op0(move || TrackedIndex {
+            mode: index_mode.get(),
+            events: index_events.clone(),
+        });
+        body.array_index::<TrackedIndex>().unwrap();
+        body.op3(|ambient: CloneDrop, marker: u8, value: CloneDrop| {
+            assert_eq!(marker, 9);
+            drop(ambient);
+            value
+        })
+        .unwrap();
+        let mut prepared = body.prepare::<Nil, Leaf<CloneDrop>>().unwrap();
+        let args = ().into_c_stack_list();
+        for _ in 0..2 {
+            for next in [0, 1, 0, 2, 0, 3, 0] {
+                mode.set(next);
+                let result = catch_unwind(AssertUnwindSafe(|| prepared.call(&args)));
+                match next {
+                    0 => drop(result.unwrap().unwrap()),
+                    1 => assert_eq!(
+                        result.unwrap().err().unwrap().to_string(),
+                        "array index is negative or unrepresentable"
+                    ),
+                    2 => assert!(result.is_err()),
+                    _ => assert!(
+                        result
+                            .unwrap()
+                            .err()
+                            .unwrap()
+                            .to_string()
+                            .contains("out of bounds")
+                    ),
+                }
+                let expected = if next == 0 {
+                    ["index", "first", "ambient", "last"]
+                } else {
+                    ["index", "last", "first", "ambient"]
+                };
+                assert_eq!(&*events.borrow(), &expected);
+                events.borrow_mut().clear();
             }
         }
     }
