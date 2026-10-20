@@ -211,16 +211,25 @@ where
     }
 }
 
-// trait Fn<Args> is currently unstable - so we use a call trait as a temporary workaround.
 /// Callable segment abstraction for uniform invocation across arities.
-pub trait Callable<Args> {
+///
+/// This trait invokes statically typed stack segments; [`crate::Callable`] is
+/// the separate shared native/interpreted value facade.
+///
+/// # Examples
+/// ```
+/// use cel_runtime::{Segment, SegmentCallable};
+/// let body = Segment::<()>::new().op0(|| 7i32);
+/// assert_eq!(body.call(()).unwrap(), 7);
+/// ```
+pub trait SegmentCallable<Args> {
     /// The result type produced by calling with `Args`.
     type Output;
-    /// Invoke the segment with the supplied `args`.
+    /// Invokes the segment with the supplied arguments.
     fn call(&self, args: Args) -> Self::Output;
 }
 
-impl<T: DropStack + 'static> Callable<()> for Segment<(), T>
+impl<T: DropStack + 'static> SegmentCallable<()> for Segment<(), T>
 where
     T::Tail: EmptyList + CStackListHeadLimit,
 {
@@ -230,7 +239,7 @@ where
     }
 }
 
-impl<T: DropStack + 'static, A: 'static> Callable<(A,)> for Segment<(A,), T>
+impl<T: DropStack + 'static, A: 'static> SegmentCallable<(A,)> for Segment<(A,), T>
 where
     T::Tail: EmptyList + CStackListHeadLimit,
 {
@@ -240,7 +249,7 @@ where
     }
 }
 
-impl<T: DropStack + 'static, A: 'static, B: 'static> Callable<(A, B)> for Segment<(A, B), T>
+impl<T: DropStack + 'static, A: 'static, B: 'static> SegmentCallable<(A, B)> for Segment<(A, B), T>
 where
     T::Tail: EmptyList + CStackListHeadLimit,
 {

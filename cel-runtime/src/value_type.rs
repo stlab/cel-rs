@@ -124,6 +124,56 @@ pub struct Nil;
 /// ```
 pub struct Cons<H, T>(PhantomData<fn() -> (H, T)>);
 
+/// Names a canonical tuple argument list, sealed to [`Nil`] and [`Cons`].
+///
+/// # Examples
+/// ```
+/// use cel_runtime::{ArgumentList, Cons, Leaf, Nil};
+/// fn list<A: ArgumentList>() {}
+/// list::<Cons<Leaf<i32>, Nil>>();
+/// ```
+pub trait ArgumentList: ValueRepr + sealed::List {}
+impl<T: sealed::List> ArgumentList for T {}
+
+/// Names a callable with a complete canonical parameter and result signature.
+///
+/// The shared carrier always clones, regardless of argument/result capabilities.
+/// Equality and default construction are not implied.
+///
+/// # Examples
+/// ```
+/// use cel_runtime::{FnOf, Nil, Leaf, ValueRepr, Callable, CNil};
+/// let _: <FnOf<Nil, Leaf<i32>> as ValueRepr>::Value =
+///     Callable::from_fn(|_: &CNil<()>| Ok(7));
+/// ```
+///
+/// Non-list arguments cannot authorize a callable representation:
+/// ```compile_fail
+/// use cel_runtime::{FnOf, Leaf, ValueRepr};
+/// let _ = FnOf::<Leaf<()>, Leaf<i32>>::value_type();
+/// ```
+pub struct FnOf<A, R>(PhantomData<fn() -> (A, R)>);
+
+impl<A: ArgumentList, R: ValueRepr> sealed::Sealed for FnOf<A, R> {}
+impl<A: ArgumentList, R: ValueRepr> ValueRepr for FnOf<A, R> {
+    type Value = crate::Callable<A::Value, R::Value>;
+
+    /// Describes every parameter and result node with canonical carrier ownership.
+    ///
+    /// - Complexity: O(n) time and storage for n signature nodes.
+    fn value_type() -> ValueType {
+        let args = A::value_type();
+        ValueType::callable(
+            args.tuple_elements()
+                .expect("sealed canonical argument list")
+                .iter()
+                .map(|field| field.value_type.clone())
+                .collect(),
+            R::value_type(),
+        )
+    }
+}
+
 impl<T: 'static> sealed::Sealed for Leaf<T> {}
 impl<T: 'static> ValueRepr for Leaf<T> {
     /// Describes the explicitly registered opaque host representation.
@@ -194,8 +244,8 @@ where
 /// Identifies a value structurally, independently of aggregate storage markers.
 ///
 /// Callable metadata includes every parameter and the result. Its private
-/// ownership plan uses the existing shared `DynClosure` carrier; a public typed
-/// callable witness remains separate.
+/// ownership plan uses the shared `DynClosure` carrier, exactly matching the
+/// transparent [`crate::Callable`] facade authorized by [`FnOf`].
 ///
 /// # Examples
 ///

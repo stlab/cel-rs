@@ -76,7 +76,10 @@ mod tuple_value;
 pub mod value_type;
 
 pub use array::Array;
+/// Signature-typed callable facade over the canonical shared carrier.
+pub mod callable;
 pub use c_stack_list::*;
+pub use callable::Callable;
 pub use dyn_closure::{CallDynFn, DynClosure};
 pub use dyn_segment::*;
 pub use dynamic_array::*;
@@ -91,4 +94,6 @@ pub use raw_stack::*;
 pub use raw_vec::*;
 pub use segment::*;
 pub use tuple_list::*;
-pub use value_type::{ArrayOf, AssociatedType, Cons, Leaf, Nil, ValueKind, ValueRepr, ValueType};
+pub use value_type::{
+    ArgumentList, ArrayOf, AssociatedType, Cons, FnOf, Leaf, Nil, ValueKind, ValueRepr, ValueType,
+};

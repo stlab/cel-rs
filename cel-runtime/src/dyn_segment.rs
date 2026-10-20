@@ -1836,10 +1836,9 @@ impl DynSegment {
         let arguments_start = self.offset_after(first + 1);
         let frame = StackFramePlan::new(arguments_start, argument_type.clone())?;
         let callee = ResultPlan::new(ambient, callee_type.clone())?;
-        let output = ResultPlan::new(0, result_type.clone())?;
         let destination = ResultPlan::new(ambient, result_type.clone())?;
-        let fields = argument_type.tuple_elements().unwrap().to_vec();
         self.segment.update_base_alignment(result_type.align());
+        let output_type = result_type.clone();
         self.segment.raw0_(move |stack| {
             // Move every operand to independent guarded owners before user code.
             let mut guard = cleanup.guard(stack);
@@ -1848,16 +1847,17 @@ impl DynSegment {
             let mut closure = MaybeUninit::<crate::DynClosure>::uninit();
             unsafe { callee_owner.move_into(closure.as_mut_ptr().cast()) };
             let closure = unsafe { closure.assume_init() };
-            // Every producer of structural callables freezes its carrier. An
-            // imported opaque DynClosure cannot acquire structural metadata.
-            let pointers: Vec<_> = fields
-                .iter()
-                .map(|field| unsafe { arguments.as_ptr().add(field.offset) })
-                .collect();
-            let evaluated = unsafe { closure.call_raw_trusted(&pointers) };
+            // Compiler-produced carriers retain a freeze lease; typed native
+            // and prepared payloads have no mutable compiler-facing escape.
+            let allocation = crate::owned_value::Allocation::new(output_type.layout());
+            let evaluated = unsafe {
+                closure.call_frame_trusted(arguments.as_ptr(), allocation.pointer.as_ptr())
+            };
             match evaluated {
-                Ok(mut stack) => {
-                    let mut result = unsafe { output.take(&mut stack) };
+                Ok(()) => {
+                    let mut result = unsafe {
+                        crate::OwnedValue::from_allocation(allocation, output_type.clone())
+                    };
                     drop(arguments);
                     drop(closure);
                     unsafe { destination.push(guard.stack, &mut result) };
