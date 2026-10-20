@@ -255,23 +255,7 @@ impl DynClosure {
     /// assert_eq!(closure.call::<i32>(&[]).unwrap(), 42);
     /// ```
     pub fn typed(parameters: Vec<ValueType>, body: DynSegment) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            body.stack_ids.len() == 1,
-            "closure body must produce exactly one value"
-        );
-        body.validate_independent_body()?;
-        for (index, read_type) in &body.argument_reads {
-            anyhow::ensure!(
-                parameters
-                    .get(*index)
-                    .is_some_and(|expected| expected.same_shape(read_type)),
-                "closure body argument {index} differs from its declared signature"
-            );
-            if read_type.tuple_elements().is_some() {
-                read_type.validate_clone()?;
-            }
-        }
-        let result = body.peek_stack_infos(1)[0].value_type.clone();
+        let result = Self::validate_body(&parameters, &body)?;
         let param_types = parameters
             .iter()
             .map(|p| {
@@ -288,6 +272,59 @@ impl DynClosure {
             signature: Some(std::sync::Arc::new(ClosureSignature { parameters, result })),
             body: RefCell::new(body),
         })))
+    }
+
+    /// Validates independent execution and declared argument reads, returning the actual result.
+    ///
+    /// # Errors
+    /// Rejects non-single results, dependent bodies, undeclared or mismatched reads,
+    /// and tuple reads without clone adapters.
+    /// - Complexity: O(recursive nodes in body argument reads and result).
+    fn validate_body(parameters: &[ValueType], body: &DynSegment) -> anyhow::Result<ValueType> {
+        anyhow::ensure!(
+            body.stack_ids.len() == 1,
+            "closure body must produce exactly one value"
+        );
+        body.validate_independent_body()?;
+        for (index, read_type) in &body.argument_reads {
+            anyhow::ensure!(
+                parameters
+                    .get(*index)
+                    .is_some_and(|expected| expected.same_shape(read_type)),
+                "closure body argument {index} differs from its declared signature"
+            );
+            if read_type.tuple_elements().is_some() {
+                read_type.validate_clone()?;
+            }
+        }
+        Ok(body.peek_stack_infos(1)[0].value_type.clone())
+    }
+
+    /// Checks the current mutable body against its retained typed signature during preparation.
+    ///
+    /// A legacy dispatcher may have replaced the body without updating its metadata.
+    ///
+    /// # Errors
+    /// Rejects unavailable signatures, an executing body, invalid independent bodies
+    /// or argument reads, and a result differing from the retained signature.
+    /// - Complexity: O(recursive nodes in body argument reads and result).
+    pub(crate) fn validate_body_signature(&self) -> anyhow::Result<()> {
+        let signature = self
+            .0
+            .signature
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("closure signature metadata is unavailable"))?;
+        let body = self
+            .0
+            .body
+            .try_borrow()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        let result = Self::validate_body(&signature.parameters, &body)?;
+        anyhow::ensure!(
+            signature.result.same_shape(&result),
+            "closure body result differs from its declared signature"
+        );
+        Ok(())
     }
 
     /// Returns the metadata retained for a typed CEL closure.
@@ -369,8 +406,9 @@ impl DynClosure {
     ///
     /// # Safety
     ///
-    /// Preparation must bind this closure's full signature and its legacy
-    /// physical frame. Every pointer must remain a live matching borrowed value
+    /// Preparation must validate the actual body's independent origin, argument reads,
+    /// and result against this closure's full signature and its legacy physical
+    /// frame. Every pointer must remain a live matching borrowed value
     /// until execution returns; operations must not retain argument pointers.
     /// The binding must remain valid: a legacy `CallDynFn` dispatcher must not
     /// modify the compiled body between preparation and execution.

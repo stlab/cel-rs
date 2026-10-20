@@ -393,11 +393,12 @@ pub(crate) struct TrustedInvocation {
 }
 
 impl TrustedInvocation {
-    /// Validates semantic identity and the matching legacy physical frame once.
+    /// Validates the actual body, semantic identity, and matching legacy physical frame once.
     ///
     /// # Errors
-    /// Rejects missing/mismatched signatures and incompatible structural frames.
-    /// - Complexity: O(n) comparisons for n parameters.
+    /// Rejects missing/mismatched signatures, incompatible structural frames, an
+    /// executing body, or current body reads, origin, or result violating its signature.
+    /// - Complexity: O(n) comparisons for n parameters and recursive body read/result nodes.
     pub(crate) fn new(closure: DynClosure, signature: ValueType) -> anyhow::Result<Self> {
         let ValueKind::Callable { parameters, result } = signature.kind() else {
             anyhow::bail!("complete callable descriptor required");
@@ -416,6 +417,7 @@ impl TrustedInvocation {
         {
             Self::validate_legacy_leaf(complete, old)?;
         }
+        closure.validate_body_signature()?;
         let result = ResultPlan::new(0, result.as_ref().clone())?;
         Ok(Self {
             closure,
@@ -747,6 +749,186 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// Executes the declared result before replacing the mutable body through a valid dispatcher.
+    fn execute_then_replace(
+        body: &mut DynSegment,
+        arguments: &[&dyn std::any::Any],
+        replacement: DynSegment,
+    ) -> anyhow::Result<Box<dyn std::any::Any>> {
+        let result = body.call_dyn::<String>(arguments)?;
+        *body = replacement;
+        Ok(Box::new(result))
+    }
+
+    /// Returns a closure whose original signature survives a checked call and body replacement.
+    fn mutated_closure(dispatch: crate::dyn_closure::CallDynFn) -> DynClosure {
+        let mut body = DynSegment::new::<()>();
+        body.push_arg::<u8>(0);
+        body.op1(|n: u8| n.to_string()).unwrap();
+        let closure = DynClosure::typed(vec![crate::ValueType::leaf::<u8>()], body).unwrap();
+        let result = closure.call_boxed(&[&7_u8], dispatch).unwrap();
+        assert_eq!(*result.downcast::<String>().unwrap(), "7");
+        closure
+    }
+
+    /// Returns the complete signature retained by the mutation regression closures.
+    fn mutation_signature() -> ValueType {
+        ValueType::callable(vec![ValueType::leaf::<u8>()], ValueType::leaf::<String>())
+    }
+
+    /// Rejects a same-layout incompatible result installed before preparation without executing it.
+    #[test]
+    fn trusted_preparation_rejects_preexisting_same_layout_result_mutation() {
+        /// Returns the original String before installing bytes that are not a valid String.
+        fn dispatch(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            assert_eq!(Layout::new::<String>(), Layout::new::<[usize; 3]>());
+            let mut replacement = DynSegment::new::<()>();
+            replacement.just([0_usize; 3]);
+            execute_then_replace(body, arguments, replacement)
+        }
+        assert!(TrustedInvocation::new(mutated_closure(dispatch), mutation_signature()).is_err());
+    }
+
+    /// Rejects replaced bodies with no result or more than one result before execution.
+    #[test]
+    fn trusted_preparation_rejects_preexisting_result_count_mutation() {
+        /// Replaces the executed body with an empty independent body.
+        fn empty(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            execute_then_replace(body, arguments, DynSegment::new::<()>())
+        }
+        /// Replaces the executed body with two live results.
+        fn multiple(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            let mut replacement = DynSegment::new::<()>();
+            replacement.just(1_u8);
+            replacement.just(String::new());
+            execute_then_replace(body, arguments, replacement)
+        }
+        for dispatch in [empty as crate::dyn_closure::CallDynFn, multiple] {
+            assert!(
+                TrustedInvocation::new(mutated_closure(dispatch), mutation_signature()).is_err()
+            );
+        }
+    }
+
+    /// Rejects incompatible and undeclared argument reads installed before preparation.
+    #[test]
+    fn trusted_preparation_rejects_preexisting_argument_read_mutation() {
+        /// Installs a same-sized read with the wrong concrete identity.
+        fn incompatible(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            let mut replacement = DynSegment::new::<()>();
+            replacement.push_arg::<i8>(0);
+            replacement.op1(|n: i8| n.to_string()).unwrap();
+            execute_then_replace(body, arguments, replacement)
+        }
+        /// Installs a read outside the declared positional frame.
+        fn undeclared(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            let mut replacement = DynSegment::new::<()>();
+            replacement.push_arg::<u8>(1);
+            replacement.op1(|n: u8| n.to_string()).unwrap();
+            execute_then_replace(body, arguments, replacement)
+        }
+        /// Installs an incompatible read hidden inside a conditional fragment.
+        fn conditional(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            let mut replacement = DynSegment::new::<()>();
+            replacement.just(true);
+            let mut first = replacement.new_fragment();
+            first.push_arg::<i8>(0);
+            first.op1(|n: i8| n.to_string()).unwrap();
+            let mut second = replacement.new_fragment();
+            second.just(String::new());
+            replacement.join2(first, second).unwrap();
+            execute_then_replace(body, arguments, replacement)
+        }
+        for dispatch in [
+            incompatible as crate::dyn_closure::CallDynFn,
+            undeclared,
+            conditional,
+        ] {
+            assert!(
+                TrustedInvocation::new(mutated_closure(dispatch), mutation_signature()).is_err()
+            );
+        }
+    }
+
+    /// Rejects preloaded operands and shifted origins installed before preparation.
+    #[test]
+    fn trusted_preparation_rejects_preexisting_dependent_body_mutation() {
+        /// Installs a body requiring one preloaded result operand.
+        fn preloaded(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            execute_then_replace(body, arguments, DynSegment::new::<(String,)>())
+        }
+        /// Installs a fragment whose result is laid out above an ambient value.
+        fn shifted(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            let mut parent = DynSegment::new::<()>();
+            parent.just(1_u64);
+            parent.just(true);
+            let mut replacement = parent.new_fragment();
+            replacement.just(String::new());
+            execute_then_replace(body, arguments, replacement)
+        }
+        for dispatch in [preloaded as crate::dyn_closure::CallDynFn, shifted] {
+            assert!(
+                TrustedInvocation::new(mutated_closure(dispatch), mutation_signature()).is_err()
+            );
+        }
+    }
+
+    /// Accepts a compatible replacement, including a zero-origin fragment, and owns each result.
+    #[test]
+    fn trusted_preparation_accepts_preexisting_compatible_body_mutation() {
+        /// Installs a zero-origin fragment that still reads and returns the declared types.
+        fn dispatch(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            let mut parent = DynSegment::new::<()>();
+            parent.just(true);
+            let mut replacement = parent.new_fragment();
+            replacement.push_arg::<u8>(0);
+            replacement.op1(|n: u8| format!("replacement {n}")).unwrap();
+            execute_then_replace(body, arguments, replacement)
+        }
+        let closure = mutated_closure(dispatch);
+        assert_eq!(closure.call::<String>(&[&8_u8]).unwrap(), "replacement 8");
+        let plan = TrustedInvocation::new(closure, mutation_signature()).unwrap();
+        let argument = 9_u8;
+        let first = unsafe { plan.invoke(&[(&raw const argument).cast()]) }
+            .unwrap()
+            .try_into_typed::<Leaf<String>>()
+            .unwrap();
+        let second = unsafe { plan.invoke(&[(&raw const argument).cast()]) }
+            .unwrap()
+            .try_into_typed::<Leaf<String>>()
+            .unwrap();
+        assert_eq!(first, "replacement 9");
+        assert_eq!(second, first);
+        assert_ne!(first.as_ptr(), second.as_ptr());
     }
 
     /// Transfers a canonical nested result through a padded ambient stack without cloning.
