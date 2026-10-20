@@ -32,6 +32,8 @@
 //! assert_eq!(segment.call((1u32, "2")).unwrap(), "3");
 //! ```
 
+/// Concrete typed ownership for homogeneous, contiguous arrays.
+pub mod array;
 /// Compile-time stack list implementation for type-safe stack operations.
 pub mod c_stack_list;
 /// First-class callable CEL values with declared signatures.
@@ -59,6 +61,7 @@ pub mod segment;
 /// Tuple list implementation for type-safe tuple operations.
 pub mod tuple_list;
 
+pub use array::Array;
 pub use c_stack_list::*;
 pub use dyn_closure::{CallDynFn, DynClosure};
 pub use dyn_segment::*;
