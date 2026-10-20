@@ -743,7 +743,7 @@ impl TypeResolver for TypeRegistry {
     fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
         let key = named_key(name, args);
         self.get(key.as_ref())
-            .and_then(|entry| self.resolved_leaf_type(entry.type_id))
+            .map(|entry| ResolvedLeafType::new(key.into_owned(), (entry.value_type_fn)()))
             .or_else(|| cel_parser::resolve_builtin_named_type(name, args))
     }
 }
@@ -1132,6 +1132,88 @@ mod tests {
             registry.resolve(&expr).unwrap(),
             TypeShape::Named(TypeId::of::<std::ops::RangeInclusive<f64>>())
         );
+    }
+
+    /// Both resolvers retain requested names and concrete identities across alias orders.
+    #[test]
+    fn registered_aliases_preserve_requested_leaf_names() {
+        for names in [["Integer", "i32"], ["i32", "Integer"]] {
+            let mut registry = TypeRegistry::new();
+            for name in names {
+                registry.register::<i32>(name);
+            }
+            let snapshot = registry.cel_type_resolver();
+            for name in names {
+                let direct = registry.resolve_named_type(name, &[]).unwrap();
+                let copied = snapshot.resolve_named_type(name, &[]).unwrap();
+                assert_eq!(direct.type_name(), name);
+                assert_eq!(copied.type_name(), name);
+                assert!(
+                    direct
+                        .complete_value_type()
+                        .unwrap()
+                        .same_shape(&cel_runtime::ValueType::leaf::<i32>())
+                );
+                assert!(
+                    direct
+                        .complete_value_type()
+                        .unwrap()
+                        .same_shape(copied.complete_value_type().unwrap())
+                );
+            }
+        }
+    }
+
+    /// Aliases never rewrite registered keys inside recursive generic arguments.
+    #[test]
+    fn registered_aliases_preserve_recursive_generic_keys() {
+        use std::ops::RangeInclusive;
+
+        for alias_first in [false, true] {
+            let mut registry = TypeRegistry::new();
+            if alias_first {
+                registry.register::<i32>("Integer");
+            }
+            let names = [
+                "Bounds(i32)",
+                "Bounds(Integer)",
+                "Bounds(Bounds(i32))",
+                "Bounds([i32])",
+                "Bounds((i32, [Integer]))",
+                "Bounds((i32,))",
+            ];
+            for name in names {
+                registry.register_no_default::<RangeInclusive<i32>>(name);
+            }
+            if !alias_first {
+                registry.register::<i32>("Integer");
+            }
+            let snapshot = registry.cel_type_resolver();
+            for name in names {
+                for source in [name.to_owned(), format!("[({name}, [Integer])]")] {
+                    let expr = cel_parser::CELParser::new(cel_parser::OpLookup::new())
+                        .parse_type_expr_str(&source)
+                        .unwrap();
+                    let copied = expr.resolve(&snapshot).unwrap().into_value_type().unwrap();
+                    let direct = expr.resolve(&registry).unwrap();
+                    assert_eq!(resolved_name(&direct), source);
+                    let direct = direct.into_value_type().unwrap();
+                    assert!(direct.same_shape(&copied), "{source}");
+                    assert_eq!(
+                        registry.resolve(&expr).unwrap(),
+                        registry.shape_of(&copied).unwrap(),
+                        "{source}"
+                    );
+                }
+            }
+            let missing = cel_parser::CELParser::new(cel_parser::OpLookup::new())
+                .parse_type_expr_str("Bounds([Integer])")
+                .unwrap();
+            let direct = missing.resolve(&registry).unwrap_err();
+            let copied = missing.resolve(&snapshot).unwrap_err();
+            assert_eq!(direct.message(), copied.message());
+            assert!(direct.message().contains("unknown type `Bounds`"));
+        }
     }
 
     #[test]

@@ -591,6 +591,50 @@ fn registered_generic_leaves_and_missing_defaults() {
     assert!(missing.span().start().column > 0);
 }
 
+/// Adding an argument alias preserves existing generic cells and compound propagation.
+#[test]
+fn registered_aliases_preserve_generic_sheet_construction() {
+    use std::ops::RangeInclusive;
+
+    let mut types = TypeRegistry::new();
+    types.register_no_default::<RangeInclusive<i32>>("Bounds(i32)");
+    for add_alias in [false, true] {
+        if add_alias {
+            types.register::<i32>("Integer");
+        }
+        let mut parser = AdamParser::new(types.clone(), OpLookup::new());
+        let mut sheet = parser
+            .parse_str(
+                "sheet s {
+                    cell bounds: Bounds(i32) = 0..=10;
+                    source xs: [(Bounds(i32), [i32])];
+                    out ys: [(Bounds(i32), [i32])] := xs;
+                }",
+            )
+            .unwrap();
+        assert_eq!(
+            *sheet
+                .read::<RangeInclusive<i32>>(sheet.cell_names["bounds"].0)
+                .unwrap(),
+            0..=10
+        );
+        /// A generic leaf beside a structural array.
+        type Item = Cons<Leaf<RangeInclusive<i32>>, Cons<ArrayOf<Leaf<i32>>, Nil>>;
+        sheet
+            .write_compound::<ArrayOf<Item>>(
+                sheet.cell_names["xs"].0,
+                Array::from_vec(vec![(1..=3, Array::from_vec(vec![4])).into_c_stack_list()]),
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let ys = sheet
+            .read_compound::<ArrayOf<Item>>(sheet.cell_names["ys"].0)
+            .unwrap();
+        assert_eq!(ys.as_slice()[0].1, 1..=3);
+        assert_eq!(ys.as_slice()[0].0.1.as_slice(), &[4]);
+    }
+}
+
 /// Complete mismatches fail before operand effects and before host writes.
 #[test]
 fn mismatches_reject_before_effects_or_writes() {
