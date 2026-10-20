@@ -20,7 +20,7 @@ use crate::{DynClosure, RawStack};
 ///
 /// # Errors
 /// Rejects alignment/size overflow and byte lengths exceeding allocation bounds.
-fn stack_position(ambient: usize, layout: Layout) -> anyhow::Result<(usize, usize)> {
+pub(crate) fn stack_position(ambient: usize, layout: Layout) -> anyhow::Result<(usize, usize)> {
     let padding = ambient.wrapping_neg() & (layout.align() - 1);
     let offset = ambient
         .checked_add(padding)

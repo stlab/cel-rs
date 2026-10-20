@@ -36,6 +36,9 @@
 pub mod array;
 /// Compile-time stack list implementation for type-safe stack operations.
 pub mod c_stack_list;
+/// Private validated canonical host-operation emission into the existing raw segment.
+#[allow(dead_code, reason = "Prepared for the atomic interpreter cutover.")]
+mod canonical_operation;
 /// Private canonical container construction and trusted frame moves.
 #[allow(
     dead_code,

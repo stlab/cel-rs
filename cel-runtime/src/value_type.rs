@@ -20,6 +20,14 @@ use crate::c_stack_list::CStackListHeadLimit;
 use crate::tuple_value::TupleLayout;
 use crate::{Array, CNil, CStackList};
 
+#[cfg(test)]
+thread_local! {
+    /// Counts descriptor comparisons on this test thread, including recursive calls.
+    pub(crate) static SHAPE_COMPARISONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Seals representation witnesses and limits list tails to canonical lists.
 mod sealed {
     use super::{AssociatedType, ValueRepr};
@@ -443,6 +451,8 @@ impl ValueType {
     ///     .same_shape(&ValueType::array(ValueType::leaf::<u32>())));
     /// ```
     pub fn same_shape(&self, other: &Self) -> bool {
+        #[cfg(test)]
+        SHAPE_COMPARISONS.with(|count| count.set(count.get().saturating_add(1)));
         self.layout() == other.layout() && same_kind(self.kind(), other.kind())
     }
 
