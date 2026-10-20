@@ -16,10 +16,10 @@ use std::mem::MaybeUninit;
 
 use anyhow::{Result, anyhow, ensure};
 
-use crate::canonical_operation::OperationPlan;
+use crate::canonical_operation::{CleanupPlan, OperationPlan};
 use crate::container_execution::{ContainerPlan, ResultPlan, StackFramePlan, stack_position};
 use crate::host_value_bridge::HostValuePlan;
-use crate::owned_value::{OwnedValue, clone_raw, drop_raw};
+use crate::owned_value::OwnedValue;
 use crate::{
     AssociatedType, CNil, CStackList, CStackListHeadLimit, CStackListHeadPadded, IntoCStackList,
     Leaf, List, RawSegment, RawStack, ReverseList, ValueKind, ValueRepr, ValueType,
@@ -115,82 +115,8 @@ pub struct DynSegment {
     pub(crate) stack_ids: Vec<StackInfo>,
     pub(crate) base_stack_index: usize,
     pub(crate) argument_reads: Vec<(usize, ValueType)>,
-}
-
-/// Binds live raw slots to reverse-order destruction and exact truncation points.
-///
-/// The opaque prefix preceding `origin` belongs to an enclosing interpreter.
-struct CleanupPlan {
-    origin: usize,
-    slots: Vec<(usize, usize, ValueType)>,
-}
-
-impl CleanupPlan {
-    /// Computes immutable destruction positions before registering an instruction.
-    ///
-    /// # Errors
-    /// Rejects unrepresentable frame positions.
-    /// - Complexity: O(n) time and space for n slots.
-    fn new(origin: usize, values: &[ValueType]) -> Result<Self> {
-        let mut end = origin;
-        let slots = values
-            .iter()
-            .map(|value| {
-                let before = end;
-                let (offset, next) = stack_position(before, value.layout())?;
-                end = next;
-                Ok((before, offset, value.clone()))
-            })
-            .collect::<Result<_>>()?;
-        Ok(Self { origin, slots })
-    }
-
-    /// Arms cleanup before any operation that can unwind or return an error.
-    fn guard<'a>(&'a self, stack: &'a mut RawStack) -> CleanupGuard<'a> {
-        CleanupGuard {
-            stack,
-            plan: self,
-            remaining: self.slots.len(),
-            armed: true,
-        }
-    }
-}
-
-/// Destroys the remaining initialized suffix if a callback fails or unwinds.
-struct CleanupGuard<'a> {
-    stack: &'a mut RawStack,
-    plan: &'a CleanupPlan,
-    remaining: usize,
-    armed: bool,
-}
-
-impl CleanupGuard<'_> {
-    /// Destroys slots in reverse order, advancing before each destructor.
-    ///
-    /// - Complexity: O(n) destruction calls for n remaining slots.
-    fn destroy(&mut self) {
-        while self.remaining != 0 {
-            self.remaining -= 1;
-            let (before, offset, ty) = &self.plan.slots[self.remaining];
-            // Remove ownership before user destruction, so unwinding resumes
-            // with the preceding slot rather than destroying this slot twice.
-            unsafe {
-                self.stack.truncate_to(*before, false);
-                self.stack.drop_at(*offset, |pointer| drop_raw(ty, pointer));
-            }
-        }
-        debug_assert_eq!(self.stack.len(), self.plan.origin);
-        self.armed = false;
-    }
-}
-
-impl Drop for CleanupGuard<'_> {
-    /// Continues reverse cleanup during errors and host unwinding.
-    fn drop(&mut self) {
-        if self.armed {
-            self.destroy();
-        }
-    }
+    /// Shares each stack boundary's immutable destruction prefix.
+    cleanup_prefixes: Vec<CleanupPlan>,
 }
 
 impl DynSegment {
@@ -216,6 +142,17 @@ impl DynSegment {
                 .expect("preloaded dynamic arguments must be canonical or ordinary opaque leaves");
             segment.update_base_alignment(info.value_type.align());
         }
+        let mut cleanup_prefixes = Vec::with_capacity(stack_ids.len() + 1);
+        cleanup_prefixes.push(CleanupPlan::empty(0));
+        for info in &stack_ids {
+            cleanup_prefixes.push(
+                cleanup_prefixes
+                    .last()
+                    .unwrap()
+                    .push(info.value_type.clone())
+                    .expect("validated preloaded stack"),
+            );
+        }
         Self {
             segment,
             argument_ids: stack_ids
@@ -225,13 +162,13 @@ impl DynSegment {
             stack_ids,
             base_stack_index: 0,
             argument_reads: Vec::new(),
+            cleanup_prefixes,
         }
     }
 
     /// Creates a conditional fragment above the ambient stack below the condition.
     ///
     /// - Precondition: at least one operand is present.
-    /// - Complexity: O(n) layout work for n ambient slots.
     ///
     /// # Examples
     /// See [`Self::join2`].
@@ -239,12 +176,11 @@ impl DynSegment {
         debug_assert!(!self.stack_ids.is_empty());
         let mut result = Self::new::<()>();
         result.base_stack_index = self.stack_offset_before_top(1).expect("condition present");
+        result.cleanup_prefixes[0] = CleanupPlan::empty(result.base_stack_index);
         result
     }
 
     /// Returns the current canonical stack byte length.
-    ///
-    /// - Complexity: O(n) layout work for n slots.
     ///
     /// # Examples
     /// ```
@@ -258,7 +194,6 @@ impl DynSegment {
     ///
     /// # Errors
     /// Rejects insufficient operands.
-    /// - Complexity: O(k) layout work for k preceding slots.
     ///
     /// # Examples
     /// ```
@@ -274,54 +209,41 @@ impl DynSegment {
     }
 
     /// Computes the canonical position following a known slot prefix.
-    ///
-    /// - Complexity: O(count) layout work.
     fn offset_after(&self, count: usize) -> usize {
-        self.stack_ids[..count]
-            .iter()
-            .fold(self.base_stack_index, |end, info| {
-                stack_position(end, info.value_type.layout())
-                    .expect("validated frame position")
-                    .1
-            })
-    }
-
-    /// Copies the complete metadata of a known stack prefix.
-    ///
-    /// - Complexity: O(count) descriptor references.
-    fn types(&self, count: usize) -> Vec<ValueType> {
-        self.stack_ids[..count]
-            .iter()
-            .map(|info| info.value_type.clone())
-            .collect()
+        self.cleanup_prefixes[count].end
     }
 
     /// Binds ambient cleanup and source-ordered operands without mutating metadata.
     ///
     /// # Errors
     /// Rejects insufficient operands or an unrepresentable frame.
-    /// - Complexity: O(n) time and space for n stack slots.
+    /// - Complexity: O(n) time and space for operand/result descriptor nodes.
     fn operation(&self, arity: usize, result: ValueType) -> Result<OperationPlan> {
         let first = self
             .stack_ids
             .len()
             .checked_sub(arity)
             .ok_or_else(|| anyhow!("not enough operands"))?;
-        let types = self.types(self.stack_ids.len());
-        OperationPlan::new(
-            self.base_stack_index,
-            &types[..first],
-            &types[first..],
-            result,
-        )
+        let operands: Vec<_> = self.stack_ids[first..]
+            .iter()
+            .map(|info| info.value_type.clone())
+            .collect();
+        OperationPlan::with_cleanup(self.cleanup_prefixes[first].clone(), &operands, result)
     }
 
     /// Replaces emitted operands with their validated canonical result slot.
     ///
-    /// - Complexity: O(n) layout work for n surviving slots.
+    /// - Complexity: O(a + d) for a removed operands and d result descriptor nodes.
     fn replace(&mut self, arity: usize, result: ValueType) {
         self.stack_ids.truncate(self.stack_ids.len() - arity);
+        self.cleanup_prefixes.truncate(self.stack_ids.len() + 1);
         let before = self.current_stack_offset();
+        let prefix = self
+            .cleanup_prefixes
+            .last()
+            .unwrap()
+            .push(result.clone())
+            .expect("validated result");
         self.segment.update_base_alignment(result.align());
         self.stack_ids.push(StackInfo {
             padding: stack_position(before, result.layout())
@@ -330,6 +252,7 @@ impl DynSegment {
                 != before,
             value_type: result,
         });
+        self.cleanup_prefixes.push(prefix);
     }
 
     /// Borrows up to the top `n` complete descriptors.
@@ -757,7 +680,7 @@ impl DynSegment {
     /// ```
     pub fn just<T: Clone + 'static>(&mut self, value: T) {
         self.op0(move || value.clone());
-        self.stack_ids.last_mut().unwrap().value_type = ValueType::cloneable_leaf::<T>();
+        self.replace(1, ValueType::cloneable_leaf::<T>());
     }
 
     /// Imports an external constant once and emits only trusted canonical cloning.
@@ -783,18 +706,14 @@ impl DynSegment {
         value_type.validate_clone()?;
         let owner = HostValuePlan::new(value_type.clone())?.import_box(&mut Some(value))?;
         let result = ResultPlan::new(self.current_stack_offset(), value_type.clone())?;
-        let cleanup = CleanupPlan::new(self.base_stack_index, &self.types(self.stack_ids.len()))?;
-        let constant_type = value_type.clone();
+        let cleanup = self.cleanup_prefixes[self.stack_ids.len()].clone();
         self.segment.update_base_alignment(value_type.align());
         self.segment.raw0_(move |stack| {
             let mut guard = cleanup.guard(stack);
-            let allocation = crate::owned_value::Allocation::new(constant_type.layout());
             // SAFETY: Import validated the exact complete representation and
             // clone capability before this instruction was registered.
             unsafe {
-                clone_raw(&constant_type, owner.as_ptr(), allocation.pointer.as_ptr());
-                let mut value = OwnedValue::from_allocation(allocation, constant_type.clone());
-                result.push(guard.stack, &mut value);
+                result.clone_from(guard.stack, owner.as_ptr());
             }
             guard.armed = false;
             Ok(())
@@ -821,7 +740,8 @@ impl DynSegment {
     /// # Errors
     /// Rejects missing clone capability or unrepresentable frame positions.
     /// Preparation validates its complete identity against the argument witness.
-    /// - Complexity: O(n) registration work; execution has the value's clone cost.
+    /// - Complexity: O(d) registration for d descriptor nodes; execution has the
+    ///   value's clone cost without temporary whole-value allocation.
     ///
     /// # Examples
     /// ```
@@ -834,20 +754,16 @@ impl DynSegment {
             value_type.can_clone(),
             "argument clone capability unavailable"
         );
-        let cleanup = CleanupPlan::new(self.base_stack_index, &self.types(self.stack_ids.len()))?;
+        let cleanup = self.cleanup_prefixes[self.stack_ids.len()].clone();
         let result = ResultPlan::new(self.current_stack_offset(), value_type.clone())?;
-        let read_type = value_type.clone();
         self.segment.update_base_alignment(value_type.align());
         self.segment.raw0_(move |stack| {
             let mut guard = cleanup.guard(stack);
             // SAFETY: The external boundary or preparation validates the complete
             // pointer frame; this read's frozen descriptor supplies cloning.
-            let allocation = crate::owned_value::Allocation::new(read_type.layout());
             unsafe {
                 let source = ARGUMENTS.with(|slot| *slot.get().add(index));
-                clone_raw(&read_type, source, allocation.pointer.as_ptr());
-                let mut owner = OwnedValue::from_allocation(allocation, read_type.clone());
-                result.push(guard.stack, &mut owner);
+                result.clone_from(guard.stack, source);
             }
             guard.armed = false;
             Ok(())
@@ -1010,8 +926,7 @@ impl DynSegment {
         let ambient = self.stack_offset_before_top(1)?;
         let input = ResultPlan::new(ambient, ty)?;
         let output = ResultPlan::new(ambient, field.clone())?;
-        let cleanup =
-            CleanupPlan::new(self.base_stack_index, &self.types(self.stack_ids.len() - 1))?;
+        let cleanup = self.cleanup_prefixes[self.stack_ids.len() - 1].clone();
         self.segment.raw0_(move |stack| {
             let mut guard = cleanup.guard(stack);
             let owner = unsafe { input.take(guard.stack) };
@@ -1058,7 +973,7 @@ impl DynSegment {
         let index = ResultPlan::new(self.offset_after(first + 1), ValueType::leaf::<I>())?;
         let array = ResultPlan::new(ambient, array_type)?;
         let output = ResultPlan::new(ambient, element.clone())?;
-        let cleanup = CleanupPlan::new(self.base_stack_index, &self.types(first))?;
+        let cleanup = self.cleanup_prefixes[first].clone();
         self.segment.update_base_alignment(element.align());
         self.segment.raw0_(move |stack| {
             let mut guard = cleanup.guard(stack);
@@ -1111,7 +1026,7 @@ impl DynSegment {
             self.offset_after(first),
             self.stack_ids[first].value_type.clone(),
         )?;
-        let cleanup = CleanupPlan::new(self.base_stack_index, &self.types(first))?;
+        let cleanup = self.cleanup_prefixes[first].clone();
         self.segment.raw0_(move |stack| {
             let mut guard = cleanup.guard(stack);
             let owner = unsafe { input.take(guard.stack) };
@@ -1120,6 +1035,7 @@ impl DynSegment {
             Ok(())
         });
         self.stack_ids.truncate(first);
+        self.cleanup_prefixes.truncate(first + 1);
         Ok(())
     }
 
@@ -1334,27 +1250,27 @@ impl DynSegment {
     ///
     /// # Errors
     /// Rejects dependent bodies or invalid external reads; propagates body errors.
-    /// - Complexity: Boundary checking plus body execution.
+    /// - Complexity: O(r + i) preflight for r read descriptor nodes and i inputs,
+    ///   plus host-value validation and body execution.
     fn call_external(&mut self, inputs: &[&dyn Any]) -> Result<RawStack> {
         self.validate_independent_body()?;
-        for (position, (index, ty)) in self.argument_reads.iter().enumerate() {
+        let mut first_reads: Vec<Option<&ValueType>> = vec![None; inputs.len()];
+        for (index, ty) in &self.argument_reads {
             ensure!(*index < inputs.len(), "missing argument {index}");
-            for (other_index, other) in &self.argument_reads[..position] {
+            if let Some(first) = first_reads[*index] {
                 ensure!(
-                    *index != *other_index || ty.same_shape(other),
+                    ty.same_shape(first),
                     "inconsistent argument {index} representation"
                 );
+            } else {
+                first_reads[*index] = Some(ty);
             }
         }
-        let mut plans: Vec<Option<HostValuePlan>> = (0..inputs.len()).map(|_| None).collect();
         let mut pointers = vec![std::ptr::null(); inputs.len()];
-        for (index, ty) in &self.argument_reads {
-            if plans[*index].is_some() {
-                continue;
+        for (index, ty) in first_reads.into_iter().enumerate() {
+            if let Some(ty) = ty {
+                pointers[index] = HostValuePlan::new(ty.clone())?.validate_any(inputs[index])?;
             }
-            let plan = HostValuePlan::new(ty.clone())?;
-            pointers[*index] = plan.validate_any(inputs[*index])?;
-            plans[*index] = Some(plan);
         }
         unsafe { self.execute_raw(&pointers) }
     }
@@ -1438,7 +1354,7 @@ impl DynSegment {
         let ty = ValueType::callable(signature.parameters.clone(), signature.result.clone());
         // The lease is retained by the emitted constant, across every alias.
         let closure = closure.bind_canonical()?;
-        let cleanup = CleanupPlan::new(self.base_stack_index, &self.types(self.stack_ids.len()))?;
+        let cleanup = self.cleanup_prefixes[self.stack_ids.len()].clone();
         self.segment.update_base_alignment(ty.align());
         self.segment.raw0_(move |stack| {
             let mut guard = cleanup.guard(stack);
@@ -1490,7 +1406,7 @@ impl DynSegment {
         );
         let result_type = result.as_ref().clone();
         let ambient = self.offset_after(first);
-        let cleanup = CleanupPlan::new(self.base_stack_index, &self.types(first))?;
+        let cleanup = self.cleanup_prefixes[first].clone();
         let argument_type = ValueType::tuple(
             parameters
                 .iter()
@@ -1576,8 +1492,7 @@ impl DynSegment {
             result.same_shape(no.result_type()?),
             "fragment result types must match"
         );
-        let cleanup =
-            CleanupPlan::new(self.base_stack_index, &self.types(self.stack_ids.len() - 1))?;
+        let cleanup = self.cleanup_prefixes[self.stack_ids.len() - 1].clone();
         let condition = ResultPlan::new(origin, ValueType::leaf::<bool>())?;
         self.segment.update_base_alignment(
             yes.segment
@@ -1609,5 +1524,298 @@ impl DynSegment {
         });
         self.replace(1, result);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+    use crate::{Array, ArrayOf, Cons, IntoCStackList, Nil};
+    use std::cell::RefCell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::rc::Rc;
+
+    /// Records only live runtime owners, not borrowed sources or registration values.
+    #[repr(align(128))]
+    struct CloneDrop {
+        name: &'static str,
+        events: Rc<RefCell<Vec<&'static str>>>,
+        fail: Rc<Cell<bool>>,
+        owned: bool,
+    }
+
+    impl Clone for CloneDrop {
+        /// Creates an aligned owner unless this source requests a clone panic.
+        fn clone(&self) -> Self {
+            assert!(!self.fail.get(), "deliberate clone panic");
+            Self {
+                name: self.name,
+                events: self.events.clone(),
+                fail: self.fail.clone(),
+                owned: true,
+            }
+        }
+    }
+
+    impl Drop for CloneDrop {
+        /// Records each initialized runtime owner exactly once.
+        fn drop(&mut self) {
+            if self.owned {
+                self.events.borrow_mut().push(self.name);
+            }
+        }
+    }
+
+    /// Checks recursive clone rollback, branch origins, reverse cleanup, and replay.
+    #[test]
+    fn direct_clone_panic_restores_branch_and_ambient_ownership() {
+        type Pair = Cons<ArrayOf<Leaf<CloneDrop>>, Cons<Leaf<CloneDrop>, Nil>>;
+        for external_constant in [false, true] {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let fail = Rc::new(Cell::new(true));
+            let leaf = |name, fail: Rc<Cell<bool>>, owned| CloneDrop {
+                name,
+                events: events.clone(),
+                fail,
+                owned,
+            };
+            let descriptor = ValueType::tuple(vec![
+                AssociatedType {
+                    offset: 0,
+                    value_type: ValueType::array(ValueType::cloneable_leaf::<CloneDrop>()),
+                },
+                AssociatedType {
+                    offset: 0,
+                    value_type: ValueType::cloneable_leaf::<CloneDrop>(),
+                },
+            ])
+            .unwrap();
+            let mut source = Some(
+                OwnedValue::new::<Pair>(
+                    (
+                        Array::from_vec(vec![leaf("child", Rc::new(Cell::new(false)), false)]),
+                        leaf("panic", fail.clone(), false),
+                    )
+                        .into_c_stack_list(),
+                )
+                .with_value_type(descriptor.clone())
+                .unwrap(),
+            );
+            let mut body = DynSegment::new::<()>();
+            for name in ["outer-a", "outer-b"] {
+                let log = events.clone();
+                body.op0(move || CloneDrop {
+                    name,
+                    events: log.clone(),
+                    fail: Rc::new(Cell::new(false)),
+                    owned: true,
+                });
+            }
+            body.just(true);
+            let mut yes = body.new_fragment();
+            let log = events.clone();
+            yes.op0(move || CloneDrop {
+                name: "branch",
+                events: log.clone(),
+                fail: Rc::new(Cell::new(false)),
+                owned: true,
+            });
+            if external_constant {
+                yes.just_external(descriptor, Box::new(source.take().unwrap()))
+                    .unwrap();
+            } else {
+                yes.push_argument(0, descriptor).unwrap();
+            }
+            yes.drop_value().unwrap();
+            yes.drop_value().unwrap();
+            yes.just(9u32);
+            let mut no = body.new_fragment();
+            no.just(3u32);
+            body.join2(yes, no).unwrap();
+            body.op3(|_: CloneDrop, _: CloneDrop, result: u32| result)
+                .unwrap();
+
+            let pointers: Vec<_> = source.iter().map(OwnedValue::as_ptr).collect();
+            for _ in 0..2 {
+                let mut stack = RawStack::with_base_alignment(body.segment.base_alignment());
+                let _arguments = ArgumentGuard::install(&pointers);
+                // SAFETY: The source and body share the complete bound descriptor.
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| unsafe {
+                        body.segment.call0_stack(&mut stack)
+                    }))
+                    .is_err()
+                );
+                assert_eq!(stack.len(), 0);
+                assert_eq!(
+                    &*events.borrow(),
+                    &["child", "branch", "outer-b", "outer-a"]
+                );
+                events.borrow_mut().clear();
+            }
+            fail.set(false);
+            let inputs: Vec<&dyn Any> = source.iter().map(|owner| owner as &dyn Any).collect();
+            assert_eq!(body.call_dyn::<u32>(&inputs).unwrap(), 9);
+            assert_eq!(
+                events
+                    .borrow()
+                    .iter()
+                    .filter(|name| **name == "child")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                events
+                    .borrow()
+                    .iter()
+                    .filter(|name| **name == "panic")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    /// Rejects inconsistent descriptors before executing any instruction on every call.
+    #[test]
+    fn inconsistent_reads_precede_body_effects() {
+        let effects = Rc::new(Cell::new(0));
+        let counter = effects.clone();
+        let mut body = DynSegment::new::<()>();
+        body.op0(move || counter.set(counter.get() + 1));
+        body.drop_value().unwrap();
+        body.push_arg::<i32>(0);
+        body.drop_value().unwrap();
+        body.push_arg::<String>(0);
+        body.drop_value().unwrap();
+        body.just(7u32);
+        for _ in 0..2 {
+            let error = body.call_dyn::<u32>(&[&1i32]).unwrap_err();
+            assert!(error.to_string().contains("inconsistent argument 0"));
+            assert_eq!(effects.get(), 0);
+        }
+    }
+
+    /// Checks linear retained cleanup metadata for flat literal arrays.
+    #[test]
+    fn literal_cleanup_metadata_is_linear() {
+        for length in [1_000, 2_000, 4_000] {
+            let before = crate::canonical_operation::LIVE_CLEANUP_SLOTS.with(Cell::get);
+            let mut body = DynSegment::new::<()>();
+            for _ in 0..length {
+                body.just(1i32);
+            }
+            body.make_array(length, 0).unwrap();
+            let retained = crate::canonical_operation::LIVE_CLEANUP_SLOTS.with(Cell::get) - before;
+            eprintln!("{length} literals: {retained} retained cleanup slots");
+            assert!(retained <= 4 * length + 16);
+            let output = body.call_dyn_value(&[]).unwrap();
+            assert_eq!(
+                output
+                    .try_into_typed::<crate::ArrayOf<Leaf<i32>>>()
+                    .unwrap()
+                    .len(),
+                length
+            );
+            drop(body);
+            crate::canonical_operation::LIVE_CLEANUP_SLOTS
+                .with(|count| assert_eq!(count.get(), before));
+        }
+    }
+
+    /// Checks that borrowed reads and imported constants share their cleanup prefixes.
+    #[test]
+    fn clone_cleanup_metadata_is_linear() {
+        for length in [1_000, 2_000, 4_000] {
+            for external_constant in [false, true] {
+                let before = crate::canonical_operation::LIVE_CLEANUP_SLOTS.with(Cell::get);
+                let mut body = DynSegment::new::<()>();
+                for _ in 0..length {
+                    if external_constant {
+                        body.just_external(ValueType::cloneable_leaf::<i32>(), Box::new(1i32))
+                            .unwrap();
+                    } else {
+                        body.push_arg::<i32>(0);
+                    }
+                }
+                body.make_array(length, 0).unwrap();
+                let retained =
+                    crate::canonical_operation::LIVE_CLEANUP_SLOTS.with(Cell::get) - before;
+                eprintln!(
+                    "{length} clone reads, constant={external_constant}: {retained} cleanup slots"
+                );
+                assert!(retained <= 4 * length + 16);
+                let result = body.call_dyn_value(&[&1i32]).unwrap();
+                assert_eq!(
+                    result.try_into_typed::<ArrayOf<Leaf<i32>>>().unwrap().len(),
+                    length
+                );
+                drop(body);
+                crate::canonical_operation::LIVE_CLEANUP_SLOTS
+                    .with(|count| assert_eq!(count.get(), before));
+            }
+        }
+    }
+
+    /// Checks that scalar reads and imported constants need no temporary owners.
+    #[test]
+    fn scalar_cloning_avoids_temporary_allocations() {
+        for reads in [1, 10, 100] {
+            for external_constant in [false, true] {
+                let mut body = DynSegment::new::<()>();
+                for read in 0..reads {
+                    if external_constant {
+                        body.just_external(ValueType::cloneable_leaf::<i32>(), Box::new(1i32))
+                            .unwrap();
+                    } else {
+                        body.push_arg::<i32>(0);
+                    }
+                    if read != 0 {
+                        body.op2r(|a: i32, b: i32| {
+                            a.checked_add(b).ok_or_else(|| anyhow!("overflow"))
+                        })
+                        .unwrap();
+                    }
+                }
+                let mut prepared = body.prepare::<Cons<Leaf<i32>, Nil>, Leaf<i32>>().unwrap();
+                let input = (1i32,).into_c_stack_list();
+                assert_eq!(prepared.call(&input).unwrap(), reads);
+                crate::owned_value::ALLOCATIONS.with(|count| count.set(0));
+                for _ in 0..100 {
+                    assert_eq!(prepared.call(&input).unwrap(), reads);
+                }
+                let allocations = crate::owned_value::ALLOCATIONS.with(Cell::get);
+                eprintln!(
+                    "{reads} reads, constant={external_constant}: {allocations} temporary allocations"
+                );
+                assert_eq!(allocations, 0);
+            }
+        }
+    }
+
+    /// Checks linear descriptor work on every checked call and none after preparation.
+    #[test]
+    fn repeated_read_preflight_is_linear() {
+        for reads in [1_000, 2_000, 4_000] {
+            let mut body = DynSegment::new::<()>();
+            body.push_arg::<i32>(0);
+            for _ in 1..reads {
+                body.push_arg::<i32>(0);
+                body.op2r(|a: i32, b: i32| a.checked_add(b).ok_or_else(|| anyhow!("overflow")))
+                    .unwrap();
+            }
+            for _ in 0..2 {
+                crate::value_type::SHAPE_COMPARISONS.with(|count| count.set(0));
+                assert_eq!(body.call_dyn::<i32>(&[&1i32]).unwrap(), reads);
+                let comparisons = crate::value_type::SHAPE_COMPARISONS.with(Cell::get);
+                eprintln!("{reads} checked reads: {comparisons} descriptor comparisons");
+                assert!(comparisons <= 4 * reads as usize + 16);
+                assert!(body.call_dyn::<i32>(&[]).is_err());
+                assert!(body.call_dyn::<i32>(&[&1u32]).is_err());
+            }
+            let mut prepared = body.prepare::<Cons<Leaf<i32>, Nil>, Leaf<i32>>().unwrap();
+            crate::value_type::SHAPE_COMPARISONS.with(|count| count.set(0));
+            assert_eq!(prepared.call(&(1i32,).into_c_stack_list()).unwrap(), reads);
+            crate::value_type::SHAPE_COMPARISONS.with(|count| assert_eq!(count.get(), 0));
+        }
     }
 }

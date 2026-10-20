@@ -11,6 +11,15 @@ use crate::container_execution::stack_position;
 use crate::owned_value::drop_raw;
 use crate::value_type::{ArrayOf, ValueRepr, ValueType};
 use crate::{RawSegment, RawStack};
+use std::rc::Rc;
+
+#[cfg(test)]
+thread_local! {
+    /// Counts retained cleanup-slot descriptors on the current test thread.
+    pub(crate) static LIVE_CLEANUP_SLOTS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
 
 /// Binds one canonical value to an absolute stack position and its ambient length.
 struct Slot {
@@ -26,6 +35,8 @@ impl Slot {
     /// Rejects an aligned position or end outside allocation bounds.
     fn new(before: usize, value_type: ValueType) -> anyhow::Result<(Self, usize)> {
         let (offset, end) = stack_position(before, value_type.layout())?;
+        #[cfg(test)]
+        LIVE_CLEANUP_SLOTS.with(|count| count.set(count.get() + 1));
         Ok((
             Self {
                 before,
@@ -55,6 +66,128 @@ impl Slot {
     }
 }
 
+#[cfg(test)]
+impl Drop for Slot {
+    /// Removes this descriptor from the thread-local retained metadata count.
+    fn drop(&mut self) {
+        LIVE_CLEANUP_SLOTS.with(|count| count.set(count.get() - 1));
+    }
+}
+
+/// Shares one immutable stack slot and the prefix preceding it.
+struct CleanupNode {
+    slot: Slot,
+    parent: Option<Rc<CleanupNode>>,
+}
+
+impl Drop for CleanupNode {
+    /// Releases uniquely owned prefixes iteratively instead of recursing with depth.
+    ///
+    /// - Complexity: O(n) for n newly unreferenced nodes, with O(1) call space.
+    fn drop(&mut self) {
+        let mut parent = self.parent.take();
+        while let Some(node) = parent {
+            match Rc::try_unwrap(node) {
+                Ok(mut node) => parent = node.parent.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+/// Binds an immutable shared live prefix above a caller-owned byte origin.
+///
+/// Cloning retains one reference, not a copy of every preceding descriptor.
+#[derive(Clone)]
+pub(crate) struct CleanupPlan {
+    origin: usize,
+    pub(crate) end: usize,
+    alignment: usize,
+    tail: Option<Rc<CleanupNode>>,
+}
+
+impl CleanupPlan {
+    /// Creates an empty owned region above an opaque caller-owned prefix.
+    pub(crate) fn empty(origin: usize) -> Self {
+        Self {
+            origin,
+            end: origin,
+            alignment: 1,
+            tail: None,
+        }
+    }
+
+    /// Extends this immutable prefix with one validated canonical slot.
+    ///
+    /// # Errors
+    /// Rejects noncanonical descriptors or unrepresentable frame positions.
+    /// - Complexity: O(d) validation for d descriptor nodes, O(1) retained metadata.
+    pub(crate) fn push(&self, value_type: ValueType) -> anyhow::Result<Self> {
+        value_type.validate_canonical()?;
+        let alignment = self.alignment.max(value_type.align());
+        let (slot, end) = Slot::new(self.end, value_type)?;
+        Ok(Self {
+            origin: self.origin,
+            end,
+            alignment,
+            tail: Some(Rc::new(CleanupNode {
+                slot,
+                parent: self.tail.clone(),
+            })),
+        })
+    }
+
+    /// Arms reverse destruction without allocating or copying prefix metadata.
+    pub(crate) fn guard<'a>(&'a self, stack: &'a mut RawStack) -> CleanupGuard<'a> {
+        CleanupGuard {
+            stack,
+            remaining: self.tail.as_deref(),
+            origin: self.origin,
+            armed: true,
+        }
+    }
+}
+
+/// Destroys each still-live slot once, advancing before invoking its destructor.
+pub(crate) struct CleanupGuard<'a> {
+    pub(crate) stack: &'a mut RawStack,
+    remaining: Option<&'a CleanupNode>,
+    origin: usize,
+    pub(crate) armed: bool,
+}
+
+impl CleanupGuard<'_> {
+    /// Destroys the remaining prefix in reverse order and restores its origin.
+    ///
+    /// - Complexity: O(n) for n remaining slots, excluding nested destruction.
+    pub(crate) fn destroy(&mut self) {
+        if !self.armed {
+            return;
+        }
+        while let Some(node) = self.remaining {
+            self.remaining = node.parent.as_deref();
+            let slot = &node.slot;
+            // SAFETY: Ownership is removed before user destruction. The shared
+            // prefix names only live ambient slots, never moved operands.
+            unsafe {
+                self.stack.truncate_to(slot.before, false);
+                self.stack
+                    .drop_at(slot.offset, |pointer| drop_raw(&slot.value_type, pointer));
+            }
+        }
+        // SAFETY: All owned values above the opaque origin are now destroyed.
+        unsafe { self.stack.truncate_to(self.origin, false) };
+        self.armed = false;
+    }
+}
+
+impl Drop for CleanupGuard<'_> {
+    /// Resumes cleanup after a callback or an ordinary-error destructor unwinds.
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
 /// Binds complete signatures and ambient destruction before emitting raw operations.
 ///
 /// Operands are source ordered. The opaque byte prefix preceding `origin` belongs
@@ -62,8 +195,7 @@ impl Slot {
 /// host error or unwind they are destroyed in reverse stack order. Host operands
 /// are transferred to concrete Rust owners before executing user code.
 pub(crate) struct OperationPlan {
-    origin: usize,
-    ambient: Vec<Slot>,
+    ambient: CleanupPlan,
     operands: Vec<Slot>,
     result: ValueType,
 }
@@ -74,40 +206,44 @@ impl OperationPlan {
     /// # Errors
     /// Rejects alignment or size overflow, including the result position.
     /// - Complexity: O(n) time and space for n ambient values and operands.
+    #[cfg(test)]
     pub(crate) fn new(
         origin: usize,
         ambient: &[ValueType],
         operands: &[ValueType],
         result: ValueType,
     ) -> anyhow::Result<Self> {
-        result.validate_canonical()?;
-        for value_type in ambient.iter().chain(operands) {
-            value_type.validate_canonical()?;
+        let mut prefix = CleanupPlan::empty(origin);
+        for value_type in ambient {
+            prefix = prefix.push(value_type.clone())?;
         }
-        let mut end = origin;
-        let mut slots = |values: &[ValueType]| -> anyhow::Result<Vec<Slot>> {
-            values
-                .iter()
-                .map(|value_type| {
-                    let (slot, next) = Slot::new(end, value_type.clone())?;
-                    end = next;
-                    Ok(slot)
-                })
-                .collect()
-        };
-        let ambient = slots(ambient)?;
-        let ambient_end = end;
+        Self::with_cleanup(prefix, operands, result)
+    }
+
+    /// Binds operands and a result above an already validated shared live prefix.
+    ///
+    /// # Errors
+    /// Rejects noncanonical descriptors and unrepresentable frame positions.
+    /// - Complexity: O(n) time and space for operand/result descriptor nodes;
+    ///   retaining the ambient cleanup prefix is O(1).
+    pub(crate) fn with_cleanup(
+        ambient: CleanupPlan,
+        operands: &[ValueType],
+        result: ValueType,
+    ) -> anyhow::Result<Self> {
+        result.validate_canonical()?;
+        let mut end = ambient.end;
         let operands = operands
             .iter()
             .map(|value_type| {
+                value_type.validate_canonical()?;
                 let (slot, next) = Slot::new(end, value_type.clone())?;
                 end = next;
                 Ok(slot)
             })
             .collect::<anyhow::Result<_>>()?;
-        stack_position(ambient_end, result.layout())?;
+        stack_position(ambient.end, result.layout())?;
         Ok(Self {
-            origin,
             ambient,
             operands,
             result,
@@ -145,24 +281,19 @@ impl OperationPlan {
     /// order without intervening user code, then invoke the host function. The raw
     /// interpreter caller must supply exactly this plan's live input frame.
     ///
-    /// - Complexity: O(n) registration alignment checks for n frame values;
+    /// - Complexity: O(n) registration alignment checks for n operands;
     ///   execution is the host cost plus O(a) ambient cleanup on failure.
     unsafe fn emit<R: ValueRepr, F>(self, segment: &mut RawSegment, invoke: F)
     where
         F: Fn(&Self, &mut RawStack) -> anyhow::Result<R::Value> + 'static,
     {
-        for slot in self.ambient.iter().chain(&self.operands) {
+        segment.update_base_alignment(self.ambient.alignment);
+        for slot in &self.operands {
             segment.update_base_alignment(slot.value_type.layout().align());
         }
         segment.update_base_alignment(self.result.layout().align());
         segment.raw0_(move |stack| {
-            let mut cleanup = AmbientCleanup {
-                stack,
-                slots: &self.ambient,
-                remaining: self.ambient.len(),
-                origin: self.origin,
-                armed: true,
-            };
+            let mut cleanup = self.ambient.guard(stack);
             match invoke(&self, cleanup.stack) {
                 Ok(result) => {
                     cleanup.stack.push(result);
@@ -183,7 +314,7 @@ impl OperationPlan {
     ///
     /// # Errors
     /// Rejects a nonempty operand list or a mismatched result representation.
-    /// - Complexity: O(n) validation for n result/ambient descriptor nodes.
+    /// - Complexity: O(n) validation for n result descriptor nodes.
     pub(crate) fn emit0<R: ValueRepr, F>(
         self,
         segment: &mut RawSegment,
@@ -202,7 +333,7 @@ impl OperationPlan {
     ///
     /// # Errors
     /// Rejects a different arity or complete operand/result representation.
-    /// - Complexity: O(n) validation for n signature/ambient descriptor nodes.
+    /// - Complexity: O(n) validation for n signature descriptor nodes.
     pub(crate) fn emit1<A: ValueRepr, R: ValueRepr, F>(
         self,
         segment: &mut RawSegment,
@@ -226,7 +357,7 @@ impl OperationPlan {
     ///
     /// # Errors
     /// Rejects a different arity or complete operand/result representation.
-    /// - Complexity: O(n) validation for n signature/ambient descriptor nodes.
+    /// - Complexity: O(n) validation for n signature descriptor nodes.
     pub(crate) fn emit2<A: ValueRepr, B: ValueRepr, R: ValueRepr, F>(
         self,
         segment: &mut RawSegment,
@@ -251,7 +382,7 @@ impl OperationPlan {
     ///
     /// # Errors
     /// Rejects a different arity or complete operand/result representation.
-    /// - Complexity: O(n) validation for n signature/ambient descriptor nodes.
+    /// - Complexity: O(n) validation for n signature descriptor nodes.
     pub(crate) fn emit3<A: ValueRepr, B: ValueRepr, C: ValueRepr, R: ValueRepr, F>(
         self,
         segment: &mut RawSegment,
@@ -299,7 +430,7 @@ impl OperationPlan {
     ///
     /// # Errors
     /// Rejects a different arity or complete array-element/result representation.
-    /// - Complexity: O(n) validation for n signature/ambient descriptor nodes;
+    /// - Complexity: O(n) validation for n signature descriptor nodes;
     ///   execution adds O(e) destruction for e elements, excluding the host cost.
     pub(crate) fn emit_slice<E: ValueRepr, R: ValueRepr, F>(
         self,
@@ -310,50 +441,6 @@ impl OperationPlan {
         F: Fn(&[E::Value]) -> anyhow::Result<R::Value> + 'static,
     {
         self.emit1::<ArrayOf<E>, R, _>(segment, move |array| function(array.as_slice()))
-    }
-}
-
-/// Destroys only the still-owned ambient prefix when a host operation fails.
-///
-/// The current slot is marked consumed before its destructor runs, allowing
-/// ordinary-error cleanup to resume through Drop if a destructor unwinds.
-struct AmbientCleanup<'a> {
-    stack: &'a mut RawStack,
-    slots: &'a [Slot],
-    remaining: usize,
-    origin: usize,
-    armed: bool,
-}
-
-impl AmbientCleanup<'_> {
-    /// Destroys the remaining ambient owners in reverse order and restores origin.
-    ///
-    /// - Complexity: O(n) destruction for n remaining values, excluding nested costs.
-    fn destroy(&mut self) {
-        if !self.armed {
-            return;
-        }
-        while self.remaining != 0 {
-            self.remaining -= 1;
-            let slot = &self.slots[self.remaining];
-            // SAFETY: Operands have been moved into typed owners; each slot is live
-            // until removed from this guard. The precomputed offset matches its plan.
-            unsafe {
-                self.stack
-                    .drop_at(slot.offset, |pointer| drop_raw(&slot.value_type, pointer));
-                self.stack.truncate_to(slot.before, false);
-            }
-        }
-        // SAFETY: Every owned value above origin has been moved or destroyed.
-        unsafe { self.stack.truncate_to(self.origin, false) };
-        self.armed = false;
-    }
-}
-
-impl Drop for AmbientCleanup<'_> {
-    /// Cleans ambient values on host panic, error, or a failed result push.
-    fn drop(&mut self) {
-        self.destroy();
     }
 }
 
@@ -399,6 +486,25 @@ mod tests {
     /// - Complexity: O(n) for n signature and ambient descriptor nodes.
     fn plan<A: ValueRepr, R: ValueRepr>(origin: usize, ambient: &[ValueType]) -> OperationPlan {
         OperationPlan::new(origin, ambient, &[A::value_type()], R::value_type()).unwrap()
+    }
+
+    /// Checks sharing across a fork and bounded call-space release of a deep prefix.
+    #[test]
+    fn cleanup_prefix_sharing_and_iterative_release() {
+        let before = LIVE_CLEANUP_SLOTS.with(Cell::get);
+        let mut prefix = CleanupPlan::empty(0);
+        for _ in 0..50_000 {
+            prefix = prefix.push(ValueType::leaf::<i32>()).unwrap();
+        }
+        let fork = prefix.clone();
+        for _ in 0..50_000 {
+            prefix = prefix.push(ValueType::leaf::<i32>()).unwrap();
+        }
+        LIVE_CLEANUP_SLOTS.with(|count| assert_eq!(count.get() - before, 100_000));
+        drop(prefix);
+        LIVE_CLEANUP_SLOTS.with(|count| assert_eq!(count.get() - before, 50_000));
+        drop(fork);
+        LIVE_CLEANUP_SLOTS.with(|count| assert_eq!(count.get(), before));
     }
 
     /// Constructs a nested array whose destruction order is visible.

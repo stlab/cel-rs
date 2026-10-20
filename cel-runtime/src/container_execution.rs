@@ -15,9 +15,7 @@ use std::ptr;
 use crate::DynClosure;
 use crate::RawStack;
 use crate::array::RawArray;
-#[cfg(test)]
-use crate::owned_value::clone_raw;
-use crate::owned_value::{Allocation, Children, OwnedValue, Prefix};
+use crate::owned_value::{Allocation, Children, OwnedValue, Prefix, clone_raw};
 use crate::value_type::{ValueKind, ValueType};
 
 /// Computes a stack value's aligned start and end using checked arithmetic.
@@ -355,7 +353,52 @@ pub(crate) struct ResultPlan {
     end: usize,
 }
 
+/// Restores the pre-clone length after recursive clone cleanup has finished unwinding.
+struct CloneRollback<'a> {
+    stack: &'a mut RawStack,
+    ambient: usize,
+    armed: bool,
+}
+
+impl Drop for CloneRollback<'_> {
+    /// Removes uninitialized result storage without destroying the live ambient prefix.
+    fn drop(&mut self) {
+        if self.armed {
+            // SAFETY: clone_raw destroys every initialized child before unwinding.
+            unsafe { self.stack.truncate_to(self.ambient, false) };
+        }
+    }
+}
+
 impl ResultPlan {
+    /// Clones a borrowed canonical value directly into aligned stack storage.
+    ///
+    /// A clone panic destroys its initialized child prefix and restores the exact
+    /// ambient length before the caller's ambient cleanup runs.
+    ///
+    /// # Safety
+    /// Source must remain live, disjoint from the stack, and match this cloneable
+    /// descriptor. The stack must have exactly the bound ambient length and base
+    /// alignment. Success transfers ownership of the cloned result to the stack.
+    /// - Complexity: The value's clone cost plus amortized stack growth; no
+    ///   temporary whole-value allocation.
+    pub(crate) unsafe fn clone_from(&self, stack: &mut RawStack, source: *const u8) {
+        debug_assert_eq!(stack.len(), self.ambient);
+        let mut rollback = CloneRollback {
+            stack,
+            ambient: self.ambient,
+            armed: true,
+        };
+        unsafe {
+            rollback.stack.reserve_and_write(
+                self.value_type.align(),
+                self.value_type.layout().size(),
+                |destination| clone_raw(&self.value_type, source, destination),
+            );
+        }
+        rollback.armed = false;
+    }
+
     /// Moves an already witness-validated result directly into its concrete Rust type.
     ///
     /// # Safety
@@ -1214,6 +1257,45 @@ mod tests {
                 .unwrap();
         assert_eq!(result, "argument5");
         assert_eq!(s, "argument");
+    }
+
+    /// Restores the exact ambient length after an aligned direct clone panics.
+    #[test]
+    fn direct_clone_rollback_restores_length_before_ambient_cleanup() {
+        /// Exercises clone failure after reserving an aligned, nonzero result slot.
+        #[repr(align(128))]
+        struct Fails(bool);
+
+        impl Clone for Fails {
+            /// Panics for a rejecting source and otherwise creates an independent value.
+            fn clone(&self) -> Self {
+                assert!(!self.0, "clone panic");
+                Self(false)
+            }
+        }
+
+        let mut stack = RawStack::with_base_alignment(128);
+        let padding = stack.push(7u8);
+        let ambient = stack.len();
+        let result = ResultPlan::new(ambient, ValueType::cloneable_leaf::<Fails>()).unwrap();
+        let source = Fails(true);
+        for _ in 0..2 {
+            // SAFETY: Source and destination have the exact bound leaf representation.
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| unsafe {
+                    result.clone_from(&mut stack, std::ptr::from_ref(&source).cast())
+                }))
+                .is_err()
+            );
+            assert_eq!(stack.len(), ambient);
+        }
+        // SAFETY: The matching successful source creates one live bound result.
+        unsafe {
+            result.clone_from(&mut stack, std::ptr::from_ref(&Fails(false)).cast());
+            assert!(!result.take_typed::<Fails>(&mut stack).0);
+            assert_eq!(stack.len(), ambient);
+            assert_eq!(stack.pop::<u8>(padding), 7);
+        }
     }
 
     /// Cleans nested cloned prefixes and completed sibling arguments when a later leaf panics.

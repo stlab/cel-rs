@@ -20,6 +20,14 @@ use std::ptr::{self, NonNull};
 use crate::array::RawArray;
 use crate::value_type::{AssociatedType, ValueKind, ValueRepr, ValueType};
 
+#[cfg(test)]
+thread_local! {
+    /// Counts nonzero canonical owner allocations on the current test thread.
+    pub(crate) static ALLOCATIONS: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
 /// Owns one aligned allocation, including an aligned dangling pointer for ZSTs.
 ///
 /// This owner deallocates storage but does not destroy its contents.
@@ -34,6 +42,8 @@ impl Allocation {
         let pointer = if layout.size() == 0 {
             NonNull::new(ptr::without_provenance_mut(layout.align())).unwrap()
         } else {
+            #[cfg(test)]
+            ALLOCATIONS.with(|count| count.set(count.get() + 1));
             // SAFETY: Layout is nonzero and valid; allocation failure aborts.
             NonNull::new(unsafe { alloc(layout) }).unwrap_or_else(|| handle_alloc_error(layout))
         };
