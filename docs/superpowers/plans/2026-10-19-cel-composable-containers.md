@@ -186,6 +186,77 @@ ownership as this unary signature.
 - [ ] **Step 7: Verify** `cargo test -p cel-runtime -p cel-parser`. Review the prepared call graph to confirm identity comparison and checked conversion occur only during construction/preparation; use a test-only comparison probe if necessary to demonstrate zero comparisons during repeated calls.
 - [ ] **Step 8: Format and commit** as `feat(runtime): execute canonical containers through prepared typed boundaries`.
 
+### Task 4A: Descriptor Factory and Callable Prerequisites
+
+**Execution refinement:** Inspection found that Task 4's atomic switch needs
+three separately tested prerequisite units. Tasks 4A-4D implement the existing
+Task 4 contract; they do not add product scope or a second executable ABI.
+
+**Files:** Modify `cel-runtime/src/{value_type,dyn_closure}.rs`,
+`cel-parser/src/{op_table,type_expr}.rs`, and `adam-lang/src/type_registry.rs`;
+add tests alongside those APIs.
+
+**Interfaces:** Add complete-descriptor factories at concrete generic leaf
+registration sites, without changing emitted interpreter operations yet.
+Add `ValueType::callable(parameters: Vec<ValueType>, result: ValueType) -> Self`
+as a crate-private constructor for the existing shared `DynClosure` carrier.
+Keep complete callable metadata with its clone/drop plan, not a leaf marker.
+Expose a conversion from a known legacy closure signature into complete new
+metadata; unavailable signature metadata returns an error.
+
+For legacy `TryFrom<DynSegment> for Segment<Args, Stack>`, ordinary opaque
+leaf types can retain concrete identity validation. Structural aggregates
+must use explicit witnesses through `prepare`; the legacy generic conversion
+must reject structural values it cannot describe rather than authorize them
+by shared marker IDs. Direct statically built `Segment` operations are
+unaffected. Apply this rejection in 4D, with tests.
+
+- [ ] Write tests for foreign registered leaf factories, preserved optional capabilities, structural closure argument/result mismatch, and source unit versus opaque host unit.
+- [ ] Run focused runtime/parser/Adam selectors to establish RED.
+- [ ] Implement factories while concrete `T` is known; no dynamic `TypeId` monomorphization or execution-path change.
+- [ ] Verify `cargo test -p cel-runtime -p cel-parser -p adam-lang`; format and commit as `refactor: prepare complete container descriptor factories`.
+
+### Task 4B: Private Canonical Frame and Move Primitives
+
+**Files:** Create `cel-runtime/src/container_execution.rs`; modify
+`cel-runtime/src/{owned_value,value_type,dyn_closure,lib}.rs` as needed.
+
+**Interfaces:** Private construction plans consume complete descriptors,
+initialized raw frames, canonical offsets, and allocation lengths. They
+produce owned canonical array headers or packed list regions, with a matching
+frozen drop plan. Add a trusted existing-closure invocation entry validated
+by the emitter; retain checked external entry points separately.
+
+- [ ] Write runtime unit tests for nested tuple/array packing, ambient storage, alignment, ZST destruction, repeated independent owners, and initialized-prefix cleanup on error and panic.
+- [ ] Establish focused RED with `cargo test -p cel-runtime --lib container_execution`.
+- [ ] Implement checked construction-time layouts and guarded raw ownership moves; do not switch the public interpreter or introduce a second public execution API.
+- [ ] Verify `cargo test -p cel-runtime` and runtime all-target Clippy; format and commit as `feat(runtime): prepare canonical container move and frame plans`.
+
+### Task 4C: Existing External Tuple Boundary Migration
+
+**Files:** Create `cel-runtime/src/host_value_bridge.rs`; modify existing
+`dynamic_sequence.rs` and registration-owned descriptor integration as needed.
+
+**Interfaces:** Isolated existing external-host import/export uses complete
+descriptors and canonical offsets. Preserve native leaf values and legacy
+external tuple owners until transfer succeeds. Internal arrays and tuples
+never store legacy wrapper elements. No new public compatibility interface.
+
+- [ ] Write tests for nested tuple external round trips, foreign leaf identity, mismatches rejected before expression execution, and exact prefix cleanup after a conversion error.
+- [ ] Establish focused RED with `cargo test -p cel-runtime --lib host_value_bridge`.
+- [ ] Implement explicit moves/header conversion where necessary, never reinterpret different wrapper layouts. Trusted segment operations do not call these checked helpers.
+- [ ] Verify `cargo test -p cel-runtime -p adam-lang`; format and commit as `refactor(runtime): prepare existing host boundaries for canonical values`.
+
+### Task 4D: Atomic Interpreter Switch
+
+**Files/interfaces:** Those in the parent Task 4, using 4A factories, 4B move
+plans, and 4C existing-host boundaries. This is the only executable ABI switch.
+
+- [ ] Add the parent Task 4 parser-to-Rust fixtures and prepared-call tests; verify their intended failures.
+- [ ] Implement the parent Task 4 interfaces, switch root exports and all immediate metadata/emission callers atomically, and reject unsupported structural legacy typed conversions explicitly.
+- [ ] Verify the parent Task 4 acceptance commands plus `cargo check -p adam-lang -p cel-euclid --features cel-euclid/adam`; ensure no second internal ABI, silent fallback, or runtime signature checks.
+- [ ] Format and commit as `feat(runtime): execute canonical containers through prepared typed boundaries`; review all 4A-4D changes against the parent task before marking Task 4 complete.
+
 ## Task 5: Signature-Typed Callable Values
 
 **Files:** Create `cel-runtime/src/callable.rs`, `cel-runtime/tests/callable_values.rs`; modify `cel-runtime/src/{dyn_closure,dyn_segment,value_type,lib}.rs`.
