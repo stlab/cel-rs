@@ -746,7 +746,7 @@ impl AdamParser {
     /// Rejects unregistered leaves, missing cell capabilities, or evaluation errors.
     /// - Complexity: O(n) preparation for n descriptor nodes, plus execution costs.
     fn eval_segment_boxed(&self, segment: DynSegment) -> Result<(TypeShape, Box<dyn Any>)> {
-        let shape = self.segment_shape(&segment)?;
+        let shape = self.segment_shape(&segment, Span::call_site(), format_args!(""))?;
         let mut frame = Frame::new(
             segment,
             &[],
@@ -766,22 +766,26 @@ impl AdamParser {
     /// Infers complete recursive identity without executing the expression.
     ///
     /// # Errors
-    /// Rejects absent results or unregistered leaves.
+    /// Rejects absent results or unregistered leaves at `span`, prefixed by `context`.
     /// - Complexity: O(n) in result descriptor nodes.
-    fn segment_shape(&self, segment: &DynSegment) -> Result<TypeShape> {
-        let info = segment
-            .peek_stack_infos(1)
-            .first()
-            .ok_or_else(|| ParseError::new("expression produced no value", Span::call_site()))?;
+    fn segment_shape(
+        &self,
+        segment: &DynSegment,
+        span: Span,
+        context: std::fmt::Arguments<'_>,
+    ) -> Result<TypeShape> {
+        let info = segment.peek_stack_infos(1).first().ok_or_else(|| {
+            ParseError::new(format!("{context}expression produced no value"), span)
+        })?;
         self.types
             .shape_of(&info.value_type)
-            .map_err(|message| ParseError::new(message, Span::call_site()))
+            .map_err(|message| ParseError::new(format!("{context}{message}"), span))
     }
 
     /// Validates an initializer's complete shape before any initializer effects.
     ///
     /// # Errors
-    /// Reports a ranged type mismatch or missing cell capability.
+    /// Reports a ranged shape-inference error, type mismatch, or missing cell capability.
     /// - Complexity: O(n) in result descriptor nodes.
     fn validate_initializer(
         &self,
@@ -790,7 +794,7 @@ impl AdamParser {
         name: &str,
         span: Span,
     ) -> Result<()> {
-        let actual = self.segment_shape(segment)?;
+        let actual = self.segment_shape(segment, span, format_args!("cell `{name}`: "))?;
         if let Some(expected) = declared
             && expected != &actual
         {
@@ -1083,7 +1087,7 @@ impl AdamParser {
         ctx.expect_punct(":=")?;
         let (segment, inputs) = self.parse_deduced_expr(ctx)?;
         let end_span = ctx.expect_punct(";")?;
-        let compiled = self.compile_outputs(ctx, &segment, &outputs, destructure)?;
+        let compiled = self.compile_outputs(ctx, &segment, &outputs, destructure, start_span)?;
         Ok((
             build_method(inputs, outputs, segment, compiled, &self.types)?,
             start_span,
@@ -1256,8 +1260,8 @@ impl AdamParser {
     /// error reporting, so it's threaded through rather than recomputed.
     ///
     /// # Errors
-    /// Returns `Err` if the expression fails to parse, produced no value, or (for a `Named`
-    /// output shape) its type isn't registered in the `TypeRegistry`.
+    /// Returns `Err` if the expression fails to parse, produces no value, or contains a leaf
+    /// type that isn't registered in the `TypeRegistry`.
     fn parse_match_expr(
         &mut self,
         ctx: &mut ParseContext,
@@ -1280,8 +1284,8 @@ impl AdamParser {
     ///   matching every input in `inputs` by index.
     ///
     /// # Errors
-    /// Returns `Err` if the segment produced no value, or (`Named` shape only) if its output
-    /// type isn't registered in the `TypeRegistry`.
+    /// Returns `Err` at `match_span` if the segment produces no value or contains a leaf type
+    /// that isn't registered in the `TypeRegistry`, prefixed by `match expression:`.
     fn build_match_expr(
         &self,
         segment: DynSegment,
@@ -1294,7 +1298,7 @@ impl AdamParser {
             .map(|(_, _, shape)| cell_type_id(shape))
             .collect();
 
-        let shape = self.segment_shape(&segment)?;
+        let shape = self.segment_shape(&segment, match_span, format_args!("match expression: "))?;
         let eq_fn = match &shape {
             TypeShape::Named(id) => {
                 self.types
@@ -1529,7 +1533,8 @@ impl AdamParser {
         // real cell inputs (via `push_arg`) and must stay live for repeated re-evaluation by the
         // `Method` built below on every `Sheet::propagate` — so only its *shape* is inferred
         // here, from stack info, never actually executed.
-        let actual_shape = self.segment_shape(&segment)?;
+        let actual_shape =
+            self.segment_shape(&segment, name_span, format_args!("out `{name}`: "))?;
 
         let out_shape = match &declared_shape {
             Some(declared) => {
@@ -1721,22 +1726,25 @@ impl AdamParser {
     ///
     /// Direct bindings move the whole result, including source unit. Destructuring requires
     /// a tuple of exactly matching recursive field shapes and moves its field owners.
+    /// Shape-inference errors identify the output at `binding_span`.
     ///
     /// # Errors
     /// Returns `Err` if any output's declared shape doesn't structurally match the body's actual
     /// result (scalar type mismatch, tuple arity mismatch, or tuple element shape mismatch, at
-    /// any nesting depth), or if a single non-destructuring scalar/empty-tuple output's
-    /// expression produced no value.
+    /// any nesting depth), or if a single non-destructuring output's
+    /// expression produced no value or contains an unregistered leaf type.
     fn compile_outputs(
         &self,
         ctx: &mut ParseContext,
         segment: &DynSegment,
         outputs: &[(String, CellId, TypeShape)],
         destructure: bool,
+        binding_span: Span,
     ) -> Result<CompiledOutputs> {
         if outputs.len() == 1 && !destructure {
             let (out_name, _, out_shape) = &outputs[0];
-            let actual = self.segment_shape(segment)?;
+            let actual =
+                self.segment_shape(segment, binding_span, format_args!("output `{out_name}`: "))?;
             if &actual != out_shape {
                 return Err(ctx.err_at(format!(
                     "output `{out_name}`: type mismatch: expected `{}`, got `{}`",
@@ -4067,6 +4075,112 @@ mod tests {
         assert!(result.is_err());
         let err = result.expect_err("expected Err");
         assert!(err.message().contains("cannot infer a type"));
+    }
+
+    /// Verifies unregistered out results identify the declaration and its name token.
+    #[test]
+    fn shape_error_out_preserves_context_and_span() {
+        for expression in ["1i32..5i32", "(1i32, 1i32..5i32)"] {
+            let source = format!("sheet s {{\nout result := {expression};\n}}");
+            let err = parser().parse_str(&source).unwrap_err();
+            assert!(err.message().contains("cannot infer a type"));
+            assert_eq!(
+                err.span().start(),
+                proc_macro2::LineColumn { line: 2, column: 4 }
+            );
+            assert_eq!(
+                err.span().end(),
+                proc_macro2::LineColumn {
+                    line: 2,
+                    column: 10
+                }
+            );
+            assert!(err.message().starts_with("out `result`:"));
+        }
+    }
+
+    /// Verifies unregistered match results identify the expression and its opening token.
+    #[test]
+    fn shape_error_match_preserves_context_and_span() {
+        for (expression, end_column) in [("1i32..5i32", 16), ("(1i32, 1i32..5i32)", 30)] {
+            let source = format!("sheet s {{\nconditional {expression} {{ _ => {{}} }}\n}}");
+            let err = parser().parse_str(&source).unwrap_err();
+            assert!(err.message().contains("cannot infer a type"));
+            assert_eq!(
+                err.span().start(),
+                proc_macro2::LineColumn {
+                    line: 2,
+                    column: 12
+                }
+            );
+            assert_eq!(
+                err.span().end(),
+                proc_macro2::LineColumn {
+                    line: 2,
+                    column: end_column
+                }
+            );
+            assert!(err.message().starts_with("match expression:"));
+        }
+    }
+
+    /// Verifies unregistered binding results identify the output and its binding token.
+    #[test]
+    fn shape_error_output_preserves_context_and_span() {
+        for (shape, expression) in [("i32", "1i32..5i32"), ("(i32, i32)", "(1i32, 1i32..5i32)")] {
+            let source = format!(
+                "sheet s {{\ncell result: {shape};\nrelationship {{\nresult := {expression};\n}}\n}}"
+            );
+            let err = parser().parse_str(&source).unwrap_err();
+            assert!(err.message().contains("cannot infer a type"));
+            assert_eq!(
+                err.span().start(),
+                proc_macro2::LineColumn { line: 4, column: 0 }
+            );
+            assert_eq!(
+                err.span().end(),
+                proc_macro2::LineColumn { line: 4, column: 6 }
+            );
+            assert!(err.message().starts_with("output `result`:"));
+        }
+    }
+
+    /// Verifies unregistered initializer results identify the cell and its name token.
+    #[test]
+    fn shape_error_initializer_preserves_context_and_span() {
+        for expression in ["1i32..5i32", "(1i32, 1i32..5i32)"] {
+            let source = format!("sheet s {{\ncell result = {expression};\n}}");
+            let err = parser().parse_str(&source).unwrap_err();
+            assert!(err.message().contains("cannot infer a type"));
+            assert_eq!(
+                err.span().start(),
+                proc_macro2::LineColumn { line: 2, column: 5 }
+            );
+            assert_eq!(
+                err.span().end(),
+                proc_macro2::LineColumn {
+                    line: 2,
+                    column: 11
+                }
+            );
+            assert!(err.message().starts_with("cell `result`:"));
+        }
+    }
+
+    /// Verifies registered type mismatches retain the ordinary out and output prefixes.
+    #[test]
+    fn shape_error_registered_mismatches_preserve_context() {
+        for (source, prefix) in [
+            ("sheet s { out result: i32 := true; }", "out `result`:"),
+            (
+                "sheet s { cell result: i32; relationship { result := true; } }",
+                "output `result`:",
+            ),
+        ] {
+            let err = parser().parse_str(source).unwrap_err();
+            assert!(err.message().contains("type mismatch"));
+            assert!(err.message().starts_with(prefix));
+        }
     }
 
     #[test]

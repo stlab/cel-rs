@@ -18,13 +18,6 @@ use crate::CNil;
 ///
 /// Each offset addresses a head inside its recursive, tail-first `repr(C)` node.
 /// Every node includes its own trailing padding; native tuple layout is irrelevant.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Foundation for the later container metadata cutover."
-    )
-)]
 pub(crate) struct TupleLayout {
     /// The layout of the complete canonical list, including trailing padding.
     pub(crate) layout: Layout,
@@ -32,13 +25,6 @@ pub(crate) struct TupleLayout {
     pub(crate) offsets: Vec<usize>,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "Foundation for the later container metadata cutover."
-    )
-)]
 impl TupleLayout {
     /// Computes a canonical list layout from logical source-ordered field layouts.
     ///

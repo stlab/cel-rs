@@ -40,6 +40,12 @@ coverage includes error/panic cleanup, destructor panic continuation, alignment,
 zero-sized owners, raw-header destruction, and captureless typed operations
 retaining no instruction-state payload.
 
+The follow-up Talos review also restored source spans and contextual labels for
+shape-inference errors in `out` declarations, conditional match expressions,
+relationship outputs, and cell initializers. Regression tests cover unregistered
+scalar and nested tuple results. The obsolete `TupleLayout` dead-code
+suppressions are removed now that production descriptors use the layout helper.
+
 ## What's done
 
 | Task | Delivered |
