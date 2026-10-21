@@ -443,22 +443,10 @@ impl AdamParser {
         let has_initializer = ctx.consume_punct("=");
         let (shape, cell_id) = if has_initializer {
             let segment = self.parse_cel_expression(ctx)?;
-            self.validate_initializer(&segment, declared_shape.as_ref(), &name, name_span)?;
+            self.validate_initializer(&segment, declared_shape.as_ref(), "cell", &name, name_span)?;
             let (actual_shape, cell_id) = self
                 .build_cell_from_segment(segment, ctx)
                 .map_err(|e| ParseError::new(e.message(), name_span))?;
-            if let Some(declared) = &declared_shape
-                && declared != &actual_shape
-            {
-                return Err(ParseError::new(
-                    format!(
-                        "cell `{name}`: type mismatch: expected `{}`, got `{}`",
-                        self.types.display_name(declared),
-                        self.types.display_name(&actual_shape)
-                    ),
-                    name_span,
-                ));
-            }
             (actual_shape, cell_id)
         } else {
             let declared = declared_shape.ok_or_else(|| {
@@ -534,22 +522,16 @@ impl AdamParser {
         let has_initializer = ctx.consume_punct("=");
         let (shape, cell_id) = if has_initializer {
             let segment = self.parse_cel_expression(ctx)?;
-            self.validate_initializer(&segment, declared_shape.as_ref(), &name, name_span)?;
+            self.validate_initializer(
+                &segment,
+                declared_shape.as_ref(),
+                "source",
+                &name,
+                name_span,
+            )?;
             let (actual_shape, cell_id) = self
                 .build_source_cell_from_segment(segment, ctx)
                 .map_err(|e| ParseError::new(e.message(), name_span))?;
-            if let Some(declared) = &declared_shape
-                && declared != &actual_shape
-            {
-                return Err(ParseError::new(
-                    format!(
-                        "source `{name}`: type mismatch: expected `{}`, got `{}`",
-                        self.types.display_name(declared),
-                        self.types.display_name(&actual_shape)
-                    ),
-                    name_span,
-                ));
-            }
             (actual_shape, cell_id)
         } else {
             let declared = declared_shape.ok_or_else(|| {
@@ -786,21 +768,23 @@ impl AdamParser {
     ///
     /// # Errors
     /// Reports a ranged shape-inference error, type mismatch, or missing cell capability.
+    /// Shape-inference and mismatch errors identify `construct` and `name`.
     /// - Complexity: O(n) in result descriptor nodes.
     fn validate_initializer(
         &self,
         segment: &DynSegment,
         declared: Option<&TypeShape>,
+        construct: &str,
         name: &str,
         span: Span,
     ) -> Result<()> {
-        let actual = self.segment_shape(segment, span, format_args!("cell `{name}`: "))?;
+        let actual = self.segment_shape(segment, span, format_args!("{construct} `{name}`: "))?;
         if let Some(expected) = declared
             && expected != &actual
         {
             return Err(ParseError::new(
                 format!(
-                    "cell `{name}`: type mismatch: expected `{}`, got `{}`",
+                    "{construct} `{name}`: type mismatch: expected `{}`, got `{}`",
                     self.types.display_name(expected),
                     self.types.display_name(&actual)
                 ),
@@ -4164,6 +4148,36 @@ mod tests {
                 }
             );
             assert!(err.message().starts_with("cell `result`:"));
+        }
+    }
+
+    /// Preserves source declaration labels and name spans for initializer errors.
+    #[test]
+    fn shape_error_source_preserves_context_and_span() {
+        for (declaration, message) in [
+            ("source result: i32 = true;", "type mismatch"),
+            ("source result = 1i32..5i32;", "cannot infer a type"),
+            ("source result = (1i32, 1i32..5i32);", "cannot infer a type"),
+        ] {
+            let source = format!("sheet s {{\n{declaration}\n}}");
+            let err = parser().parse_str(&source).unwrap_err();
+            assert!(err.message().contains(message));
+            assert!(
+                err.message().starts_with("source `result`:"),
+                "{}",
+                err.message()
+            );
+            assert_eq!(
+                err.span().start(),
+                proc_macro2::LineColumn { line: 2, column: 7 }
+            );
+            assert_eq!(
+                err.span().end(),
+                proc_macro2::LineColumn {
+                    line: 2,
+                    column: 13
+                }
+            );
         }
     }
 
