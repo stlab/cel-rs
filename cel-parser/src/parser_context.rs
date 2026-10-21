@@ -205,19 +205,19 @@ impl<'a> AnnotatedArray<'a> {
     /// # Errors
     ///
     /// Returns `Err` if the annotation names an unknown type, does not name a complete array
-    /// type, or names tuple-valued array elements.
+    /// type, or has an unrepresentable canonical layout.
     ///
     /// # Examples
     ///
     /// ```rust
     /// use cel_parser::{ExprSpan, ResolvedArrayType, TypeExpr};
     /// use cel_parser::parser_context::AnnotatedArray;
-    /// use cel_runtime::ArrayElementType;
+    /// use cel_runtime::ValueType;
     /// use proc_macro2::Span;
     ///
     /// fn resolve_i32(_: &TypeExpr) -> cel_parser::Result<ResolvedArrayType> {
     ///     Ok(ResolvedArrayType::from_element_type(
-    ///         ArrayElementType::leaf::<i32>().unwrap(),
+    ///         ValueType::leaf::<i32>(),
     ///     ))
     /// }
     ///
@@ -242,7 +242,7 @@ impl<'a> AnnotatedArray<'a> {
     /// let element_type = annotation.resolve_element_type().unwrap().unwrap();
     /// assert_eq!(element_type.type_name(), "i32");
     /// ```
-    pub fn resolve_element_type(&mut self) -> crate::Result<Option<cel_runtime::ArrayElementType>> {
+    pub fn resolve_element_type(&mut self) -> crate::Result<Option<cel_runtime::ValueType>> {
         self.type_annotation
             .as_ref()
             .map(|type_annotation| {
@@ -441,7 +441,16 @@ pub trait ParserContext: Sized {
 
     /// Combines the last `n` emitted values into a single tuple value. `start`/`end` cover the
     /// whole `(...)` construct.
-    fn make_tuple(&mut self, n: usize, ambient_start: usize, start: Span, end: Span);
+    ///
+    /// # Errors
+    /// Returns an error if the tuple's frame or canonical layout cannot be represented.
+    fn make_tuple(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
 
     /// Combines the last `n` emitted values into a single homogeneous array value. `start`/`end`
     /// cover the whole `[...]` construct, and `ambient_start` is the stack offset the first
@@ -452,8 +461,7 @@ pub trait ParserContext: Sized {
     /// # Errors
     ///
     /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
-    /// return `Err` if the elements' complete recursive runtime shapes differ, if any element is
-    /// a CEL tuple (see <https://github.com/stlab/cel-rs/issues/213>), or if the array's storage
+    /// return `Err` if the elements' complete recursive runtime shapes differ, or if the array's storage
     /// layout cannot be represented. Implementations that defer type validation to a later phase
     /// (e.g. [`crate::ast::AstContext`]) never return `Err` here.
     fn make_array(
@@ -502,7 +510,10 @@ pub trait ParserContext: Sized {
     /// expression through the index token.
     ///
     /// - Precondition: `peek_tuple_arity()` returns `Some(arity)` with `index < arity`.
-    fn tuple_index(&mut self, index: usize, start: Span, end: Span);
+    ///
+    /// # Errors
+    /// Returns an error if the selected field's transfer frame cannot be represented.
+    fn tuple_index(&mut self, index: usize, start: Span, end: Span) -> crate::Result<()>;
 
     /// Returns the current stack offset, used to compute tuple layouts.
     fn current_stack_offset(&self) -> usize;
@@ -622,6 +633,9 @@ impl ParserContext for DynSegmentContext {
 
     fn push_literal<T: 'static + Clone>(&mut self, value: T, _span: Span) {
         self.0.just(value);
+        if let Some(ty) = crate::op_table::builtin_value_type(std::any::TypeId::of::<T>()) {
+            self.0.annotate_top(ty).expect("same concrete literal");
+        }
     }
 
     fn apply_op(
@@ -632,7 +646,17 @@ impl ParserContext for DynSegmentContext {
         start: Span,
         end: Span,
     ) -> crate::Result<()> {
-        op_lookup.lookup(name, &mut self.0, arity, start, end)
+        op_lookup.lookup(name, &mut self.0, arity, start, end)?;
+        if let Some(ty) = self
+            .0
+            .peek_output_type_id()
+            .and_then(crate::op_table::builtin_value_type)
+        {
+            self.0
+                .annotate_top(ty)
+                .map_err(|error| crate::ParseError::new_range(error.to_string(), start, end))?;
+        }
+        Ok(())
     }
 
     /// Emits receiver-first direct dispatch with diagnostics anchored to the member name.
@@ -690,23 +714,35 @@ impl ParserContext for DynSegmentContext {
         &mut self,
         then_fragment: Self,
         else_fragment: Option<Self>,
-        start: Span,
+        _start: Span,
         _end: Span,
     ) -> anyhow::Result<()> {
         // No `else`/`else if` in the source: synthesize the implicit `()` fragment here instead
         // of receiving one pre-built from `is_if_expression` (lib.rs) — execution still needs a
         // concrete fragment to select on `false`, even though `AstContext::join2` (ast.rs)
         // records this case as `None` rather than a synthesized node.
-        let else_fragment = else_fragment.unwrap_or_else(|| {
-            let mut fragment = self.new_fragment();
-            fragment.push_literal((), start);
+        let else_fragment = if let Some(fragment) = else_fragment {
             fragment
-        });
+        } else {
+            let mut fragment = self.new_fragment();
+            fragment
+                .0
+                .make_tuple(0, fragment.0.current_stack_offset())?;
+            fragment
+        };
         self.0.join2(then_fragment.0, else_fragment.0)
     }
 
-    fn make_tuple(&mut self, n: usize, ambient_start: usize, _start: Span, _end: Span) {
-        self.0.make_tuple(n, ambient_start);
+    fn make_tuple(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        self.0
+            .make_tuple(n, ambient_start)
+            .map_err(|error| crate::ParseError::new_range(error.to_string(), start, end))
     }
 
     fn make_array(
@@ -745,8 +781,10 @@ impl ParserContext for DynSegmentContext {
         self.0.peek_tuple_arity()
     }
 
-    fn tuple_index(&mut self, index: usize, _start: Span, _end: Span) {
-        self.0.tuple_index(index);
+    fn tuple_index(&mut self, index: usize, start: Span, end: Span) -> crate::Result<()> {
+        self.0
+            .tuple_index(index)
+            .map_err(|error| crate::ParseError::new_range(error.to_string(), start, end))
     }
 
     fn current_stack_offset(&self) -> usize {
@@ -773,8 +811,9 @@ impl ParserContext for DynSegmentContext {
         let _ = params;
         let closure = cel_runtime::DynClosure::typed(param_types, body.into_inner())
             .map_err(|error| crate::ParseError::new_range(error.to_string(), span, span))?;
-        self.0.push_closure(closure);
-        Ok(())
+        self.0
+            .push_closure(closure)
+            .map_err(|error| crate::ParseError::new_range(error.to_string(), span, span))
     }
 
     fn output_type_id(&self) -> Option<std::any::TypeId> {
@@ -909,7 +948,13 @@ mod tests {
             unimplemented!("RecordingContext only records array construction")
         }
 
-        fn make_tuple(&mut self, _n: usize, _ambient_start: usize, _start: Span, _end: Span) {
+        fn make_tuple(
+            &mut self,
+            _n: usize,
+            _ambient_start: usize,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
             unimplemented!("RecordingContext only records array construction")
         }
 
@@ -948,7 +993,7 @@ mod tests {
             None
         }
 
-        fn tuple_index(&mut self, _index: usize, _start: Span, _end: Span) {
+        fn tuple_index(&mut self, _index: usize, _start: Span, _end: Span) -> crate::Result<()> {
             unimplemented!("RecordingContext only records array construction")
         }
 
@@ -1002,9 +1047,11 @@ mod tests {
         let ambient_start = ctx.current_stack_offset();
         ctx.push_literal(1i32, Span::call_site());
         ctx.push_literal(2i32, Span::call_site());
-        ctx.make_tuple(2, ambient_start, Span::call_site(), Span::call_site());
+        ctx.make_tuple(2, ambient_start, Span::call_site(), Span::call_site())
+            .unwrap();
         assert_eq!(ctx.peek_tuple_arity(), Some(2));
-        ctx.tuple_index(1, Span::call_site(), Span::call_site());
+        ctx.tuple_index(1, Span::call_site(), Span::call_site())
+            .unwrap();
         assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 2);
     }
 
@@ -1016,8 +1063,13 @@ mod tests {
         ctx.push_literal(2i32, Span::call_site());
         ctx.make_array(2, ambient_start, Span::call_site(), Span::call_site())
             .unwrap();
-        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
-        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
+        let array = ctx
+            .into_inner()
+            .call0::<cel_runtime::OwnedValue>()
+            .unwrap()
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+            .unwrap();
+        assert_eq!(array.into_vec(), vec![1, 2]);
     }
 
     #[test]
@@ -1054,8 +1106,13 @@ mod tests {
             Span::call_site(),
         )
         .unwrap();
-        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
-        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
+        let array = ctx
+            .into_inner()
+            .call0::<cel_runtime::OwnedValue>()
+            .unwrap()
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+            .unwrap();
+        assert_eq!(array.into_vec(), vec![1, 2]);
     }
 
     #[test]
@@ -1082,7 +1139,7 @@ mod tests {
             AnnotatedArray::new(
                 &mut |_| {
                     Ok(crate::ResolvedArrayType::from_element_type(
-                        cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
+                        cel_runtime::ValueType::leaf::<i32>(),
                     ))
                 },
                 Some(annotation),
@@ -1095,8 +1152,13 @@ mod tests {
             Span::call_site(),
         )
         .unwrap();
-        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
-        assert!(array.try_into_vec::<i32>().unwrap().is_empty());
+        let array = ctx
+            .into_inner()
+            .call0::<cel_runtime::OwnedValue>()
+            .unwrap()
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+            .unwrap();
+        assert!(array.into_vec().is_empty());
     }
 
     #[test]
@@ -1147,7 +1209,14 @@ mod tests {
         let mut ctx = DynSegmentContext::new_context();
         ctx.push_literal(false, Span::call_site());
         let mut then_fragment = ctx.new_fragment();
-        then_fragment.push_literal((), Span::call_site());
+        then_fragment
+            .make_tuple(
+                0,
+                then_fragment.current_stack_offset(),
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .unwrap();
         ctx.join2(then_fragment, None, Span::call_site(), Span::call_site())
             .unwrap();
         ctx.into_inner().call0::<()>().unwrap();

@@ -589,7 +589,7 @@ fn every_signature_rejects_wrong_operands() {
                     }
                     macro_rules! push {
                         ($($ty:ty),+) => {
-                            $(if operand.type_id() == TypeId::of::<$ty>() {
+                            $(if operand.complete_value_type().unwrap().type_id() == TypeId::of::<$ty>() {
                                 segment.just(<$ty>::default());
                             } else)+ { panic!("uncovered geometry operand"); }
                         };

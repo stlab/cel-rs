@@ -9,7 +9,97 @@ use cel_parser::{
     AstContext, CELParser, Expr, ExpressionRestriction, OpLookup, OperationSignature, Parser,
     RecordField, RecordSchema, ResolvedLeafType, Ty, format_expr,
 };
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
+
+/// Stores a recursively typed field as a concrete host value.
+#[derive(Clone)]
+struct CompoundRecord(<CompoundField as cel_runtime::ValueRepr>::Value);
+/// Combines an array of singleton tuples with a callable returning an array.
+type CompoundField = cel_runtime::Cons<
+    cel_runtime::ArrayOf<cel_runtime::Cons<cel_runtime::Leaf<i32>, cel_runtime::Nil>>,
+    cel_runtime::Cons<
+        cel_runtime::FnOf<
+            cel_runtime::Cons<cel_runtime::Leaf<i32>, cel_runtime::Nil>,
+            cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>,
+        >,
+        cel_runtime::Nil,
+    >,
+>;
+
+/// Compound fields retain exact shapes through checking, construction, and host use.
+#[test]
+fn compound_record_fields_preserve_arrays_tuples_and_callables() {
+    use cel_runtime::{IntoCStackList, IntoRustTuple, Leaf, Nil};
+    let field = CELParser::new(OpLookup::new())
+        .parse_type_expr_str("([(i32,)], Fn((i32,), [i32]))")
+        .unwrap()
+        .resolve(cel_parser::builtin_type_resolver().as_ref())
+        .unwrap();
+    let effects = Arc::new(AtomicUsize::new(0));
+    let observed = effects.clone();
+    let mut ops = OpLookup::new();
+    ops.register_record(RecordSchema {
+        ty: leaf::<CompoundRecord>("Compound"),
+        fields: vec![RecordField {
+            name: "value",
+            ty: field,
+        }],
+        emit: Box::new(move |segment, _, _, _| {
+            let observed = observed.clone();
+            segment.op1_repr::<CompoundField, Leaf<CompoundRecord>, _>(move |value| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                CompoundRecord(value)
+            })
+        }),
+    })
+    .unwrap();
+    let source = "Compound { value: ([(1i32,)], |x: i32| [x]) }";
+    for source in [
+        source,
+        "Compound { value: ([(1i32, 2i32)], |x: i32| [x]) }",
+        "Compound { value: ([(1i32,)], |x: f64| [x]) }",
+        "Compound { value: ([(1i32,)], |x: i32| x) }",
+    ] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (_, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| Ty::Any,
+            cel_parser::builtin_type_resolver().as_ref(),
+            &ops,
+        );
+        assert_eq!(
+            diagnostics.is_empty(),
+            source.contains("[(1i32,)], |x: i32| [x]")
+        );
+    }
+    let mut parser = CELParser::new(ops);
+    for source in [
+        "Compound { value: ([(1i32, 2i32)], |x: i32| [x]) }",
+        "Compound { value: ([(1i32,)], |x: f64| [x]) }",
+        "Compound { value: ([(1i32,)], |x: i32| x) }",
+    ] {
+        assert!(parser.parse_str(source).is_err());
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+    }
+    let body = parser.parse_str(source).unwrap();
+    let record = body
+        .prepare::<Nil, Leaf<CompoundRecord>>()
+        .unwrap()
+        .call(&().into_c_stack_list())
+        .unwrap();
+    let (tuples, function) = record.0.into_rust_tuple();
+    assert_eq!(tuples.as_slice()[0].clone().into_rust_tuple(), (1,));
+    assert_eq!(
+        function
+            .call(&(42,).into_c_stack_list())
+            .unwrap()
+            .as_slice(),
+        &[42]
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+}
 
 /// A host record with two independently named scalar fields.
 #[derive(Clone, Debug, PartialEq)]
@@ -20,7 +110,7 @@ struct TestPoint {
 
 /// Describes a concrete host type without registering any value binding.
 fn leaf<T: 'static>(name: &'static str) -> ResolvedLeafType {
-    ResolvedLeafType::new(name, ArrayElementType::leaf::<T>().unwrap())
+    ResolvedLeafType::new(name, ValueType::leaf::<T>())
 }
 
 /// Installs test constructors and an accessor in their own namespaces.
@@ -32,14 +122,14 @@ fn lookup() -> OpLookup {
             fields: vec![
                 RecordField {
                     name: "x",
-                    ty: leaf::<f64>("f64"),
+                    ty: leaf::<f64>("f64").into(),
                 },
                 RecordField {
                     name: "y",
-                    ty: leaf::<f64>("f64"),
+                    ty: leaf::<f64>("f64").into(),
                 },
             ],
-            emit: Arc::new(|s, mapping, ambient, _| {
+            emit: Box::new(|s, mapping, ambient, _| {
                 assert_eq!(s.stack_offset_before_top(2)?, ambient);
                 match mapping {
                     [0, 1] => s.op2(|x: f64, y: f64| TestPoint { x, y }),
@@ -53,7 +143,7 @@ fn lookup() -> OpLookup {
         .register_record(RecordSchema {
             ty: leaf::<()>("Empty"),
             fields: vec![],
-            emit: Arc::new(|s, mapping, ambient, _| {
+            emit: Box::new(|s, mapping, ambient, _| {
                 assert!(mapping.is_empty());
                 assert_eq!(s.current_stack_offset(), ambient);
                 s.just(());
@@ -66,17 +156,17 @@ fn lookup() -> OpLookup {
             ty: leaf::<(TestPoint,)>("Wrapper"),
             fields: vec![RecordField {
                 name: "point",
-                ty: leaf::<TestPoint>("TestPoint"),
+                ty: leaf::<TestPoint>("TestPoint").into(),
             }],
-            emit: Arc::new(|s, _, _, _| s.op1(|point: TestPoint| (point,))),
+            emit: Box::new(|s, _, _, _| s.op1(|point: TestPoint| (point,))),
         })
         .unwrap();
     lookup
         .register_operation(OperationSignature {
             name: "x",
-            operands: vec![leaf::<TestPoint>("TestPoint")],
-            result: leaf::<f64>("f64"),
-            emit: Arc::new(|s, _| s.op1(|point: TestPoint| point.x)),
+            operands: vec![leaf::<TestPoint>("TestPoint").into()],
+            result: leaf::<f64>("f64").into(),
+            emit: Box::new(|s, _| s.op1(|point: TestPoint| point.x)),
         })
         .unwrap();
     lookup.push_scope(|name, s, arity, _| {
@@ -192,9 +282,9 @@ fn registered_operator_results_precede_builtin_inference() {
     let mut ops = lookup();
     ops.register_operation(OperationSignature {
         name: "+",
-        operands: vec![leaf::<i32>("i32"), leaf::<i32>("i32")],
-        result: leaf::<f64>("f64"),
-        emit: Arc::new(|s, _| s.op2(|a: i32, b: i32| f64::from(a) + f64::from(b))),
+        operands: vec![leaf::<i32>("i32").into(), leaf::<i32>("i32").into()],
+        result: leaf::<f64>("f64").into(),
+        emit: Box::new(|s, _| s.op2(|a: i32, b: i32| f64::from(a) + f64::from(b))),
     })
     .unwrap();
     for source in ["1 + 2", "1.0 + 2.0"] {
@@ -226,12 +316,15 @@ fn unresolved_array_operands_do_not_select_known_results() {
     let mut ops = lookup();
     ops.register_operation(OperationSignature {
         name: "length",
-        operands: vec![ResolvedLeafType::new(
-            "[i32]",
-            ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap()),
-        )],
-        result: leaf::<usize>("usize"),
-        emit: Arc::new(|s, _| s.op1(|array: cel_runtime::DynamicArray| array.len())),
+        operands: vec![cel_parser::ResolvedType::Array {
+            element: Box::new(leaf::<i32>("i32").into()),
+        }],
+        result: leaf::<usize>("usize").into(),
+        emit: Box::new(|s, _| {
+            s.op1_repr::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>, cel_runtime::Leaf<usize>, _>(
+                |array| array.len(),
+            )
+        }),
     })
     .unwrap();
     for (source, expected) in [("[custom()].length", Ty::Any), ("[1].length", Ty::Usize)] {
@@ -264,11 +357,11 @@ fn mixed_operator_overloads_preserve_unresolved_operands() {
     ops.register_operation(OperationSignature {
         name: "+",
         operands: vec![
-            leaf::<TestPoint>("TestPoint"),
-            leaf::<TestPoint>("TestPoint"),
+            leaf::<TestPoint>("TestPoint").into(),
+            leaf::<TestPoint>("TestPoint").into(),
         ],
-        result: leaf::<TestPoint>("TestPoint"),
-        emit: Arc::new(|s, _| {
+        result: leaf::<TestPoint>("TestPoint").into(),
+        emit: Box::new(|s, _| {
             s.op2(|a: TestPoint, b: TestPoint| TestPoint {
                 x: a.x + b.x,
                 y: a.y + b.y,
@@ -310,11 +403,11 @@ fn mixed_operator_overloads_reject_known_incompatible_operands() {
         .register_operation(OperationSignature {
             name: "+",
             operands: vec![
-                leaf::<TestPoint>("TestPoint"),
-                leaf::<TestPoint>("TestPoint"),
+                leaf::<TestPoint>("TestPoint").into(),
+                leaf::<TestPoint>("TestPoint").into(),
             ],
-            result: leaf::<TestPoint>("TestPoint"),
-            emit: Arc::new(|s, _| s.op2(|a: TestPoint, _: TestPoint| a)),
+            result: leaf::<TestPoint>("TestPoint").into(),
+            emit: Box::new(|s, _| s.op2(|a: TestPoint, _: TestPoint| a)),
         })
         .unwrap();
     for ops in [lookup(), registered] {
@@ -445,14 +538,14 @@ fn heterogeneous_source_order_drops_once() {
             fields: vec![
                 RecordField {
                     name: "text",
-                    ty: leaf::<String>("String"),
+                    ty: leaf::<String>("String").into(),
                 },
                 RecordField {
                     name: "aligned",
-                    ty: leaf::<Aligned>("Aligned"),
+                    ty: leaf::<Aligned>("Aligned").into(),
                 },
             ],
-            emit: Arc::new(|s, mapping, ambient, _| {
+            emit: Box::new(|s, mapping, ambient, _| {
                 assert_eq!(mapping, [1, 0]);
                 assert_eq!(s.stack_offset_before_top(2)?, ambient);
                 s.op2(|aligned: Aligned, text: String| Owned { text, aligned })
@@ -680,9 +773,9 @@ fn invalid_field_sets_do_not_invoke_constructor() {
         ty: leaf::<()>("Checked"),
         fields: vec![RecordField {
             name: "x",
-            ty: leaf::<f64>("f64"),
+            ty: leaf::<f64>("f64").into(),
         }],
-        emit: Arc::new(move |s, _, _, _| {
+        emit: Box::new(move |s, _, _, _| {
             count.fetch_add(1, Ordering::SeqCst);
             s.op1(|_: f64| ())
         }),
@@ -724,7 +817,7 @@ fn record_emitter_errors_keep_constructor_span() {
     ops.register_record(RecordSchema {
         ty: leaf::<()>("Failure"),
         fields: vec![],
-        emit: Arc::new(|_, _, _, _| anyhow::bail!("constructor setup failed")),
+        emit: Box::new(|_, _, _, _| anyhow::bail!("constructor setup failed")),
     })
     .unwrap();
     let source = "Failure {}";
@@ -791,12 +884,15 @@ fn record_array_descriptor_identity_is_exact() {
         ty: leaf::<()>("ArrayRecord"),
         fields: vec![RecordField {
             name: "values",
-            ty: ResolvedLeafType::new(
-                "[i32]",
-                ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap()),
-            ),
+            ty: cel_parser::ResolvedType::Array {
+                element: Box::new(leaf::<i32>("i32").into()),
+            },
         }],
-        emit: Arc::new(|s, _, _, _| s.op1(|_: cel_runtime::DynamicArray| ())),
+        emit: Box::new(|s, _, _, _| {
+            s.op1_repr::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>, cel_runtime::Leaf<()>, _>(
+                |_| (),
+            )
+        }),
     })
     .unwrap();
     for (source, errors) in [

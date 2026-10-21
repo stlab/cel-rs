@@ -1,5 +1,11 @@
 # Tuple Value Display Design
 
+> **Historical status (2026-10-19):** The Inspector now formats canonical
+> arrays and tuples recursively through explicit debug capabilities; compound
+> editing remains unsupported. The old wrapper-specific approach below is
+> historical. See the [current handoff](../2026-10-19-composable-containers-handoff.md)
+> for retained rendered evidence.
+
 **Status:** Approved
 **Date:** 2026-08-12
 

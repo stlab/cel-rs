@@ -1,5 +1,11 @@
 # `DynamicSequence`: type-safe CEL tuple cells (Rust API layer)
 
+> **Historical status (2026-10-19):** This storage/API has been removed.
+> Canonical lists, `OwnedValue`, and Adam's private `CellValue` replace it;
+> public compound access uses complete witnesses. See the
+> [current handoff](../2026-10-19-composable-containers-handoff.md).
+> The original design below is preserved as history, not active guidance.
+
 ## Problem
 
 adam-lang cannot currently declare a cell with a CEL tuple type, either explicitly

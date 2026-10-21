@@ -1,7 +1,33 @@
 //! Contracts for checked, noncapturing CEL closure invocation.
 
 use cel_parser::{CELParser, OpLookup, ResolvedLeafType, resolve_builtin_named_type};
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
+
+/// Callable annotations retain complete signatures through higher-order and tuple intermediates.
+#[test]
+fn full_callable_annotations_execute_without_host_shape_registration() {
+    use cel_runtime::{ArrayOf, IntoCStackList, Leaf, Nil};
+    for source in [
+        "(|f: Fn((i32,), [i32])| f(42i32))(|x: i32| [x])",
+        "(|f: Fn((), [i32])| f())(|| [42i32])",
+        "(|f: Fn(((i32, [i32]),), [i32])| f((42i32, [42i32])))(|x: (i32, [i32])| x.1)",
+        "(if true { |x: i32| [x] } else { |x: i32| [x] })(42i32)",
+    ] {
+        let body = parser().parse_str(source).unwrap();
+        let value = body
+            .prepare::<Nil, ArrayOf<Leaf<i32>>>()
+            .unwrap()
+            .call(&().into_c_stack_list())
+            .unwrap();
+        assert_eq!(value.as_slice(), &[42]);
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr(&expr, &|_| cel_parser::Ty::Any);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        assert_eq!(ty, cel_parser::Ty::Array(Box::new(cel_parser::Ty::I32)));
+    }
+}
 
 /// A registered, owning leaf with stricter alignment than ordinary scalars.
 #[derive(Clone, Debug, PartialEq)]
@@ -14,16 +40,28 @@ fn parser() -> CELParser {
     lookup.push_library_scope(|name, segment, arity, _| {
         if matches!(name, "first" | "last") && arity == 0 {
             segment.just(Parcel(name.to_string()));
+            segment.annotate_top(
+                cel_runtime::ValueType::cloneable_leaf::<Parcel>()
+                    .with_equality::<cel_runtime::Leaf<Parcel>>()?
+                    .with_debug::<cel_runtime::Leaf<Parcel>>()?,
+            )?;
             return Ok(true);
         }
         Ok(false)
     });
     CELParser::with_type_resolver(lookup, |name: &str, args: &[cel_parser::ResolvedType]| {
         if name == "Parcel" && args.is_empty() {
-            Some(ResolvedLeafType::new(
-                "Parcel",
-                ArrayElementType::cloneable::<Parcel>().unwrap(),
-            ))
+            Some(
+                ResolvedLeafType::new("Parcel", ValueType::cloneable_leaf::<Parcel>())
+                    .with_complete_value_type(
+                        cel_runtime::ValueType::cloneable_leaf::<Parcel>()
+                            .with_equality::<cel_runtime::Leaf<Parcel>>()
+                            .unwrap()
+                            .with_debug::<cel_runtime::Leaf<Parcel>>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+            )
         } else {
             resolve_builtin_named_type(name, args)
         }
@@ -56,33 +94,15 @@ fn registered_recursive_tuple_and_nested_invocation() {
              ((first, (7, last)))",
         )
         .unwrap();
-    let result = segment
-        .call_dyn_as_dynamic_sequence(&[], &|id| {
-            if id == std::any::TypeId::of::<Parcel>() {
-                Some((
-                    cel_runtime::element_dropper_for::<Parcel>(),
-                    cel_runtime::element_cloner_for::<Parcel>(),
-                    cel_runtime::element_eq_for::<Parcel>(),
-                    cel_runtime::element_debug_for::<Parcel>(),
-                ))
-            } else if id == std::any::TypeId::of::<i32>() {
-                Some((
-                    cel_runtime::element_dropper_for::<i32>(),
-                    cel_runtime::element_cloner_for::<i32>(),
-                    cel_runtime::element_eq_for::<i32>(),
-                    cel_runtime::element_debug_for::<i32>(),
-                ))
-            } else {
-                None
-            }
-        })
-        .unwrap();
-    let (first, nested): (Parcel, cel_runtime::DynamicSequence) = result.try_into_tuple().unwrap();
+    use cel_runtime::{Cons, IntoRustTuple, Leaf, Nil};
+    type Nested = Cons<Leaf<i32>, Cons<Leaf<Parcel>, Nil>>;
+    let result = segment.call_dyn_value(&[]).unwrap();
+    let (first, nested) = result
+        .try_into_typed::<Cons<Leaf<Parcel>, Cons<Nested, Nil>>>()
+        .unwrap()
+        .into_rust_tuple();
     assert_eq!(first, Parcel("first".into()));
-    assert_eq!(
-        nested.try_into_tuple::<(i32, Parcel)>().unwrap(),
-        (7, Parcel("last".into()))
-    );
+    assert_eq!(nested.into_rust_tuple(), (7, Parcel("last".into())));
 }
 
 /// Array annotations retain recursive element shapes rather than only the array marker.
@@ -92,19 +112,14 @@ fn recursive_arrays_cross_invocation_boundaries() {
         .parse_str("(|x: [[Parcel]]| (|y: [[Parcel]]| y)(x))([[first], [last]])")
         .unwrap();
     let rows = segment
-        .call0::<cel_runtime::DynamicArray>()
+        .call0::<cel_runtime::OwnedValue>()
         .unwrap()
-        .try_into_vec::<cel_runtime::DynamicArray>()
-        .unwrap();
+        .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::ArrayOf<cel_runtime::Leaf<Parcel>>>>()
+        .unwrap()
+        .into_vec();
     assert_eq!(rows.len(), 2);
-    assert_eq!(
-        rows[0].try_as_slice::<Parcel>().unwrap(),
-        &[Parcel("first".into())]
-    );
-    assert_eq!(
-        rows[1].try_as_slice::<Parcel>().unwrap(),
-        &[Parcel("last".into())]
-    );
+    assert_eq!(rows[0].as_slice(), &[Parcel("first".into())]);
+    assert_eq!(rows[1].as_slice(), &[Parcel("last".into())]);
 }
 
 /// Nullary and higher-order literal results retain their known signatures.
@@ -225,7 +240,7 @@ fn counted_parser(live: std::sync::Arc<std::sync::atomic::AtomicIsize>) -> CELPa
         if name == "Item" && args.is_empty() {
             Some(ResolvedLeafType::new(
                 "Item",
-                ArrayElementType::cloneable::<Item>().unwrap(),
+                ValueType::cloneable_leaf::<Item>(),
             ))
         } else {
             resolve_builtin_named_type(name, args)
@@ -288,7 +303,9 @@ fn host_call_scope_precedes_general_invocation() {
     let mut lookup = OpLookup::new();
     lookup.push_scope(|name, segment, arity, _| {
         if name == "()" && arity == 2 {
-            segment.op2(|_: cel_runtime::DynClosure, _: i32| 99i32)?;
+            segment.drop_value()?;
+            segment.drop_value()?;
+            segment.just(99i32);
             return Ok(true);
         }
         Ok(false)
@@ -308,8 +325,11 @@ fn host_tuple_call_precedes_general_invocation() {
         tuple_operand_index: 1,
         operand_type_ids: vec![TypeId::of::<cel_runtime::DynClosure>()],
         op_fn: |segment, _| {
-            segment.tuple_index(0);
-            segment.op2(|_: cel_runtime::DynClosure, _: i32| 77i32)
+            segment.tuple_index(0)?;
+            segment.drop_value()?;
+            segment.drop_value()?;
+            segment.just(77i32);
+            Ok(())
         },
     });
     let mut segment = CELParser::new(lookup)
@@ -336,7 +356,10 @@ fn unknown_callable_signature_fails_explicitly() {
         Ok(false)
     });
     let error = CELParser::new(lookup).parse_str("opaque()").err().unwrap();
-    assert!(error.message().contains("signature is unknown"), "{error}");
+    assert!(
+        error.message().contains("callable signature required"),
+        "{error}"
+    );
 }
 
 /// Syntax-only parsing preserves custom recursive annotations without any registry lookup.
@@ -361,12 +384,13 @@ fn ast_preserves_unresolved_annotations_and_static_body_walks() {
         matches!(&elements[1], TypeExpr::Array { element, .. } if matches!(element.as_ref(), TypeExpr::Array { .. }))
     );
     let (_, diagnostics) = cel_parser::ty::check_expr(&expression, &|_| cel_parser::Ty::Any);
-    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics.len(), 2);
     assert!(
         diagnostics[0].message().contains("array"),
         "{}",
         diagnostics[0]
     );
+    assert!(diagnostics[1].message().contains("Unregistered"));
 }
 
 /// Invocation imposes no built-in finite limit on parameter count.
@@ -426,9 +450,9 @@ fn parameter_without_clone_adapter_is_explicitly_unsupported() {
         OpLookup::new(),
         [(
             "Ticket",
-            ResolvedLeafType::new("Ticket", ArrayElementType::leaf::<Ticket>().unwrap()),
+            ResolvedLeafType::new("Ticket", ValueType::leaf::<Ticket>()),
         )],
     );
     let error = parser.parse_str("|x: Ticket| x").err().unwrap();
-    assert!(error.message().contains("clone support"), "{error}");
+    assert!(error.message().contains("clone capability"), "{error}");
 }

@@ -4,6 +4,31 @@
 //! The parser follows the CEL grammar specification and provides detailed error reporting
 //! with source location information.
 //!
+//! # Canonical typed execution
+//!
+//! Arrays, tuples, unit, registered leaves, and `Fn` signatures compose
+//! recursively without registering each aggregate shape. [`ResolvedType`] and
+//! [`Ty`] retain complete shapes; shared physical carrier IDs are not identities.
+//! Preparation validates concrete witnesses before the body executes:
+//!
+//! ```
+//! use cel_parser::{CELParser, OpLookup};
+//! use cel_runtime::{ArrayOf, Cons, IntoCStackList, IntoRustTuple, Leaf, Nil};
+//! type Pair = Cons<Leaf<i32>, Cons<Leaf<bool>, Nil>>;
+//! let body = CELParser::new(OpLookup::new()).parse_str("[(7, true)]").unwrap();
+//! let mut prepared = body.prepare::<Nil, ArrayOf<Pair>>().unwrap();
+//! let pairs = prepared.call(&().into_c_stack_list()).unwrap().into_vec();
+//! assert_eq!(pairs.into_iter().next().unwrap().into_rust_tuple(), (7, true));
+//! ```
+//!
+//! Repeated prepared calls do not repeat recursive type checks. Arbitrary
+//! erased host imports remain checked external boundaries. Cloning borrowed
+//! argument reads, comparing values, and formatting values require their own
+//! capabilities; merely moving a value into a container does not. Source
+//! `Fn((A,), R)` names one parameter and `Fn((), R)` names none. The typed
+//! Rust carrier is [`cel_runtime::Callable`], witnessed by [`cel_runtime::FnOf`].
+//! `cel-rs-macros` validates source; no native macro backend is implemented.
+//!
 //! # Error Handling
 //!
 //! Parse errors are returned as [`ParseError`], which carries a `proc_macro2::Span` for precise diagnostics.
@@ -72,9 +97,15 @@
 //! against the same [`TypeResolver`]; `[T]` composes nested array types (`[i32]`, `[[i32]]`);
 //! and parenthesized tuple syntax names a (possibly nested) tuple type. Every context that
 //! accepts `type_expression` documents its own narrower support boundary where one exists.
-//! Closure parameters support registered cloneable leaves and recursive tuples/arrays;
-//! array elements cannot be tuples. Adam-lang cell types do not yet support
-//! `[T]` or `Name(args)` — see <https://github.com/stlab/cel-rs/issues/227>.
+//! CEL types recursively compose registered cloneable leaves, tuples, arrays, and callables:
+//! arrays can contain tuples or callables, and tuples and callable signatures can contain
+//! further compound types. `Fn((A, B), R)` names a callable with two parameters and result
+//! `R`; use `Fn((A,), R)` for one parameter and `Fn((), R)` for none.
+//! Adam-lang shares this recursive resolution for persistent cells, including registered
+//! generic leaves. Adam requires cloning and value equality before storing a cell:
+//! callable values remain valid CEL values, but a callable without equality cannot become
+//! an Adam cell. Compound host access uses explicit canonical representation witnesses;
+//! registered primitive and foreign leaf cells retain their concrete Rust access APIs.
 //!
 //! # Examples
 //!
@@ -132,17 +163,16 @@
 //! coercion occurs. [`ty::check_expr`] remains the primitive convenience entry with an empty lookup.
 //!
 //! ```rust
-//! use std::sync::Arc;
 //! use cel_parser::{AstContext, OpLookup, OperationSignature, Parser, ResolvedLeafType, Ty};
-//! use cel_runtime::ArrayElementType;
+//! use cel_runtime::ValueType;
 //!
-//! let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+//! let scalar = ResolvedLeafType::new("f64", ValueType::leaf::<f64>());
 //! let mut lookup = OpLookup::new();
 //! lookup.register_operation(OperationSignature {
 //!     name: "twice",
-//!     operands: vec![scalar.clone()],
-//!     result: scalar,
-//!     emit: Arc::new(|s, _| s.op1(|value: f64| value * 2.0)),
+//!     operands: vec![scalar.clone().into()],
+//!     result: scalar.into(),
+//!     emit: Box::new(|s, _| s.op1(|value: f64| value * 2.0)),
 //! }).unwrap();
 //! let expr = Parser::<AstContext>::new(OpLookup::new())
 //!     .parse_str_ast("3.0.twice() + true").unwrap();
@@ -154,9 +184,11 @@
 //!
 //! ## Array Literals
 //!
-//! A `[...]` literal evaluates to one [`cel_runtime::DynamicArray`] owning every element.
+//! A `[...]` literal constructs one canonical [`cel_runtime::Array`] owning every element.
+//! Checked host calls return [`cel_runtime::OwnedValue`]; prepared calls use exact
+//! recursive witnesses directly.
 //! Unannotated non-empty arrays keep their existing inference, while postfix annotations let
-//! callers state the complete scalar, nested-array, custom-registry, or empty-array type
+//! callers state complete recursive array, tuple, callable, and custom-leaf shapes
 //! explicitly. Elements must share one complete recursive runtime type — a heterogeneous literal
 //! such as `[1i32, 2.0f64]`, an unannotated empty literal `[]`, or a trailing comma is a parse
 //! error — and the evaluated array converts to the corresponding `Vec<T>` without moving or
@@ -164,17 +196,32 @@
 //!
 //! ```rust
 //! use cel_parser::{CELParser, OpLookup};
-//! use cel_runtime::DynamicArray;
+//!
 //!
 //! let mut segment = CELParser::new(OpLookup::new())
 //!     .parse_str("[0, 1, 2]: [i32]")
 //!     .unwrap();
-//! let array: DynamicArray = segment.call0().unwrap();
-//! assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+//! let array = segment.call0::<cel_runtime::OwnedValue>().unwrap().try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>().unwrap();
+//! assert_eq!(array.into_vec(), vec![0, 1, 2]);
 //!
 //! let mut segment = CELParser::new(OpLookup::new()).parse_str("[]: [i32]").unwrap();
-//! let array: DynamicArray = segment.call0().unwrap();
-//! assert!(array.try_into_vec::<i32>().unwrap().is_empty());
+//! let array = segment.call0::<cel_runtime::OwnedValue>().unwrap().try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>().unwrap();
+//! assert!(array.into_vec().is_empty());
+//! ```
+//!
+//! Tuple arrays and callable arrays use canonical witnesses rather than external erased wrappers.
+//! Singleton tuple types retain their trailing comma. `Fn((A, B), R)` has two parameters,
+//! `Fn((A,), R)` has one, and `Fn((), R)` has none:
+//!
+//! ```
+//! use cel_parser::{CELParser, OpLookup};
+//! use cel_runtime::{ArrayOf, Cons, FnOf, IntoCStackList, Leaf, Nil};
+//! type F = FnOf<Cons<Leaf<i32>, Nil>, ArrayOf<Leaf<i32>>>;
+//! let body = CELParser::new(OpLookup::new())
+//!     .parse_str("[]: [Fn((i32,), [i32])]").unwrap();
+//! let values = body.prepare::<Nil, ArrayOf<F>>().unwrap()
+//!     .call(&().into_c_stack_list()).unwrap();
+//! assert!(values.is_empty());
 //! ```
 //!
 //! Hosts may also resolve custom registry-backed leaf names by constructing the parser with
@@ -182,36 +229,36 @@
 //!
 //! ```rust
 //! use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
-//! use cel_runtime::{ArrayElementType, DynamicArray};
+//! use cel_runtime::ValueType;
 //!
 //! #[derive(Clone)]
 //! struct Custom;
 //!
 //! let resolver = [(
 //!     "Custom",
-//!     ResolvedLeafType::new("Custom", ArrayElementType::leaf::<Custom>().unwrap()),
+//!     ResolvedLeafType::new("Custom", ValueType::leaf::<Custom>()),
 //! )];
 //! let mut segment = CELParser::with_type_resolver(OpLookup::new(), resolver)
 //!     .parse_str("[]: [Custom]")
 //!     .unwrap();
-//! let array: DynamicArray = segment.call0().unwrap();
-//! assert!(array.try_into_vec::<Custom>().unwrap().is_empty());
+//! let array = segment.call0::<cel_runtime::OwnedValue>().unwrap().try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<Custom>>>().unwrap();
+//! assert!(array.into_vec().is_empty());
 //! ```
 //!
-//! Nested literals accept recursive array annotations, so each inner value is itself a
-//! `DynamicArray` with its own checked element descriptor:
+//! Nested literals accept recursive array annotations; each inner value uses the
+//! same canonical array ABI with a complete element witness:
 //!
 //! ```rust
 //! use cel_parser::{CELParser, OpLookup};
-//! use cel_runtime::DynamicArray;
+//!
 //!
 //! let mut segment = CELParser::new(OpLookup::new())
 //!     .parse_str("[[0], [1]]: [[i32]]")
 //!     .unwrap();
-//! let array: DynamicArray = segment.call0().unwrap();
-//! let rows = array.try_into_vec::<DynamicArray>().unwrap();
+//! let array = segment.call0::<cel_runtime::OwnedValue>().unwrap().try_into_typed::<cel_runtime::ArrayOf<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>>().unwrap();
+//! let rows = array.into_vec();
 //! assert_eq!(rows.len(), 2);
-//! assert_eq!(rows[0].try_as_slice::<i32>().unwrap(), &[0]);
+//! assert_eq!(rows[0].as_slice(), &[0]);
 //! ```
 //!
 //! Exact annotation failures stay precise:
@@ -239,10 +286,6 @@
 //!
 //! - An unannotated empty literal (`[]`) is a parse error: with no element there is nothing to
 //!   infer the array's element type from (<https://github.com/stlab/cel-rs/issues/212>).
-//! - A CEL tuple cannot be an array element, so both `[(0i32, 1i32)]` and `[]: [(i32, i32)]`
-//!   are rejected with the explicit tuple-array diagnostic: a tuple is a stack-layout
-//!   pseudo-value with no concrete Rust element representation
-//!   (<https://github.com/stlab/cel-rs/issues/213>).
 //! - A type-mismatch diagnostic from the compiling path ([`CELParser`], which type-checks
 //!   elements against their compiled runtime types) spans the whole `[...]` literal and names the
 //!   offending element only in its message text (`array element 1 has type ...`). The static
@@ -309,7 +352,6 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
-use std::sync::Arc;
 
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -516,39 +558,19 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
 /// Resolves a closure annotation through the configured registry without erasing its shape.
 ///
 /// # Errors
-/// Returns annotation resolution errors, or unsupported tuple-valued array element errors.
+/// Returns annotation resolution errors or unrepresentable layout errors.
 /// - Complexity: O(number of type nodes).
 fn closure_param_type_from_type_expr(
     type_expr: &TypeExpr,
     resolver: &dyn TypeResolver,
 ) -> Result<cel_runtime::ValueType> {
-    /// Converts a resolved type tree into runtime descriptors.
-    ///
-    /// - Complexity: O(number of type nodes).
-    fn convert(ty: ResolvedType, span: ExprSpan) -> Result<cel_runtime::ValueType> {
-        match ty {
-            ResolvedType::Scalar(leaf) => Ok(cel_runtime::ValueType::registered(
-                leaf.element_type().clone(),
-            )),
-            ResolvedType::Tuple { elements } => Ok(cel_runtime::ValueType::tuple(
-                elements
-                    .into_iter()
-                    .map(|ty| {
-                        Ok(cel_runtime::AssociatedType {
-                            offset: 0,
-                            value_type: convert(ty, span)?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            )),
-            ResolvedType::Array { element } => {
-                let array =
-                    ResolvedArrayType::from_resolved_type(ResolvedType::Array { element }, span)?;
-                Ok(cel_runtime::ValueType::array(array.into_element_type()))
-            }
-        }
-    }
-    convert(type_expr.resolve(resolver)?, type_expr.span())
+    type_expr
+        .resolve(resolver)?
+        .into_value_type()
+        .map_err(|error| {
+            let span = type_expr.span();
+            ParseError::new_range(error.to_string(), span.start, span.end)
+        })
 }
 
 /// A recursive descent parser for expressions, generic over the [`ParserContext`] it emits
@@ -599,7 +621,7 @@ pub struct Parser<C: ParserContext> {
     tokens: Option<Peekable<LexLexer>>,
     context: C,
     op_lookup: OpLookup,
-    type_resolver: Arc<dyn TypeResolver>,
+    type_resolver: Box<dyn TypeResolver>,
     last_span: Span,
     /// Net count of `Delimiter::Brace`/`Delimiter::Bracket`/`Delimiter::Parenthesis` tokens
     /// consumed since the last [`set_tokens`](Self::set_tokens)/
@@ -647,7 +669,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// * `op_lookup` - Operation lookup for resolving operators and identifiers
     pub fn new(op_lookup: OpLookup) -> Self {
-        Self::with_shared_type_resolver(op_lookup, type_expr::builtin_type_resolver())
+        Self::with_boxed_type_resolver(op_lookup, type_expr::builtin_type_resolver())
     }
 
     /// Creates a new CEL parser with the given operation lookup and leaf type resolver.
@@ -660,32 +682,30 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// ```rust
     /// use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
-    /// use cel_runtime::ArrayElementType;
+    /// use cel_runtime::ValueType;
     ///
     /// #[derive(Clone)]
     /// struct Celsius(i32);
     ///
     /// let resolver = [(
     ///     "Celsius",
-    ///     ResolvedLeafType::new("Celsius", ArrayElementType::leaf::<Celsius>().unwrap()),
+    ///     ResolvedLeafType::new("Celsius", ValueType::leaf::<Celsius>()),
     /// )];
     /// let mut segment = CELParser::with_type_resolver(OpLookup::new(), resolver)
     ///     .parse_str("[]: [Celsius]")
     ///     .unwrap();
-    /// let array: cel_runtime::DynamicArray = segment.call0().unwrap();
-    /// assert!(array.try_into_vec::<Celsius>().unwrap().is_empty());
+    /// let array = segment.call0::<cel_runtime::OwnedValue>().unwrap().try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<Celsius>>>().unwrap();
+    /// assert!(array.into_vec().is_empty());
     /// ```
     pub fn with_type_resolver<R>(op_lookup: OpLookup, type_resolver: R) -> Self
     where
         R: TypeResolver + 'static,
     {
-        Self::with_shared_type_resolver(op_lookup, Arc::new(type_resolver))
+        Self::with_boxed_type_resolver(op_lookup, Box::new(type_resolver))
     }
 
-    fn with_shared_type_resolver(
-        op_lookup: OpLookup,
-        type_resolver: Arc<dyn TypeResolver>,
-    ) -> Self {
+    /// Creates a parser that uniquely owns its compile-time type resolver.
+    fn with_boxed_type_resolver(op_lookup: OpLookup, type_resolver: Box<dyn TypeResolver>) -> Self {
         Parser {
             tokens: None,
             context: C::new_context(),
@@ -706,7 +726,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// ```rust
     /// use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
-    /// use cel_runtime::ArrayElementType;
+    /// use cel_runtime::ValueType;
     ///
     /// #[derive(Clone)]
     /// struct Celsius(i32);
@@ -716,7 +736,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// parser.set_type_resolver([(
     ///     "Celsius",
-    ///     ResolvedLeafType::new("Celsius", ArrayElementType::leaf::<Celsius>().unwrap()),
+    ///     ResolvedLeafType::new("Celsius", ValueType::leaf::<Celsius>()),
     /// )]);
     /// assert!(parser.parse_str("[]: [Celsius]").is_ok());
     /// ```
@@ -724,7 +744,7 @@ impl<C: ParserContext> Parser<C> {
     where
         R: TypeResolver + 'static,
     {
-        self.type_resolver = Arc::new(type_resolver);
+        self.type_resolver = Box::new(type_resolver);
     }
 
     /// Resolves `expr` through this parser's configured leaf type resolver.
@@ -1745,7 +1765,7 @@ impl<C: ParserContext> Parser<C> {
                 "tuple index `{index}` out of range for tuple of arity {arity}"
             )));
         }
-        self.context.tuple_index(index, start, self.last_span);
+        self.context.tuple_index(index, start, self.last_span)?;
         Ok(())
     }
 
@@ -1944,7 +1964,12 @@ impl<C: ParserContext> Parser<C> {
             })
         ) {
             self.advance();
-            self.context.push_literal((), self.last_span);
+            self.context.make_tuple(
+                0,
+                self.context.current_stack_offset(),
+                open_span,
+                self.last_span,
+            )?;
             return Ok(true);
         }
         let ambient_start = self.context.current_stack_offset();
@@ -1976,7 +2001,7 @@ impl<C: ParserContext> Parser<C> {
             // Single element + trailing comma: 1-tuple.
             self.advance();
             self.context
-                .make_tuple(count, ambient_start, open_span, self.last_span);
+                .make_tuple(count, ambient_start, open_span, self.last_span)?;
             return Ok(true);
         }
         loop {
@@ -1999,7 +2024,7 @@ impl<C: ParserContext> Parser<C> {
             }
         }
         self.context
-            .make_tuple(count, ambient_start, open_span, self.last_span);
+            .make_tuple(count, ambient_start, open_span, self.last_span)?;
         Ok(true)
     }
 
@@ -2072,9 +2097,9 @@ impl<C: ParserContext> Parser<C> {
             ));
         }
 
-        let type_resolver = Arc::clone(&self.type_resolver);
+        let type_resolver = self.type_resolver.as_ref();
         let mut resolve_array_type = |type_expr: &TypeExpr| {
-            let resolved = type_expr.resolve(type_resolver.as_ref())?;
+            let resolved = type_expr.resolve(type_resolver)?;
             ResolvedArrayType::from_resolved_type(resolved, type_expr.span())
         };
         self.context.make_annotated_array(
@@ -2413,7 +2438,7 @@ impl<C: ParserContext> Parser<C> {
         };
         self.context
             .join2(then_fragment, else_fragment, if_span, self.last_span)
-            .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
+            .map_err(|e| ParseError::new_range(e.to_string(), if_span, self.last_span))?;
         Ok(true)
     }
 }
@@ -2775,7 +2800,7 @@ mod tests {
         let mut parser = CELParser::new(OpLookup::new());
         let mut seg = parser.parse_str("(1i32,)").unwrap();
         assert_eq!(seg.peek_tuple_arity(), Some(1));
-        seg.tuple_index(0);
+        seg.tuple_index(0).unwrap();
         assert_eq!(seg.call0::<i32>().unwrap(), 1);
     }
 
@@ -3745,7 +3770,7 @@ mod tests {
 
     #[test]
     fn if_branch_tuple_arity_mismatch_is_error() {
-        // Regression test: every tuple shares the same erased `DynTuple`
+        // Regression test: a flat erased tuple identity
         // marker type, so a naive type_id comparison would accept branches
         // with genuinely different tuple shapes — join2 must compare shapes,
         // not just the marker type, and reject this.
@@ -3956,25 +3981,15 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let closure: cel_runtime::DynClosure = segment.call0()?;
 
-        // Build a `DynamicSequence` shaped like `(i32, i32)` — the runtime-erased tuple value a
-        // real caller (e.g. adam-lang, reading a tuple-typed cell) would hand a closure whose
-        // parameter type is a tuple.
+        // Borrow a canonical whole-value owner at the checked closure boundary.
         let mut pair = DynSegment::new::<()>();
         let ambient_start = pair.current_stack_offset();
-        pair.op0(|| 10i32);
-        pair.op0(|| 20i32);
-        pair.make_tuple(2, ambient_start);
-        let leaf = |type_id: TypeId| {
-            (type_id == TypeId::of::<i32>()).then(|| {
-                (
-                    cel_runtime::element_dropper_for::<i32>(),
-                    cel_runtime::element_cloner_for::<i32>(),
-                    cel_runtime::element_eq_for::<i32>(),
-                    cel_runtime::element_debug_for::<i32>(),
-                )
-            })
-        };
-        let pair: cel_runtime::DynamicSequence = pair.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+        pair.just(10i32);
+        pair.annotate_top(crate::op_table::builtin_value_type(TypeId::of::<i32>()).unwrap())?;
+        pair.just(20i32);
+        pair.annotate_top(crate::op_table::builtin_value_type(TypeId::of::<i32>()).unwrap())?;
+        pair.make_tuple(2, ambient_start)?;
+        let pair = pair.call_dyn_value(&[])?;
 
         assert_eq!(closure.call::<i32>(&[&pair])?, 30);
         Ok(())
@@ -3999,8 +4014,12 @@ mod tests {
     fn closure_param_accepts_an_array_type() {
         let mut parser = CELParser::new(OpLookup::new());
         let mut segment = parser.parse_str("(|xs: [i32]| xs)([1, 2])").unwrap();
-        let array = segment.call0::<cel_runtime::DynamicArray>().unwrap();
-        assert_eq!(array.try_as_slice::<i32>().unwrap(), &[1, 2]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()
+            .unwrap()
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()
+            .unwrap();
+        assert_eq!(array.as_slice(), &[1, 2]);
     }
 
     #[test]
@@ -4254,8 +4273,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[0i32, 1i32, 2i32]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1, 2]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![0, 1, 2]);
         Ok(())
     }
 
@@ -4265,8 +4286,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[0, 1]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![0, 1]);
         Ok(())
     }
 
@@ -4276,8 +4299,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[0, 1]: [i32]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![0, 1]);
         Ok(())
     }
 
@@ -4287,8 +4312,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[1.0, 42.5]: [f64]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<f64>()?, vec![1.0, 42.5]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<f64>>>()?;
+        assert_eq!(array.into_vec(), vec![1.0, 42.5]);
         Ok(())
     }
 
@@ -4298,8 +4325,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[]: [i32]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert!(array.try_into_vec::<i32>()?.is_empty());
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert!(array.into_vec().is_empty());
         Ok(())
     }
 
@@ -4309,12 +4338,11 @@ mod tests {
         let mut segment = parser
             .parse_str("[]: [[i32]]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert!(
-            array
-                .try_into_vec::<cel_runtime::DynamicArray>()?
-                .is_empty()
-        );
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>>(
+            )?;
+        assert!(array.into_vec().is_empty());
         Ok(())
     }
 
@@ -4324,8 +4352,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[7i32]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![7]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![7]);
         Ok(())
     }
 
@@ -4335,8 +4365,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[1i32 + 2i32, if true { 4i32 } else { 5i32 }]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![3, 4]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![3, 4]);
         Ok(())
     }
 
@@ -4386,13 +4418,14 @@ mod tests {
     }
 
     #[test]
-    fn array_literal_rejects_a_tuple_element() {
-        let err = array_parse_error("[(0i32, 1i32)]");
-        assert!(err.message().contains("tuple"), "got: {}", err.message());
+    fn array_literal_accepts_a_tuple_element() {
+        use cel_runtime::{ArrayOf, Cons, Leaf, Nil};
+        let body = CELParser::new(OpLookup::new())
+            .parse_str("[(0i32, 1i32)]")
+            .unwrap();
         assert!(
-            err.message().contains("issues/213"),
-            "the diagnostic must reference the tuple-element issue, got: {}",
-            err.message()
+            body.prepare::<Nil, ArrayOf<Cons<Leaf<i32>, Cons<Leaf<i32>, Nil>>>>()
+                .is_ok()
         );
     }
 
@@ -4402,12 +4435,15 @@ mod tests {
         let mut segment = parser
             .parse_str("[[0i32], [1i32]]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        let inner = array.try_into_vec::<cel_runtime::DynamicArray>()?;
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>>(
+            )?;
+        let inner = array.into_vec();
         assert_eq!(inner.len(), 2);
         let mut values = Vec::new();
         for element in inner {
-            values.extend(element.try_into_vec::<i32>()?);
+            values.extend(element.into_vec());
         }
         assert_eq!(values, vec![0, 1]);
         Ok(())
@@ -4465,10 +4501,7 @@ mod tests {
     fn typed_array_annotation_mismatch_names_the_registered_type_not_its_rust_path() {
         let resolver = [(
             "Celsius",
-            ResolvedLeafType::new(
-                "Celsius",
-                cel_runtime::ArrayElementType::leaf::<Celsius>().unwrap(),
-            ),
+            ResolvedLeafType::new("Celsius", cel_runtime::ValueType::leaf::<Celsius>()),
         )];
         let mut parser = CELParser::with_type_resolver(OpLookup::new(), resolver);
         let err = match parser.parse_str("[0]: [Celsius]") {
@@ -4497,17 +4530,11 @@ mod tests {
         let resolver = [
             (
                 "Celsius",
-                ResolvedLeafType::new(
-                    "Celsius",
-                    cel_runtime::ArrayElementType::leaf::<Celsius>().unwrap(),
-                ),
+                ResolvedLeafType::new("Celsius", cel_runtime::ValueType::leaf::<Celsius>()),
             ),
             (
                 "CustomB",
-                ResolvedLeafType::new(
-                    "CustomB",
-                    cel_runtime::ArrayElementType::leaf::<CustomB>().unwrap(),
-                ),
+                ResolvedLeafType::new("CustomB", cel_runtime::ValueType::leaf::<CustomB>()),
             ),
         ];
         let mut parser = CELParser::with_type_resolver(OpLookup::new(), resolver);
@@ -4549,13 +4576,14 @@ mod tests {
     }
 
     #[test]
-    fn typed_array_annotation_keeps_tuple_type_syntax_but_rejects_tuple_array_elements() {
-        let err = array_parse_error("[]: [(i32, f64)]");
-        assert!(err.message().contains("tuple"), "got: {}", err.message());
+    fn typed_array_annotation_accepts_tuple_array_elements() {
+        use cel_runtime::{ArrayOf, Cons, Leaf, Nil};
+        let body = CELParser::new(OpLookup::new())
+            .parse_str("[]: [(i32, f64)]")
+            .unwrap();
         assert!(
-            err.message().contains("issues/213"),
-            "the diagnostic must reference the tuple-element issue, got: {}",
-            err.message()
+            body.prepare::<Nil, ArrayOf<Cons<Leaf<i32>, Cons<Leaf<f64>, Nil>>>>()
+                .is_ok()
         );
     }
 
@@ -4569,7 +4597,8 @@ mod tests {
                     Ok(true)
                 }
                 ("()", 2) => {
-                    segment.op2(|_callee: i32, arg: cel_runtime::DynamicArray| arg.len() as i32)?;
+                    segment.op2_repr::<cel_runtime::Leaf<i32>, cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>, cel_runtime::Leaf<i32>, _>(
+                        |_callee, arg| arg.len() as i32)?;
                     Ok(true)
                 }
                 _ => Ok(false),
@@ -4589,8 +4618,10 @@ mod tests {
         let mut segment = parser
             .parse_str("([1i32, 2i32], 3i32).0")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![1, 2]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![1, 2]);
         Ok(())
     }
 
@@ -4600,8 +4631,10 @@ mod tests {
         let mut segment = parser
             .parse_str("if true { [1i32, 2i32] } else { [3i32, 4i32] }")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![1, 2]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![1, 2]);
         Ok(())
     }
 
@@ -4613,8 +4646,10 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let closure: cel_runtime::DynClosure = segment.call0()?;
         let x = 5i32;
-        let array = closure.call::<cel_runtime::DynamicArray>(&[&x])?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![5, 5]);
+        let array = closure
+            .call::<cel_runtime::OwnedValue>(&[&x])?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![5, 5]);
         Ok(())
     }
 
@@ -4630,8 +4665,10 @@ mod tests {
         let mut segment = parser
             .parse_str("(1u8 + 2u8, [3i32, 4i32]).1")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<i32>()?, vec![3, 4]);
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>()?;
+        assert_eq!(array.into_vec(), vec![3, 4]);
         Ok(())
     }
 
@@ -4707,12 +4744,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[f(), g(), h()]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        let degrees: Vec<i32> = array
-            .try_into_vec::<Celsius>()?
-            .into_iter()
-            .map(|c| c.0)
-            .collect();
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<Celsius>>>()?;
+        let degrees: Vec<i32> = array.into_vec().into_iter().map(|c| c.0).collect();
         assert_eq!(degrees, vec![0, 1, 2]);
         Ok(())
     }
@@ -4725,12 +4760,10 @@ mod tests {
         let mut segment = parser
             .parse_str("[h()]")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
-        let degrees: Vec<i32> = array
-            .try_into_vec::<Fahrenheit>()?
-            .into_iter()
-            .map(|f| f.0)
-            .collect();
+        let array = segment
+            .call0::<cel_runtime::OwnedValue>()?
+            .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::Leaf<Fahrenheit>>>()?;
+        let degrees: Vec<i32> = array.into_vec().into_iter().map(|f| f.0).collect();
         assert_eq!(degrees, vec![2]);
         Ok(())
     }
@@ -4774,15 +4807,10 @@ mod tests {
         let mut segment = parser
             .parse_str(SOURCE)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let array = segment.call0::<cel_runtime::OwnedValue>()?.try_into_typed::<cel_runtime::ArrayOf<cel_runtime::ArrayOf<cel_runtime::Leaf<Celsius>>>>()?;
         let mut rows: Vec<Vec<i32>> = Vec::new();
-        for row in array.try_into_vec::<cel_runtime::DynamicArray>()? {
-            rows.push(
-                row.try_into_vec::<Celsius>()?
-                    .into_iter()
-                    .map(|c| c.0)
-                    .collect(),
-            );
+        for row in array.into_vec() {
+            rows.push(row.into_vec().into_iter().map(|c| c.0).collect());
         }
         assert_eq!(rows, vec![vec![0, 1], vec![2]]);
         Ok(())

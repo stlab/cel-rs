@@ -1,809 +1,88 @@
-use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
-use crate::dynamic_array::{
-    ArrayElementType, DynamicArray, DynamicArrayBuilder, check_array_capacity,
-};
-use crate::dynamic_sequence::{
-    DynamicSequence, ElementCloner, ElementDebug, ElementDropper, ElementEq, SequenceElement,
-    SequenceList, TupleSequence, element_cloner_for, element_debug_for, element_dropper_for,
-    element_eq_for,
-};
-use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
-use crate::memory::align_index;
-use crate::raw_segment::RawSegment;
-use crate::raw_stack::RawStack;
-use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
-use anyhow::Result;
-use anyhow::anyhow;
-use anyhow::ensure;
+//! Builds checked instructions for the canonical raw interpreter.
+//!
+//! Ordinary operations name opaque Rust leaves. Structural operations name a
+//! sealed representation witness; `prepare` checks the whole borrowed frame once.
+//! ```
+//! use cel_runtime::{DynSegment, Nil, Leaf, IntoCStackList};
+//! let mut body = DynSegment::new::<()>();
+//! body.just(42i32);
+//! let mut body = body.prepare::<Nil, Leaf<i32>>().unwrap();
+//! assert_eq!(body.call(&().into_c_stack_list()).unwrap(), 42);
+//! ```
+
 use std::any::{Any, TypeId};
-use std::borrow::Cow;
 use std::cell::Cell;
-use std::cmp::max;
-use std::mem::MaybeUninit;
+
+use anyhow::{Result, anyhow, ensure};
+
+use crate::canonical_operation::OperationPlan;
+use crate::container_execution::{ContainerPlan, ResultPlan, StackFramePlan, stack_position};
+use crate::host_value_bridge::HostValuePlan;
+use crate::owned_value::OwnedValue;
+use crate::{
+    AssociatedType, CNil, CStackList, CStackListHeadLimit, CStackListHeadPadded, IntoCStackList,
+    Leaf, List, RawSegment, RawStack, ReverseList, ValueKind, ValueRepr, ValueType,
+};
 
 thread_local! {
-    // Safety: valid only during the execution of `call_dyn` on this thread.
-    // Set before execution; DynCallGuard restores the enclosing context even on panic.
-    static CALL_DYN_PTR: Cell<usize> = const { Cell::new(0) };
-    static CALL_DYN_LEN: Cell<usize> = const { Cell::new(0) };
-    static CALL_RAW_PTR: Cell<*const *const u8> = const { Cell::new(std::ptr::null()) };
+    /// Borrows the innermost call's already validated positional argument pointers.
+    static ARGUMENTS: Cell<*const *const u8> = const { Cell::new(std::ptr::null()) };
 }
 
-/// Restores the enclosing argument context after a nested call.
-struct DynCallGuard(usize, usize, *const *const u8);
+/// Restores an enclosing raw argument context on return, error, or unwind.
+struct ArgumentGuard(*const *const u8);
 
-impl DynCallGuard {
-    /// Installs an Any argument context until this guard is dropped.
-    fn install(inputs: &[&dyn Any]) -> Self {
-        Self(
-            CALL_DYN_PTR.with(|c| c.replace(inputs.as_ptr() as usize)),
-            CALL_DYN_LEN.with(|c| c.replace(inputs.len())),
-            CALL_RAW_PTR.with(|c| c.replace(std::ptr::null())),
-        )
+impl ArgumentGuard {
+    /// Installs pointers that remain live until this guard is destroyed.
+    fn install(arguments: &[*const u8]) -> Self {
+        Self(ARGUMENTS.with(|slot| slot.replace(arguments.as_ptr())))
     }
 }
 
-impl Drop for DynCallGuard {
+impl Drop for ArgumentGuard {
+    /// Restores the preceding call's borrowed argument frame.
     fn drop(&mut self) {
-        CALL_DYN_PTR.with(|c| c.set(self.0));
-        CALL_DYN_LEN.with(|c| c.set(self.1));
-        CALL_RAW_PTR.with(|c| c.set(self.2));
+        ARGUMENTS.with(|slot| slot.set(self.0));
     }
 }
 
-/// Drops a value in place, given a pointer to its bytes and (for tuple
-/// values) its own element metadata for recursive drops.
-///
-/// # Safety
-/// `ptr` must point to a valid, live, properly aligned value of the type this
-/// dropper was generated for; `associated` must be that same value's own
-/// element list (empty for non-tuple values).
-pub type RawDropper = unsafe fn(*mut u8, &[AssociatedType]);
-
-/// Reads and clones a value of some fixed type from `ptr`, boxing it as
-/// `Box<dyn Any>`.
-///
-/// # Safety
-/// `ptr` must point to a valid, live, properly aligned value of the type this
-/// function was generated for. The implementation must clone the value rather than
-/// take ownership of it via a move or `ptr::read`, because the caller retains the
-/// original bytes and drops them itself afterward — an implementation that moves out
-/// of `ptr` instead of cloning causes a double-drop.
-pub type BoxExtractor = unsafe fn(*const u8) -> Box<dyn Any>;
-
-/// The semantic shape of a runtime value: an opaque leaf, an ordered tuple, or a
-/// homogeneous array.
-///
-/// This discriminates shapes that share one physical `TypeId`: every tuple is tagged
-/// [`DynTuple`] and every array is tagged [`DynamicArray`], so semantic identity lives here
-/// rather than in the flat `TypeId`.
+/// Describes a live canonical stack slot.
 #[derive(Clone, Debug)]
-pub enum ValueKind {
-    /// A value with no runtime-visible children (every ordinary Rust type).
-    Leaf,
-    /// A tuple value, described by its ordered elements.
-    Tuple(Vec<AssociatedType>),
-    /// An array value, described by the one shape every element repeats.
-    Array(ArrayElementType),
-}
-
-/// The complete type of a runtime value: its physical identity and layout (`type_id`,
-/// `type_name`, `size`, `align`, and an in-place dropper) plus its semantic [`ValueKind`].
-///
-/// Physical metadata describes the bytes; `kind` describes what those bytes mean. The two are
-/// deliberately separate: an array and a tuple of arrays share neither shape nor layout rules,
-/// but every array has the same physical layout regardless of its element type.
-/// Known closures additionally carry their exact callable signature; tuple extraction, branch
-/// joining, and invocation results retain that metadata without treating every `DynClosure`
-/// marker as interchangeable.
-///
-/// Every field is private and set only by a validating constructor ([`leaf`](Self::leaf),
-/// [`leaf_from_parts`](Self::leaf_from_parts), [`tuple`](Self::tuple), [`array`](Self::array)),
-/// so a `ValueType`'s layout, dropper, and kind always agree — the invariant
-/// [`same_shape`](Self::same_shape) relies on when it reports that two equal shapes have
-/// identical layout.
-#[derive(Clone, Debug)]
-pub struct ValueType {
-    /// Runtime type id of the value's concrete Rust representation.
-    type_id: TypeId,
-    /// Human-readable name for error reporting (borrowed when from `type_name::<T>()`).
-    type_name: Cow<'static, str>,
-    /// Size in bytes of the value.
-    size: usize,
-    /// Required alignment in bytes of the value.
-    align: usize,
-    /// In-place dropper for the value, callable at its own start address.
-    raw_dropper: RawDropper,
-    /// Semantic shape of the value.
-    kind: ValueKind,
-    clone_value: Option<ElementCloner>,
-    push_arg: Option<fn(&mut DynSegment, usize, ValueType)>,
-    pub(crate) callable: Option<std::sync::Arc<crate::dyn_closure::ClosureSignature>>,
-}
-
-impl ValueType {
-    /// Returns the leaf type describing `T`.
-    ///
-    /// # Panics
-    ///
-    /// Panics, in every build profile, if `T` is [`DynTuple`] or [`DynamicArray`] — see
-    /// [`leaf_from_parts`](Self::leaf_from_parts), which performs the check.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::ValueType;
-    /// use std::any::TypeId;
-    ///
-    /// let leaf = ValueType::leaf::<i32>();
-    /// assert_eq!(leaf.type_id(), TypeId::of::<i32>());
-    /// assert_eq!(leaf.size(), size_of::<i32>());
-    /// ```
-    #[must_use]
-    pub fn leaf<T: 'static>() -> Self {
-        Self::leaf_from_parts(
-            TypeId::of::<T>(),
-            Cow::Borrowed(std::any::type_name::<T>()),
-            size_of::<T>(),
-            align_of::<T>(),
-            raw_dropper_for::<T>(),
-        )
-    }
-
-    /// Returns the leaf type described by already-erased metadata, for a caller that resolves a
-    /// type by name at runtime rather than naming it statically.
-    ///
-    /// - Precondition: `size`, `align`, and `raw_dropper` are those of the single Rust type
-    ///   identified by `type_id` (e.g. taken from [`raw_dropper_for`] for that same type).
-    ///
-    /// # Panics
-    ///
-    /// Panics, in every build profile, if `type_id` is [`DynTuple`]'s or [`DynamicArray`]'s —
-    /// those mark aggregates, whose values are built by [`tuple`](Self::tuple) and
-    /// [`array`](Self::array) so that the aggregate's own shape travels with its `TypeId`. This
-    /// one check is unconditional rather than a debug-only precondition because every public
-    /// operation that pushes a result type (e.g. [`DynSegment::op0`]) reaches it with a host-chosen
-    /// type: a [`ValueKind::Leaf`] carrying an aggregate marker would report
-    /// [`same_shape`](Self::same_shape) for two unrelated aggregate types and would yield an
-    /// element descriptor with no nested element type, so accepting one silently is a soundness
-    /// hazard rather than ordinary unspecified behavior.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::{ValueType, raw_dropper_for};
-    /// use std::any::TypeId;
-    ///
-    /// let leaf = ValueType::leaf_from_parts(
-    ///     TypeId::of::<i32>(),
-    ///     "i32".into(),
-    ///     size_of::<i32>(),
-    ///     align_of::<i32>(),
-    ///     raw_dropper_for::<i32>(),
-    /// );
-    /// assert_eq!(leaf.type_id(), TypeId::of::<i32>());
-    /// ```
-    #[must_use]
-    pub fn leaf_from_parts(
-        type_id: TypeId,
-        type_name: Cow<'static, str>,
-        size: usize,
-        align: usize,
-        raw_dropper: RawDropper,
-    ) -> Self {
-        debug_assert!(align.is_power_of_two(), "align must be a power of two");
-        debug_assert!(
-            size.is_multiple_of(align),
-            "size must be a multiple of align"
-        );
-        assert!(
-            type_id != TypeId::of::<DynTuple>() && type_id != TypeId::of::<DynamicArray>(),
-            "a leaf value type must not claim an aggregate marker TypeId"
-        );
-        ValueType {
-            type_id,
-            type_name,
-            size,
-            align,
-            raw_dropper,
-            kind: ValueKind::Leaf,
-            clone_value: None,
-            push_arg: None,
-            callable: None,
-        }
-    }
-
-    /// Returns the tuple type holding `elements`, laid out by [`layout_associated_recursive`]
-    /// (every element's `offset` — and every nested tuple element's `size`/`align` — is
-    /// overwritten, so callers supply only each leaf's own layout and each tuple's children).
-    ///
-    /// - Complexity: O(n) in the total (nested) element count.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::{AssociatedType, ValueType};
-    ///
-    /// let tuple = ValueType::tuple(vec![
-    ///     AssociatedType { offset: 0, value_type: ValueType::leaf::<i32>() },
-    ///     AssociatedType { offset: 0, value_type: ValueType::leaf::<f64>() },
-    /// ]);
-    /// assert_eq!(tuple.size(), 16);
-    /// assert_eq!(tuple.tuple_elements().unwrap()[1].offset, 8);
-    /// ```
-    #[must_use]
-    pub fn tuple(mut elements: Vec<AssociatedType>) -> Self {
-        let (size, align) = layout_associated_recursive(&mut elements);
-        ValueType {
-            type_id: TypeId::of::<DynTuple>(),
-            type_name: Cow::Borrowed(std::any::type_name::<DynTuple>()),
-            size,
-            align,
-            raw_dropper: drop_tuple,
-            kind: ValueKind::Tuple(elements),
-            clone_value: None,
-            push_arg: None,
-            callable: None,
-        }
-    }
-
-    /// Returns the array type whose elements all have shape `element`, named for diagnostics by
-    /// that element (e.g. `[i32]`) rather than by the erased `DynamicArray` representation.
-    ///
-    /// - Complexity: O(depth) in the element's array nesting depth.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::{ArrayElementType, DynamicArray, ValueType};
-    /// use std::any::TypeId;
-    ///
-    /// let array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-    /// assert_eq!(array.type_id(), TypeId::of::<DynamicArray>());
-    /// assert_eq!(array.type_name(), "[i32]");
-    /// assert_eq!(array.array_element().unwrap().type_id(), TypeId::of::<i32>());
-    /// ```
-    #[must_use]
-    pub fn array(element: ArrayElementType) -> Self {
-        ValueType {
-            type_id: TypeId::of::<DynamicArray>(),
-            type_name: Cow::Owned(format!("[{}]", element.display_name())),
-            size: size_of::<DynamicArray>(),
-            align: align_of::<DynamicArray>(),
-            raw_dropper: raw_dropper_for::<DynamicArray>(),
-            kind: ValueKind::Array(element),
-            clone_value: None,
-            push_arg: None,
-            callable: None,
-        }
-    }
-
-    /// Converts a registered leaf or recursive array descriptor into its complete value type.
-    ///
-    /// - Complexity: O(array nesting depth).
-    ///
-    /// # Examples
-    /// ```
-    /// use cel_runtime::{ArrayElementType, ValueType};
-    /// let value = ValueType::registered(ArrayElementType::cloneable::<String>().unwrap());
-    /// assert_eq!(value.type_id(), std::any::TypeId::of::<String>());
-    /// ```
-    pub fn registered(element: ArrayElementType) -> Self {
-        if let Some(nested) = element.nested() {
-            return Self::array(nested.clone());
-        }
-        let mut value = Self::leaf_from_parts(
-            element.type_id(),
-            element.display_name(),
-            element.size(),
-            element.align(),
-            element.drop,
-        );
-        value.clone_value = element.clone_value;
-        value.push_arg = element.push_arg;
-        value
-    }
-
-    /// Emits a clone of the positional argument with this exact recursive shape.
-    ///
-    /// - Precondition: execution supplies argument `index` with this exact recursive shape.
-    ///
-    /// # Errors
-    /// Returns an error when any registered leaf lacks clone support.
-    ///
-    /// - Complexity: O(number of recursive type nodes).
-    ///
-    /// # Examples
-    /// ```
-    /// use cel_runtime::{ArrayElementType, DynSegment, ValueType};
-    /// let mut segment = DynSegment::new::<()>();
-    /// ValueType::registered(ArrayElementType::cloneable::<String>().unwrap())
-    ///     .push_argument(&mut segment, 0).unwrap();
-    /// assert_eq!(segment.call_dyn::<String>(&[&String::from("x")]).unwrap(), "x");
-    /// ```
-    pub fn push_argument(&self, segment: &mut DynSegment, index: usize) -> Result<()> {
-        self.validate_clone()?;
-        if let Some(elements) = self.tuple_elements() {
-            segment.push_arg_as_dynamic_sequence_tuple(index, elements.to_vec());
-        } else if self.array_element().is_some() {
-            segment.push_array_argument(index, self.clone());
-        } else {
-            (self
-                .push_arg
-                .ok_or_else(|| anyhow!("registered type lacks argument adapter"))?)(
-                segment,
-                index,
-                self.clone(),
-            );
-        }
-        Ok(())
-    }
-
-    /// Checks clone support throughout a parameter descriptor.
-    ///
-    /// # Errors
-    /// Returns an error if a recursive leaf has no clone adapter.
-    /// - Complexity: O(number of recursive type nodes).
-    pub(crate) fn validate_clone(&self) -> Result<()> {
-        if let Some(elements) = self.tuple_elements() {
-            for element in elements {
-                element.value_type.validate_clone()?;
-            }
-        } else if let Some(element) = self.array_element() {
-            ensure!(
-                element.supports_clone(),
-                "type `{}` lacks registered clone support",
-                self.type_name
-            );
-        } else {
-            ensure!(
-                self.clone_value.is_some(),
-                "type `{}` lacks registered clone support",
-                self.type_name
-            );
-        }
-        Ok(())
-    }
-
-    /// Clones an exactly matching live value into uninitialized, aligned destination storage.
-    ///
-    /// # Safety
-    /// Both pointers must cover this layout without overlap; source must be live.
-    /// `validate_clone` must have succeeded before entering.
-    /// - Complexity: O(recursive element count), plus leaf clone costs.
-    pub(crate) unsafe fn clone_into(&self, source: *const u8, destination: *mut u8) {
-        if let Some(elements) = self.tuple_elements() {
-            for element in elements {
-                unsafe {
-                    element
-                        .value_type
-                        .clone_into(source.add(element.offset), destination.add(element.offset));
-                }
-            }
-        } else if let Some(element) = self.array_element() {
-            unsafe {
-                let array = &*source.cast::<DynamicArray>();
-                destination
-                    .cast::<DynamicArray>()
-                    .write(array.clone_as(element));
-            }
-        } else {
-            unsafe {
-                (self.clone_value.expect("validated clone adapter"))(source, destination);
-            }
-        }
-    }
-
-    /// Returns the `TypeId` of this value's concrete Rust representation — the aggregate marker
-    /// ([`DynTuple`] or [`DynamicArray`]) for a tuple or array, not an element type.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::{DynamicArray, ArrayElementType, ValueType};
-    /// use std::any::TypeId;
-    ///
-    /// assert_eq!(ValueType::leaf::<i32>().type_id(), TypeId::of::<i32>());
-    /// let array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-    /// assert_eq!(array.type_id(), TypeId::of::<DynamicArray>());
-    /// ```
-    #[must_use]
-    pub fn type_id(&self) -> TypeId {
-        self.type_id
-    }
-
-    /// Returns this value's human-readable type name, for diagnostics.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::ValueType;
-    ///
-    /// assert_eq!(ValueType::leaf::<i32>().type_name(), "i32");
-    /// ```
-    #[must_use]
-    pub fn type_name(&self) -> &str {
-        &self.type_name
-    }
-
-    /// Returns this value's size in bytes.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::ValueType;
-    ///
-    /// assert_eq!(ValueType::leaf::<i32>().size(), size_of::<i32>());
-    /// ```
-    #[must_use]
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
-    /// Returns this value's required alignment in bytes.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::ValueType;
-    ///
-    /// assert_eq!(ValueType::leaf::<i32>().align(), align_of::<i32>());
-    /// ```
-    #[must_use]
-    pub fn align(&self) -> usize {
-        self.align
-    }
-
-    /// Returns this value's semantic shape.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::{ValueKind, ValueType};
-    ///
-    /// assert!(matches!(ValueType::leaf::<i32>().kind(), ValueKind::Leaf));
-    /// assert!(matches!(ValueType::tuple(Vec::new()).kind(), ValueKind::Tuple(_)));
-    /// ```
-    #[must_use]
-    pub fn kind(&self) -> &ValueKind {
-        &self.kind
-    }
-
-    /// Returns this tuple's ordered elements, or `None` for a non-tuple value.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::ValueType;
-    ///
-    /// assert!(ValueType::leaf::<i32>().tuple_elements().is_none());
-    /// assert_eq!(ValueType::tuple(Vec::new()).tuple_elements().unwrap().len(), 0);
-    /// ```
-    #[must_use]
-    pub fn tuple_elements(&self) -> Option<&[AssociatedType]> {
-        match &self.kind {
-            ValueKind::Tuple(elements) => Some(elements),
-            _ => None,
-        }
-    }
-
-    /// Returns this array's element shape, or `None` for a non-array value.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::{ArrayElementType, ValueType};
-    ///
-    /// let array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-    /// assert!(array.array_element().is_some());
-    /// assert!(ValueType::leaf::<i32>().array_element().is_none());
-    /// ```
-    #[must_use]
-    pub fn array_element(&self) -> Option<&ArrayElementType> {
-        match &self.kind {
-            ValueKind::Array(element) => Some(element),
-            _ => None,
-        }
-    }
-
-    /// Returns the children to hand this value's own [`RawDropper`]: its tuple elements, or an
-    /// empty slice for a leaf or array (whose droppers ignore the argument).
-    pub(crate) fn dropper_children(&self) -> &[AssociatedType] {
-        self.tuple_elements().unwrap_or(&[])
-    }
-
-    /// Returns the descriptor an array whose elements all have this value's shape would carry,
-    /// or `None` for a tuple value — a CEL tuple is a stack-layout pseudo-value with no concrete
-    /// Rust element representation yet (see
-    /// <https://github.com/stlab/cel-rs/issues/213>).
-    ///
-    /// - Complexity: O(depth) in this value's array nesting depth.
-    pub(crate) fn as_array_element(&self) -> Option<ArrayElementType> {
-        match &self.kind {
-            ValueKind::Leaf => Some(ArrayElementType::leaf_from_parts(
-                self.type_id,
-                self.type_name.clone(),
-                self.size,
-                self.align,
-                self.raw_dropper,
-            )),
-            ValueKind::Array(element) => Some(ArrayElementType::array_of(element.clone())),
-            ValueKind::Tuple(_) => None,
-        }
-    }
-
-    /// Returns a copy of this type that describes the same bytes but drops nothing, for a region
-    /// whose value has already been moved out and so must not be dropped again.
-    ///
-    /// This is the one deliberate exception to the rule that a `ValueType`'s dropper matches its
-    /// type: layout, `TypeId`, and [`ValueKind`] still describe the original value, so offsets
-    /// and shape comparisons stay correct while the cleanup pass skips the moved-out bytes.
-    pub(crate) fn with_dropper_suppressed(&self) -> ValueType {
-        ValueType {
-            raw_dropper: |_ptr, _associated| {},
-            ..self.clone()
-        }
-    }
-
-    /// Returns whether `self` and `other` denote the same semantic type: the same `TypeId` for
-    /// leaves, the same ordered element shapes (recursively) for tuples, and the same recursive
-    /// element descriptor for arrays.
-    /// Known callable signatures must also match recursively; known and unknown signatures
-    /// are not interchangeable.
-    ///
-    /// Physical layout is never compared: two distinct types with identical size and alignment
-    /// have different shapes, and two equal shapes always have identical layout.
-    ///
-    /// - Complexity: O(n) in the total (nested) element count.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cel_runtime::{ArrayElementType, ValueType};
-    ///
-    /// let i32s = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-    /// let f64s = ValueType::array(ArrayElementType::leaf::<f64>().unwrap());
-    /// assert!(!i32s.same_shape(&f64s));
-    /// assert!(i32s.same_shape(&ValueType::array(ArrayElementType::leaf::<i32>().unwrap())));
-    /// ```
-    #[must_use]
-    pub fn same_shape(&self, other: &ValueType) -> bool {
-        if !crate::dyn_closure::same_signature(self.callable.as_deref(), other.callable.as_deref())
-        {
-            return false;
-        }
-        if self.type_id != other.type_id {
-            return false;
-        }
-        match (&self.kind, &other.kind) {
-            (ValueKind::Leaf, ValueKind::Leaf) => true,
-            (ValueKind::Tuple(a), ValueKind::Tuple(b)) => {
-                a.len() == b.len()
-                    && a.iter()
-                        .zip(b)
-                        .all(|(x, y)| x.value_type.same_shape(&y.value_type))
-            }
-            (ValueKind::Array(a), ValueKind::Array(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-/// One element of a tuple: its byte offset from the start of the enclosing tuple, and its own
-/// recursive [`ValueType`].
-#[derive(Clone, Debug)]
-pub struct AssociatedType {
-    /// Byte offset from the start of the enclosing tuple.
-    pub offset: usize,
-    /// This element's own type.
-    pub value_type: ValueType,
-}
-
-/// Marker type used as the `TypeId` for tuple aggregate stack entries.
-///
-/// A tuple's real type identity is the ordered element list in its
-/// [`ValueKind::Tuple`], not this marker's `TypeId` — comparisons that need to
-/// distinguish tuple shapes must inspect that list (e.g. via
-/// [`ValueType::same_shape`]), not `type_id`.
-#[derive(Debug)]
-pub struct DynTuple;
-
-/// `RawDropper` for a tuple value: drops each element at `ptr + element.offset`
-/// in reverse order, recursing into nested tuples via their own droppers.
-///
-/// # Safety
-/// `ptr` must point to a live tuple value whose layout matches `associated`.
-pub unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
-    for elem in associated.iter().rev() {
-        unsafe {
-            (elem.value_type.raw_dropper)(ptr.add(elem.offset), elem.value_type.dropper_children());
-        }
-    }
-}
-
-/// Returns a [`RawDropper`] that drops a value of type `T` in place, ignoring the `associated`
-/// parameter (a non-tuple leaf value has no nested elements to recurse into).
-pub fn raw_dropper_for<T: 'static>() -> RawDropper {
-    |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) }
-}
-
-/// Computes each element's on-stack byte offset in place — the one authoritative tuple layout
-/// routine, used by [`ValueType::tuple`] (and through it by [`DynSegment::make_tuple`]): place
-/// at this element's own alignment, then pad up to the running max alignment seen so far
-/// (matching `CStackList`'s nested layout). Each element's `size` and `align` must already be
-/// set; `offset` is overwritten. Returns `(total_size, max_align)`.
-///
-/// - Complexity: O(n).
-///
-/// # Examples
-///
-/// ```rust
-/// use cel_runtime::{AssociatedType, ValueType, layout_associated};
-///
-/// let mut elements = vec![
-///     AssociatedType { offset: 0, value_type: ValueType::leaf::<u8>() },
-///     AssociatedType { offset: 0, value_type: ValueType::leaf::<u64>() },
-/// ];
-/// assert_eq!(layout_associated(&mut elements), (16, 8));
-/// assert_eq!(elements[0].offset, 0);
-/// assert_eq!(elements[1].offset, 8);
-/// ```
-pub fn layout_associated(elements: &mut [AssociatedType]) -> (usize, usize) {
-    let mut offset = 0usize;
-    let mut max_align = 1usize;
-    for elem in elements.iter_mut() {
-        offset = align_index(elem.value_type.align, offset);
-        max_align = max_align.max(elem.value_type.align);
-        elem.offset = offset;
-        offset += elem.value_type.size;
-        offset = align_index(max_align, offset);
-    }
-    (offset, max_align)
-}
-
-/// Recursively lays out `elements`, first fixing up every nested tuple element's own
-/// `size`/`align` fields (bottom-up, from its own recursively-laid-out element list),
-/// then delegating to [`layout_associated`] for this level's own (now-correct) offsets.
-///
-/// [`layout_associated`] itself is a flat, single-level computation: it trusts each element's
-/// `size`/`align` as already correct, which holds unconditionally for leaf elements but not for
-/// a nested tuple element built from a caller-declared shape — that element's real footprint is
-/// only known once its own elements have been laid out. Fixing it up first means an
-/// enclosing tuple's `total_size` always accounts for a nested tuple's true size, never a
-/// caller-supplied placeholder.
-///
-/// - Precondition: every leaf element's `type_id`/`size`/`align` is already set; a nested tuple
-///   element ([`ValueKind::Tuple`]) only needs its own element list set correctly — its
-///   `size`/`align` are overwritten here, the same way `offset` is (recursively, at every
-///   nesting level).
-///
-/// - Complexity: O(n) in the total (nested) element count.
-///
-/// # Examples
-///
-/// ```rust
-/// use cel_runtime::{AssociatedType, ValueType, layout_associated_recursive};
-///
-/// let mut elements = vec![
-///     AssociatedType { offset: 0, value_type: ValueType::leaf::<u8>() },
-///     AssociatedType {
-///         offset: 0,
-///         value_type: ValueType::tuple(vec![
-///             AssociatedType { offset: 0, value_type: ValueType::leaf::<u32>() },
-///             AssociatedType { offset: 0, value_type: ValueType::leaf::<u32>() },
-///         ]),
-///     },
-/// ];
-/// // The nested tuple occupies 8 bytes at alignment 4, so it starts at offset 4.
-/// assert_eq!(layout_associated_recursive(&mut elements), (12, 4));
-/// assert_eq!(elements[1].offset, 4);
-/// ```
-pub fn layout_associated_recursive(elements: &mut [AssociatedType]) -> (usize, usize) {
-    for elem in elements.iter_mut() {
-        if let ValueKind::Tuple(children) = &mut elem.value_type.kind {
-            let (size, align) = layout_associated_recursive(children);
-            elem.value_type.size = size;
-            elem.value_type.align = align;
-        }
-    }
-    layout_associated(elements)
-}
-
-/// Extracts element `index` from the tuple currently on top of `stack`,
-/// dropping every other element, leaving just the extracted value on top.
-///
-/// Also strips the tuple's own leading padding (if any): once only one
-/// element survives, that space is dead — no `StackInfo` entry accounts for
-/// it — so it must not linger, or later offset computations (e.g. for a
-/// tuple literal built from this result) would disagree with the real
-/// stack. The extracted element is re-pushed at its own natural alignment
-/// relative to the ambient offset the tuple originally started at, which
-/// `expected_padding` (computed the same way at parse time) predicts.
-///
-/// - Complexity: O(n) in the tuple's arity.
-///
-/// # Safety
-/// The top `tuple_size` bytes of `stack` must be a live tuple value whose
-/// layout matches `associated`, and `tuple_padding` must be that tuple's own
-/// recorded leading-padding flag.
-unsafe fn extract_tuple_element(
-    stack: &mut RawStack,
-    tuple_size: usize,
-    tuple_padding: bool,
-    associated: &[AssociatedType],
-    index: usize,
-    expected_padding: bool,
-) {
-    let tuple_base = stack.len() - tuple_size;
-    let target = &associated[index];
-    debug_assert!(tuple_base.is_multiple_of(target.value_type.align));
-
-    // MaybeUninit<u8>, not u8: `target`'s bytes may include its own interior
-    // padding, which is itself uninitialized — reading it into a `Vec<u8>`
-    // (whose elements must always be valid, initialized `u8`s) would be
-    // undefined behavior even though these bytes are never inspected, only
-    // moved.
-    let mut scratch: Vec<MaybeUninit<u8>> = vec![MaybeUninit::uninit(); target.value_type.size];
-    unsafe {
-        stack.copy_from(
-            tuple_base + target.offset,
-            target.value_type.size,
-            scratch.as_mut_ptr(),
-        );
-    }
-
-    for (i, elem) in associated.iter().enumerate().rev() {
-        if i == index {
-            continue;
-        }
-        let elem_children = elem.value_type.dropper_children();
-        let elem_dropper = elem.value_type.raw_dropper;
-        unsafe {
-            stack.drop_at(tuple_base + elem.offset, |ptr| {
-                elem_dropper(ptr, elem_children)
-            });
-        }
-    }
-
-    unsafe {
-        // tuple_padding: strip the tuple's own leading pad too, all the way
-        // back to the true ambient offset it was built from — not just down
-        // to tuple_base (see doc comment above).
-        stack.truncate_to(tuple_base, tuple_padding);
-        let repushed_padding = stack.push_raw(
-            target.value_type.align,
-            target.value_type.size,
-            scratch.as_ptr(),
-        );
-        debug_assert_eq!(
-            repushed_padding, expected_padding,
-            "extracted element's padding must match the parse-time prediction"
-        );
-    }
-}
-
-/// Information about a value on the stack: its complete [`ValueType`] and whether padding was
-/// inserted before it for alignment.
 pub struct StackInfo {
-    /// Whether padding was inserted before this value for alignment.
-    pub(crate) padding: bool,
-    /// This slot's complete type: physical layout plus semantic shape.
+    /// Whether the slot follows alignment padding.
+    pub padding: bool,
+    /// Complete recursive identity, layout, and ownership metadata.
     pub value_type: ValueType,
 }
 
-/// Trait for converting a type list into a list of stack information.
+/// Formats recursive source-order type names for construction errors.
 ///
-/// This trait allows compile-time type lists to be converted into runtime
-/// stack information that can be used for type checking and cleanup.
+/// - Complexity: O(d * s) for depth d and rendered name length s.
+fn descriptor_name(ty: &ValueType) -> String {
+    match ty.kind() {
+        ValueKind::Array(element) => format!("[{}]", descriptor_name(element)),
+        ValueKind::Tuple(fields) => format!(
+            "({})",
+            fields
+                .iter()
+                .map(|field| descriptor_name(&field.value_type))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => ty.type_name().to_owned(),
+    }
+}
+
+/// Enumerates opaque leaf types in a concrete preloaded stack list.
 pub trait ToTypeIdList: List {
-    /// Converts the type list into a vector of stack information.
+    /// Returns source-ordered leaf slots.
     ///
-    /// This method creates `StackInfo` entries for each type in the list,
-    /// including the necessary cleanup functions and padding information.
+    /// - Complexity: O(n) slots for n list elements.
     fn to_stack_info_list() -> Vec<StackInfo>;
 }
 
 impl ToTypeIdList for CNil<()> {
+    /// Returns an empty preloaded stack.
     fn to_stack_info_list() -> Vec<StackInfo> {
         Vec::new()
     }
@@ -812,211 +91,1038 @@ impl ToTypeIdList for CNil<()> {
 impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
     for CStackList<H, T>
 {
+    /// Enumerates tail storage followed by the opaque head.
+    ///
+    /// - Complexity: O(n) slots for n list elements.
     fn to_stack_info_list() -> Vec<StackInfo> {
-        let mut list = T::to_stack_info_list();
-        list.push(StackInfo {
+        let mut result = T::to_stack_info_list();
+        result.push(StackInfo {
             padding: Self::HEAD_PADDED,
             value_type: ValueType::leaf::<H>(),
         });
-        list
+        result
     }
 }
 
-/// A dynamic segment that provides runtime type checking for stack operations.
+/// Owns validated raw instructions and complete canonical stack metadata.
 ///
-/// This struct wraps a [`RawSegment`] and maintains type information about the stack
-/// to ensure type safety during operation execution. It validates that operations
-/// receive arguments of the correct type and manages stack cleanup.
-///
-/// # Type Safety
-///
-/// The segment tracks the types of values on the stack and verifies that operations
-/// receive arguments of the expected type. This prevents runtime type mismatches
-/// that could occur when using [`RawSegment`] directly.
-///
-/// # Examples
-///
-/// ```rust
-/// use cel_runtime::DynSegment;
-///
-/// let mut segment = DynSegment::new::<()>();
-/// segment.op0(|| 42u32);
-/// segment.op1(|n: u32| n.to_string()).unwrap();
-///
-/// let result: String = segment.call0().unwrap();
-/// assert_eq!(result, "42");
-/// ```
+/// `new::<()>()` starts an independent body with borrowed positional reads.
+/// Other `new` argument lists retain the direct, preloaded opaque-leaf ABI.
 pub struct DynSegment {
     pub(crate) segment: RawSegment,
     pub(crate) argument_ids: Vec<TypeId>,
-    /// Type names for each argument slot, for error reporting (parallel to `argument_ids`).
-    pub(crate) argument_names: Vec<Cow<'static, str>>,
     pub(crate) stack_ids: Vec<StackInfo>,
-    /// Fixed byte offset `stack_ids[0]` is laid out relative to; established
-    /// once at construction (post-argument space for a full segment, or the
-    /// as-if-already-popped ambient offset for a fragment — see
-    /// [`new_fragment`](Self::new_fragment)). The current top-of-stack offset
-    /// is always recomputed from this plus `stack_ids`, never cached, so it
-    /// can never drift out of sync after ops consume stack entries.
-    base_stack_index: usize,
-    /// Positional reads emitted by this body, including reads inside conditional fragments.
+    pub(crate) base_stack_index: usize,
     pub(crate) argument_reads: Vec<(usize, ValueType)>,
+    /// Records byte boundaries for construction-time layout, without runtime ownership.
+    stack_ends: Vec<usize>,
 }
 
 impl DynSegment {
-    /// Pushes a closure value with its known callable signature, if present.
+    /// Creates a segment with an optional preloaded opaque-leaf stack.
+    ///
+    /// # Panics
+    /// Rejects preloaded erased whole-value owner carriers; import those at a checked external boundary.
     ///
     /// # Examples
     /// ```
-    /// use cel_runtime::{DynClosure, DynSegment};
-    /// let mut body = DynSegment::new::<()>();
-    /// body.just(9i32);
-    /// let mut caller = DynSegment::new::<()>();
-    /// caller.push_closure(DynClosure::typed(vec![], body).unwrap());
-    /// caller.invoke_closure(0).unwrap();
-    /// assert_eq!(caller.call0::<i32>().unwrap(), 9);
+    /// let _ = cel_runtime::DynSegment::new::<()>();
     /// ```
-    pub fn push_closure(&mut self, closure: crate::DynClosure) {
-        let signature = closure.signature();
-        self.just(closure);
-        self.stack_ids
-            .last_mut()
-            .expect("just pushed closure")
-            .value_type
-            .callable = signature;
-    }
-
-    /// Emits invocation of the closure below `arity` evaluated arguments, in source order.
-    ///
-    /// # Errors
-    /// Returns an error before emitting if this segment requires preloaded arguments, the
-    /// callable shape is unknown, or argument arity or recursive types differ. Body errors
-    /// and runtime signature mismatches propagate.
-    ///
-    /// - Complexity: O(stack depth plus recursive type nodes); execution is body-dependent.
-    ///
-    /// # Examples
-    /// See [`push_closure`](Self::push_closure).
-    pub fn invoke_closure(&mut self, arity: usize) -> Result<()> {
-        ensure!(
-            self.argument_ids.is_empty(),
-            "closure invocation requires a push_arg-based segment"
-        );
-        ensure!(
-            self.stack_ids.len() > arity,
-            "closure invocation lacks callee"
-        );
-        let first = self.stack_ids.len() - arity - 1;
-        let signature = self.stack_ids[first]
-            .value_type
-            .callable
-            .clone()
-            .ok_or_else(|| anyhow!("unsupported closure call: callable signature is unknown"))?;
-        ensure!(
-            signature.parameters.len() == arity,
-            "closure argument arity mismatch: expected {}, found {arity}",
-            signature.parameters.len()
-        );
-        for (expected, actual) in signature
-            .parameters
-            .iter()
-            .zip(&self.stack_ids[first + 1..])
-        {
-            ensure!(
-                expected.same_shape(&actual.value_type),
-                "closure argument type mismatch: expected {}, found {}",
-                expected.type_name,
-                actual.value_type.type_name
+    pub fn new<Args: IntoCStackList>() -> Self
+    where
+        ReverseList<Args::Output>: ToTypeIdList,
+    {
+        let stack_ids = ReverseList::<Args::Output>::to_stack_info_list();
+        let mut segment = RawSegment::new();
+        segment.update_base_alignment(1);
+        for info in &stack_ids {
+            info.value_type
+                .validate_canonical()
+                .expect("preloaded dynamic arguments must be canonical or ordinary opaque leaves");
+            segment.update_base_alignment(info.value_type.align());
+        }
+        segment.set_frame(0, stack_ids.len());
+        let mut stack_ends = Vec::with_capacity(stack_ids.len() + 1);
+        stack_ends.push(0);
+        for info in &stack_ids {
+            stack_ends.push(
+                stack_position(*stack_ends.last().unwrap(), info.value_type.layout())
+                    .expect("validated preloaded stack")
+                    .1,
             );
         }
-        let mut offset = self.base_stack_index;
-        let mut offsets = Vec::with_capacity(self.stack_ids.len());
-        for info in &self.stack_ids {
-            offset = align_index(info.value_type.align, offset);
-            offsets.push(offset);
-            offset += info.value_type.size;
+        Self {
+            segment,
+            argument_ids: stack_ids
+                .iter()
+                .map(|info| info.value_type.type_id())
+                .collect(),
+            stack_ids,
+            base_stack_index: 0,
+            argument_reads: Vec::new(),
+            stack_ends,
         }
-        let callee_offset = offsets[first];
-        let argument_offsets = offsets[first + 1..].to_vec();
-        let unwind = self.capture_unwind();
-        let consumed = unwind[first..].to_vec();
-        let result_type = signature.result.clone();
-        let value_type = result_type.clone();
-        let ambient = self.stack_offset_before_top(arity + 1)?;
-        self.segment.update_base_alignment(result_type.align);
-        self.segment.raw0_(move |stack| {
-            let result = {
-                // Safety: offsets refer to checked, live stack values. The outer stack is
-                // unchanged during body evaluation, which uses an independent allocation.
-                let closure = unsafe {
-                    stack.read_at(callee_offset, |p| (&*p.cast::<crate::DynClosure>()).clone())
-                };
-                unsafe {
-                    stack.read_at(0, |base| {
-                        let arguments: Vec<*const u8> = argument_offsets
-                            .iter()
-                            .map(|offset| base.add(*offset))
-                            .collect();
-                        closure.call_raw(&signature, &arguments)
-                    })
-                }
-            };
-            let mut output = Self::unwind_on_err(&unwind, stack, result)?;
-            for (padding, ty) in consumed.iter().rev() {
-                // Safety: consume each original argument and the callee exactly once.
-                unsafe {
-                    stack.drop_sized(ty.size, *padding, |p| {
-                        (ty.raw_dropper)(p, ty.dropper_children())
-                    });
-                }
-            }
-            // Safety: output owns exactly one result of this layout. Move its bytes to the
-            // caller, then remove the now-dead source bytes without running their dropper.
-            unsafe {
-                output.read_at(output.len() - result_type.size, |p| {
-                    stack.push_raw(result_type.align, result_type.size, p.cast());
-                });
-                output.truncate_to(0, false);
-            }
-            Ok(())
-        });
-        self.stack_ids.truncate(first);
+    }
+
+    /// Creates a conditional fragment above the ambient stack below the condition.
+    ///
+    /// - Precondition: at least one operand is present.
+    ///
+    /// # Examples
+    /// See [`Self::join2`].
+    pub fn new_fragment(&self) -> Self {
+        debug_assert!(!self.stack_ids.is_empty());
+        let mut result = Self::new::<()>();
+        result.base_stack_index = self.stack_offset_before_top(1).expect("condition present");
+        result.stack_ends[0] = result.base_stack_index;
+        result.segment.set_frame(result.base_stack_index, 0);
+        result
+    }
+
+    /// Returns the current canonical stack byte length.
+    ///
+    /// # Examples
+    /// ```
+    /// assert_eq!(cel_runtime::DynSegment::new::<()>().current_stack_offset(), 0);
+    /// ```
+    pub fn current_stack_offset(&self) -> usize {
+        self.offset_after(self.stack_ids.len())
+    }
+
+    /// Returns the byte length preceding the top `n` operands.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(cel_runtime::DynSegment::new::<()>().stack_offset_before_top(1).is_err());
+    /// ```
+    pub fn stack_offset_before_top(&self, n: usize) -> Result<usize> {
+        let count = self
+            .stack_ids
+            .len()
+            .checked_sub(n)
+            .ok_or_else(|| anyhow!("not enough operands"))?;
+        Ok(self.offset_after(count))
+    }
+
+    /// Computes the canonical position following a known slot prefix.
+    fn offset_after(&self, count: usize) -> usize {
+        self.stack_ends[count]
+    }
+
+    /// Binds ambient cleanup and source-ordered operands without mutating metadata.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands or an unrepresentable frame.
+    /// - Complexity: O(n) time and space for operand/result descriptor nodes.
+    fn operation(&self, arity: usize, result: ValueType) -> Result<OperationPlan> {
+        let first = self
+            .stack_ids
+            .len()
+            .checked_sub(arity)
+            .ok_or_else(|| anyhow!("not enough operands"))?;
+        let operands: Vec<_> = self.stack_ids[first..]
+            .iter()
+            .map(|info| info.value_type.clone())
+            .collect();
+        OperationPlan::at(
+            self.base_stack_index,
+            self.offset_after(first),
+            first,
+            &operands,
+            result,
+        )
+    }
+
+    /// Replaces emitted operands with their validated canonical result slot.
+    ///
+    /// - Complexity: O(a + d) for a removed operands and d result descriptor nodes.
+    fn replace(&mut self, arity: usize, result: ValueType) {
+        self.stack_ids.truncate(self.stack_ids.len() - arity);
+        self.stack_ends.truncate(self.stack_ids.len() + 1);
+        let before = self.current_stack_offset();
+        let (offset, end) = stack_position(before, result.layout()).expect("validated result");
+        self.segment.update_base_alignment(result.align());
         self.stack_ids.push(StackInfo {
-            padding: align_index(value_type.align, ambient) != ambient,
-            value_type,
+            padding: offset != before,
+            value_type: result,
         });
+        self.stack_ends.push(end);
+    }
+
+    /// Borrows up to the top `n` complete descriptors.
+    ///
+    /// # Examples
+    /// ```
+    /// let body = cel_runtime::DynSegment::new::<()>();
+    /// assert!(body.peek_stack_infos(0).is_empty());
+    /// ```
+    pub fn peek_stack_infos(&self, n: usize) -> &[StackInfo] {
+        &self.stack_ids[self.stack_ids.len().saturating_sub(n)..]
+    }
+
+    /// Returns a diagnostic dispatch identity, never a structural cast authority.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(cel_runtime::DynSegment::new::<()>().peek_output_type_id().is_none());
+    /// ```
+    pub fn peek_output_type_id(&self) -> Option<TypeId> {
+        Some(self.stack_ids.last()?.value_type.type_id())
+    }
+
+    /// Returns the source tuple arity, including zero for canonical unit.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(cel_runtime::DynSegment::new::<()>().peek_tuple_arity().is_none());
+    /// ```
+    pub fn peek_tuple_arity(&self) -> Option<usize> {
+        Some(self.stack_ids.last()?.value_type.tuple_elements()?.len())
+    }
+
+    /// Registers a nullary opaque-leaf host operation.
+    ///
+    /// # Panics
+    /// Rejects erased whole-value owner results or unrepresentable frames. Use `op0_repr`
+    /// for fallible registration and `just_external` for checked owner imports.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.op0(|| 7i32);
+    /// assert_eq!(b.call0::<i32>().unwrap(), 7);
+    /// ```
+    pub fn op0<R: 'static, F: Fn() -> R + 'static>(&mut self, f: F) {
+        self.op0_repr::<Leaf<R>, _>(f)
+            .expect("opaque result fits raw frame");
+    }
+
+    /// Registers a fallible nullary opaque-leaf operation with ambient cleanup.
+    ///
+    /// # Panics
+    /// Rejects erased whole-value owner results or unrepresentable frames during registration.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.op0r(|| Ok(7i32));
+    /// ```
+    pub fn op0r<R: 'static, F: Fn() -> Result<R> + 'static>(&mut self, f: F) {
+        self.op0r_repr::<Leaf<R>, _>(f)
+            .expect("opaque result fits raw frame");
+    }
+
+    /// Registers a witnessed nullary operation.
+    ///
+    /// # Errors
+    /// Rejects unrepresentable stack positions.
+    /// - Complexity: O(n) registration work for n ambient slots.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.op0_repr::<cel_runtime::Nil, _>(|| cel_runtime::IntoCStackList::into_c_stack_list(())).unwrap();
+    /// ```
+    pub fn op0_repr<R: ValueRepr, F: Fn() -> R::Value + 'static>(&mut self, f: F) -> Result<()> {
+        self.op0r_repr::<R, _>(move || Ok(f()))
+    }
+
+    /// Registers a fallible witnessed nullary operation.
+    ///
+    /// # Errors
+    /// Rejects unrepresentable stack positions; host errors propagate on execution.
+    /// - Complexity: O(n) registration work for n ambient slots.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.op0r_repr::<cel_runtime::Leaf<i32>, _>(|| Ok(7)).unwrap();
+    /// ```
+    pub fn op0r_repr<R: ValueRepr, F: Fn() -> Result<R::Value> + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        let result = R::value_type();
+        self.operation(0, result.clone())?
+            .emit0::<R, _>(&mut self.segment, f)?;
+        self.replace(0, result);
         Ok(())
     }
 
-    /// Evaluates a checked raw frame and restores the enclosing argument context on return.
+    /// Registers a unary opaque-leaf operation.
     ///
-    /// # Safety
-    /// `arguments` must contain live pointers matching this body's parameter descriptors.
     /// # Errors
-    /// Rejects preloaded arguments or a nonzero ambient stack origin before execution, and
-    /// propagates body operation errors.
-    /// - Complexity: O(number of body operations).
-    pub(crate) unsafe fn execute_raw(&mut self, arguments: &[*const u8]) -> Result<RawStack> {
-        self.validate_independent_body()?;
-        let _guard = DynCallGuard(
-            CALL_DYN_PTR.with(Cell::get),
-            CALL_DYN_LEN.with(Cell::get),
-            CALL_RAW_PTR.with(|c| c.replace(arguments.as_ptr())),
-        );
-        let mut output = RawStack::with_base_alignment(self.segment.base_alignment());
-        unsafe {
-            self.segment.call0_stack(&mut output)?;
-        }
-        Ok(output)
+    /// Rejects insufficient or nonmatching opaque operands.
+    /// - Complexity: O(n) registration work for n stack slots.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32); b.op1(|x: i32| x.to_string()).unwrap();
+    /// ```
+    pub fn op1<A: 'static, R: 'static, F: Fn(A) -> R + 'static>(&mut self, f: F) -> Result<()> {
+        self.op1_repr::<Leaf<A>, Leaf<R>, _>(f)
     }
 
-    /// Checks that this body's operands are laid out from an empty execution stack.
-    ///
-    /// Zero-origin fragments qualify: their descriptors expose no ambient operands, and
-    /// conditional joins check that every embedded fragment uses the matching origin.
+    /// Registers a fallible unary opaque-leaf operation.
     ///
     /// # Errors
-    /// Returns an error if the body requires preloaded arguments or a nonzero ambient origin.
+    /// Rejects insufficient or nonmatching operands; execution propagates host errors.
+    /// - Complexity: O(n) registration work for n stack slots.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32); b.op1r(|x: i32| Ok(x)).unwrap();
+    /// ```
+    pub fn op1r<A: 'static, R: 'static, F: Fn(A) -> Result<R> + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op1r_repr::<Leaf<A>, Leaf<R>, _>(f)
+    }
+
+    /// Registers a unary operation after checking its complete operand witness.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands or recursive representation mismatch.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32);
+    /// b.op1_repr::<cel_runtime::Leaf<i32>, cel_runtime::Leaf<i32>, _>(|x| x).unwrap();
+    /// ```
+    pub fn op1_repr<A: ValueRepr, R: ValueRepr, F: Fn(A::Value) -> R::Value + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op1r_repr::<A, R, _>(move |a| Ok(f(a)))
+    }
+
+    /// Registers a fallible unary witnessed operation with error/unwind cleanup.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands or recursive mismatch; propagates host errors on execution.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32);
+    /// b.op1r_repr::<cel_runtime::Leaf<i32>, cel_runtime::Leaf<i32>, _>(Ok).unwrap();
+    /// ```
+    pub fn op1r_repr<A: ValueRepr, R: ValueRepr, F: Fn(A::Value) -> Result<R::Value> + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        let result = R::value_type();
+        self.operation(1, result.clone())?
+            .emit1::<A, R, _>(&mut self.segment, f)?;
+        self.replace(1, result);
+        Ok(())
+    }
+
+    /// Registers a binary opaque-leaf operation in source order.
+    ///
+    /// # Errors
+    /// Rejects insufficient or mismatched operands.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32); b.just(2i32); b.op2(|a: i32, b: i32| a + b).unwrap();
+    /// ```
+    pub fn op2<A: 'static, B: 'static, R: 'static, F: Fn(A, B) -> R + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op2_repr::<Leaf<A>, Leaf<B>, Leaf<R>, _>(f)
+    }
+
+    /// Registers a fallible binary opaque-leaf operation.
+    ///
+    /// # Errors
+    /// Rejects insufficient/mismatched operands; propagates host errors on execution.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32); b.just(2i32); b.op2r(|a: i32, b: i32| Ok(a + b)).unwrap();
+    /// ```
+    pub fn op2r<A: 'static, B: 'static, R: 'static, F: Fn(A, B) -> Result<R> + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op2r_repr::<Leaf<A>, Leaf<B>, Leaf<R>, _>(f)
+    }
+
+    /// Registers a binary witnessed operation in source order.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands or complete witness mismatch.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// See [`Self::op2`]; use one witness per operand and result.
+    pub fn op2_repr<
+        A: ValueRepr,
+        B: ValueRepr,
+        R: ValueRepr,
+        F: Fn(A::Value, B::Value) -> R::Value + 'static,
+    >(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op2r_repr::<A, B, R, _>(move |a, b| Ok(f(a, b)))
+    }
+
+    /// Registers a fallible binary witnessed operation.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands or complete mismatch; execution propagates host errors.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// See [`Self::op2r`]; use one witness per operand and result.
+    pub fn op2r_repr<
+        A: ValueRepr,
+        B: ValueRepr,
+        R: ValueRepr,
+        F: Fn(A::Value, B::Value) -> Result<R::Value> + 'static,
+    >(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        let result = R::value_type();
+        self.operation(2, result.clone())?
+            .emit2::<A, B, R, _>(&mut self.segment, f)?;
+        self.replace(2, result);
+        Ok(())
+    }
+
+    /// Registers a ternary opaque-leaf operation in source order.
+    ///
+    /// # Errors
+    /// Rejects insufficient or mismatched operands.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// See [`Self::op2`]; push one additional operand.
+    pub fn op3<A: 'static, B: 'static, C: 'static, R: 'static, F: Fn(A, B, C) -> R + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op3_repr::<Leaf<A>, Leaf<B>, Leaf<C>, Leaf<R>, _>(f)
+    }
+
+    /// Registers a fallible ternary opaque-leaf operation.
+    ///
+    /// # Errors
+    /// Rejects insufficient/mismatched operands; execution propagates host errors.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// See [`Self::op2r`]; push one additional operand.
+    pub fn op3r<
+        A: 'static,
+        B: 'static,
+        C: 'static,
+        R: 'static,
+        F: Fn(A, B, C) -> Result<R> + 'static,
+    >(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op3r_repr::<Leaf<A>, Leaf<B>, Leaf<C>, Leaf<R>, _>(f)
+    }
+
+    /// Registers a ternary witnessed operation in source order.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands or complete witness mismatch.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// See [`Self::op2_repr`]; supply one additional witness.
+    pub fn op3_repr<
+        A: ValueRepr,
+        B: ValueRepr,
+        C: ValueRepr,
+        R: ValueRepr,
+        F: Fn(A::Value, B::Value, C::Value) -> R::Value + 'static,
+    >(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op3r_repr::<A, B, C, R, _>(move |a, b, c| Ok(f(a, b, c)))
+    }
+
+    /// Registers a fallible ternary witnessed operation.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands or complete mismatch; execution propagates host errors.
+    /// - Complexity: O(n) registration work for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// See [`Self::op2r_repr`]; supply one additional witness.
+    pub fn op3r_repr<
+        A: ValueRepr,
+        B: ValueRepr,
+        C: ValueRepr,
+        R: ValueRepr,
+        F: Fn(A::Value, B::Value, C::Value) -> Result<R::Value> + 'static,
+    >(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        let result = R::value_type();
+        self.operation(3, result.clone())?
+            .emit3::<A, B, C, R, _>(&mut self.segment, f)?;
+        self.replace(3, result);
+        Ok(())
+    }
+
+    /// Transfers a canonical array allocation into a concrete host vector.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands or a differing complete element witness.
+    /// - Complexity: O(n) registration work; execution preserves the allocation.
+    ///
+    /// # Examples
+    /// See the `prepared_containers` integration tests.
+    pub fn op1_vec<E: ValueRepr, R: ValueRepr, F: Fn(Vec<E::Value>) -> R::Value + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op1r_vec::<E, R, _>(move |a| Ok(f(a)))
+    }
+
+    /// Registers a fallible zero-copy canonical-array-to-vector adapter.
+    ///
+    /// # Errors
+    /// Rejects witness mismatch; execution propagates host errors with ambient cleanup.
+    /// - Complexity: O(n) registration work; O(1) ownership transfer.
+    ///
+    /// # Examples
+    /// See [`Self::op1_vec`].
+    pub fn op1r_vec<
+        E: ValueRepr,
+        R: ValueRepr,
+        F: Fn(Vec<E::Value>) -> Result<R::Value> + 'static,
+    >(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        let result = R::value_type();
+        self.operation(1, result.clone())?
+            .emit_vec::<E, R, _>(&mut self.segment, f)?;
+        self.replace(1, result);
+        Ok(())
+    }
+
+    /// Borrows the original canonical array payload during a host callback.
+    ///
+    /// The consumed array is destroyed after the callback; the result is owned.
+    /// # Errors
+    /// Rejects insufficient operands or complete element witness mismatch.
+    /// - Complexity: O(n) registration work; O(1) borrowing plus destruction.
+    ///
+    /// # Examples
+    /// See [`Self::op1_vec`].
+    pub fn op1_slice<E: ValueRepr, R: ValueRepr, F: Fn(&[E::Value]) -> R::Value + 'static>(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        self.op1r_slice::<E, R, _>(move |a| Ok(f(a)))
+    }
+
+    /// Registers a fallible borrowed-slice adapter with owned result and cleanup.
+    ///
+    /// # Errors
+    /// Rejects complete witness mismatch; execution propagates host errors.
+    /// - Complexity: O(n) registration work; O(1) borrowing plus destruction.
+    ///
+    /// # Examples
+    /// See [`Self::op1_slice`].
+    pub fn op1r_slice<
+        E: ValueRepr,
+        R: ValueRepr,
+        F: Fn(&[E::Value]) -> Result<R::Value> + 'static,
+    >(
+        &mut self,
+        f: F,
+    ) -> Result<()> {
+        let result = R::value_type();
+        self.operation(1, result.clone())?
+            .emit_slice::<E, R, _>(&mut self.segment, f)?;
+        self.replace(1, result);
+        Ok(())
+    }
+
+    /// Pushes a cloned opaque constant on each execution.
+    ///
+    /// # Panics
+    /// Rejects erased whole-value owner constants; use [`Self::just_external`] to import them.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>(); b.just(7i32);
+    /// ```
+    pub fn just<T: Clone + 'static>(&mut self, value: T) {
+        self.op0(move || value.clone());
+        self.replace(1, ValueType::cloneable_leaf::<T>());
+    }
+
+    /// Imports an external constant once and emits only trusted canonical cloning.
+    ///
+    /// The descriptor must include every borrowed clone capability. Wrapper headers
+    /// are converted before registration, never during interpreter execution.
+    /// # Errors
+    /// Rejects noncanonical descriptors, unavailable cloning, invalid external
+    /// identity/shape, unsupported external conversions, or frame overflow.
+    /// - Complexity: Boundary validation/import at setup; value cloning on each execution.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{DynSegment, Array, OwnedValue, ValueType, Nil, ArrayOf, Leaf, IntoCStackList};
+    /// let mut body = DynSegment::new::<()>();
+    /// body.just_external(ValueType::array(ValueType::cloneable_leaf::<i32>()),
+    ///     Box::new(OwnedValue::new::<ArrayOf<Leaf<i32>>>(Array::from_vec(vec![7i32])))).unwrap();
+    /// let mut body = body.prepare::<Nil, ArrayOf<Leaf<i32>>>().unwrap();
+    /// assert_eq!(body.call(&().into_c_stack_list()).unwrap().as_slice(), [7]);
+    /// ```
+    pub fn just_external(&mut self, value_type: ValueType, value: Box<dyn Any>) -> Result<()> {
+        value_type.validate_canonical()?;
+        value_type.validate_clone()?;
+        let owner = HostValuePlan::new(value_type.clone())?.import_box(&mut Some(value))?;
+        let result = ResultPlan::new(self.current_stack_offset(), value_type.clone())?;
+        self.segment.update_base_alignment(value_type.align());
+        self.segment.raw0_(move |stack| {
+            // SAFETY: Import validated the exact complete representation and
+            // clone capability before this instruction was registered.
+            unsafe {
+                result.clone_from(stack, owner.as_ptr());
+            }
+            Ok(())
+        });
+        self.replace(0, value_type);
+        Ok(())
+    }
+
+    /// Registers a borrowed opaque-leaf argument read.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.push_arg::<i32>(0);
+    /// assert_eq!(b.call_dyn::<i32>(&[&7i32]).unwrap(), 7);
+    /// ```
+    pub fn push_arg<T: Clone + 'static>(&mut self, index: usize) {
+        self.push_argument(index, ValueType::cloneable_leaf::<T>())
+            .expect("cloneable leaf");
+    }
+
+    /// Registers a canonical borrowed argument read with its frozen clone plan.
+    ///
+    /// # Errors
+    /// Rejects missing clone capability or unrepresentable frame positions.
+    /// Preparation validates its complete identity against the argument witness.
+    /// - Complexity: O(d) registration for d descriptor nodes; execution has the
+    ///   value's clone cost without temporary whole-value allocation.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.push_argument(0, cel_runtime::ValueType::cloneable_leaf::<i32>()).unwrap();
+    /// ```
+    pub fn push_argument(&mut self, index: usize, value_type: ValueType) -> Result<()> {
+        value_type.validate_canonical()?;
+        ensure!(
+            value_type.can_clone(),
+            "argument clone capability unavailable"
+        );
+        let result = ResultPlan::new(self.current_stack_offset(), value_type.clone())?;
+        self.segment.update_base_alignment(value_type.align());
+        self.segment.raw0_(move |stack| {
+            // SAFETY: The external boundary or preparation validates the complete
+            // pointer frame; this read's frozen descriptor supplies cloning.
+            unsafe {
+                let source = ARGUMENTS.with(|slot| *slot.get().add(index));
+                result.clone_from(stack, source);
+            }
+            Ok(())
+        });
+        self.argument_reads.push((index, value_type.clone()));
+        self.replace(0, value_type);
+        Ok(())
+    }
+
+    /// Packs source-ordered operands into their canonical concrete list layout.
+    ///
+    /// # Errors
+    /// Rejects insufficient operands, a wrong ambient snapshot, or layout overflow.
+    /// - Complexity: O(n + s) registration and raw moves for n fields and s bytes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32); b.just(2f64); b.make_tuple(2, 0).unwrap();
+    /// ```
+    pub fn make_tuple(&mut self, n: usize, ambient_start: usize) -> Result<()> {
+        ensure!(
+            self.stack_offset_before_top(n)? == ambient_start,
+            "tuple ambient origin mismatch"
+        );
+        let fields = self
+            .peek_stack_infos(n)
+            .iter()
+            .map(|info| AssociatedType {
+                offset: 0,
+                value_type: info.value_type.clone(),
+            })
+            .collect();
+        let value_type = ValueType::tuple(fields)?;
+        let frame = StackFramePlan::new(ambient_start, value_type.clone())?;
+        let result = ResultPlan::new(ambient_start, value_type.clone())?;
+        self.segment.update_base_alignment(value_type.align());
+        self.segment.raw0_(move |stack| {
+            // SAFETY: The frozen source frame matches every emitted operand.
+            let mut owner = unsafe { frame.take(stack) };
+            unsafe { result.push(stack, &mut owner) };
+            Ok(())
+        });
+        self.replace(n, value_type);
+        Ok(())
+    }
+
+    /// Packs homogeneous operands into a canonical owning array header.
+    ///
+    /// # Errors
+    /// Rejects empty inference, differing complete types, wrong ambient origin,
+    /// insufficient operands, or allocation-layout overflow.
+    /// - Complexity: O(n + s) checks and moves for n elements and s bytes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32); b.make_array(1, 0).unwrap();
+    /// ```
+    pub fn make_array(&mut self, n: usize, ambient_start: usize) -> Result<()> {
+        ensure!(
+            n != 0,
+            "empty array requires an explicit complete element type"
+        );
+        self.stack_offset_before_top(n)?;
+        let element = self.peek_stack_infos(n)[0].value_type.clone();
+        self.make_typed_array(n, ambient_start, element)
+    }
+
+    /// Packs operands using an explicit complete element descriptor.
+    ///
+    /// # Errors
+    /// Rejects wrong ambient origin, insufficient/differently shaped operands,
+    /// or allocation-layout overflow. Empty arrays need no element capabilities.
+    /// - Complexity: O(n + s) checks and moves for n elements and s bytes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.make_typed_array(0, 0, cel_runtime::ValueType::leaf::<i32>()).unwrap();
+    /// ```
+    pub fn make_typed_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        element: ValueType,
+    ) -> Result<()> {
+        element.validate_canonical()?;
+        ensure!(
+            self.stack_offset_before_top(n)? == ambient_start,
+            "array ambient origin mismatch"
+        );
+        for (index, info) in self.peek_stack_infos(n).iter().enumerate() {
+            ensure!(
+                info.value_type.same_shape(&element),
+                "array element {index} has type {}, expected {}",
+                descriptor_name(&info.value_type),
+                descriptor_name(&element)
+            );
+        }
+        let container = ContainerPlan::array(element.clone(), n)?;
+        let result_type = ValueType::array(element.clone());
+        let result = ResultPlan::new(ambient_start, result_type.clone())?;
+        let mut end = ambient_start;
+        let offsets = (0..n)
+            .map(|_| {
+                let (offset, next) = stack_position(end, element.layout())?;
+                end = next;
+                Ok(offset)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.segment.update_base_alignment(result_type.align());
+        self.segment.raw0_(move |stack| {
+            // No user code or fallible operation follows the first child move.
+            let mut owner = unsafe {
+                container.construct(|index, destination| {
+                    stack.read_at(offsets[index], |source| {
+                        std::ptr::copy_nonoverlapping(source, destination, element.size())
+                    });
+                    Ok(())
+                })?
+            };
+            unsafe {
+                stack.release_top(n);
+                stack.truncate_to(ambient_start, false);
+                result.push(stack, &mut owner);
+            }
+            Ok(())
+        });
+        self.replace(n, result_type);
+        Ok(())
+    }
+
+    /// Moves one source-ordered tuple field and destroys every other field.
+    ///
+    /// # Errors
+    /// Rejects a missing tuple or an out-of-range index before emitting.
+    /// - Complexity: O(n) registration/destruction for n fields, plus representation moves.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.just(1i32); b.just(2f64); b.make_tuple(2, 0).unwrap();
+    /// b.tuple_index(0).unwrap(); assert_eq!(b.call0::<i32>().unwrap(), 1);
+    /// ```
+    pub fn tuple_index(&mut self, index: usize) -> Result<()> {
+        let ty = self
+            .stack_ids
+            .last()
+            .ok_or_else(|| anyhow!("missing tuple"))?
+            .value_type
+            .clone();
+        let fields = ty
+            .tuple_elements()
+            .ok_or_else(|| anyhow!("tuple required"))?;
+        let field = fields
+            .get(index)
+            .ok_or_else(|| anyhow!("tuple index out of range"))?
+            .value_type
+            .clone();
+        let ambient = self.stack_offset_before_top(1)?;
+        let input = ResultPlan::new(ambient, ty)?;
+        let output = ResultPlan::new(ambient, field.clone())?;
+        self.segment.raw0_(move |stack| {
+            let owner = unsafe { input.take(stack) };
+            let mut selected = unsafe { owner.take_field(index) };
+            unsafe { output.push(stack, &mut selected) };
+            Ok(())
+        });
+        self.replace(1, field);
+        Ok(())
+    }
+
+    /// Moves an indexed canonical array element and destroys the consumed array's siblings.
+    ///
+    /// The stack holds the array followed by an opaque index of type `I`.
+    /// No clone capability is required, including for nested tuple/array elements.
+    /// Moving the validated index into its concrete type does not allocate.
+    /// # Errors
+    /// Rejects absent/nonmatching operands during registration. Execution rejects
+    /// negative/unrepresentable or out-of-bounds indices and cleans every operand.
+    /// - Complexity: O(n) setup/destruction for n stack slots or array elements.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut body = cel_runtime::DynSegment::new::<()>();
+    /// body.just(7i32); body.make_array(1, 0).unwrap();
+    /// body.just(0i32); body.array_index::<i32>().unwrap();
+    /// assert_eq!(body.call0::<i32>().unwrap(), 7);
+    /// ```
+    pub fn array_index<I: TryInto<usize> + 'static>(&mut self) -> Result<()> {
+        let first = self
+            .stack_ids
+            .len()
+            .checked_sub(2)
+            .ok_or_else(|| anyhow!("array index requires two operands"))?;
+        self.stack_ids[first + 1]
+            .value_type
+            .validate_opaque_leaf(TypeId::of::<I>())?;
+        let array_type = self.stack_ids[first].value_type.clone();
+        let element = array_type
+            .array_element()
+            .ok_or_else(|| anyhow!("canonical array required"))?
+            .clone();
+        let ambient = self.offset_after(first);
+        let index = ResultPlan::new(self.offset_after(first + 1), ValueType::leaf::<I>())?;
+        let array = ResultPlan::new(ambient, array_type)?;
+        let output = ResultPlan::new(ambient, element.clone())?;
+        self.segment.update_base_alignment(element.align());
+        self.segment.raw0_(move |stack| {
+            // SAFETY: Construction validates the exact opaque I descriptor.
+            let native = unsafe { index.take_typed::<I>(stack) };
+            let array_owner = unsafe { array.take(stack) };
+            let selected = native
+                .try_into()
+                .map_err(|_| anyhow!("array index is negative or unrepresentable"))
+                .and_then(|index| unsafe { array_owner.take_array_element(index) });
+            match selected {
+                Ok(mut value) => {
+                    unsafe { output.push(stack, &mut value) };
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        });
+        self.replace(2, element);
+        Ok(())
+    }
+
+    /// Destroys the top canonical value without synthesizing a result.
+    ///
+    /// Ambient values survive success and are cleaned if a destructor unwinds.
+    /// # Errors
+    /// Rejects an empty stack before registration.
+    /// - Complexity: O(1) setup; value-dependent destruction.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut body = cel_runtime::DynSegment::new::<()>();
+    /// body.just(1i32); body.make_array(1, 0).unwrap();
+    /// body.drop_value().unwrap();
+    /// body.just(7i32); assert_eq!(body.call0::<i32>().unwrap(), 7);
+    /// ```
+    pub fn drop_value(&mut self) -> Result<()> {
+        let first = self
+            .stack_ids
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| anyhow!("missing value"))?;
+        self.segment.raw0_(|stack| {
+            stack.drop_top();
+            Ok(())
+        });
+        self.stack_ids.truncate(first);
+        self.stack_ends.truncate(first + 1);
+        Ok(())
+    }
+
+    /// Validates a complete value using an explicit matching structural witness.
+    ///
+    /// # Errors
+    /// Rejects an absent or mismatched value; this never authorizes opaque casts.
+    /// - Complexity: O(n) complete descriptor comparison for n nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>();
+    /// b.make_tuple(0, 0).unwrap(); b.relabel_repr::<cel_runtime::Nil>().unwrap();
+    /// ```
+    pub fn relabel_repr<R: ValueRepr>(&mut self) -> Result<()> {
+        self.stack_ids
+            .last()
+            .ok_or_else(|| anyhow!("missing value"))?
+            .value_type
+            .validate::<R>()
+    }
+
+    /// Installs complete registered capabilities without changing the top value's identity.
+    ///
+    /// A host registry can retain clone/equality/debug adapters on operation
+    /// results for checked external export. No instruction or raw cast is emitted.
+    /// # Errors
+    /// Rejects a missing value or any recursive identity/layout mismatch.
+    /// - Complexity: O(n) complete comparison for n descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{DynSegment, Leaf, ValueType};
+    /// let mut body = DynSegment::new::<()>(); body.just(7i32);
+    /// body.annotate_top(ValueType::cloneable_leaf::<i32>()
+    ///     .with_equality::<Leaf<i32>>().unwrap()
+    ///     .with_debug::<Leaf<i32>>().unwrap()).unwrap();
+    /// ```
+    pub fn annotate_top(&mut self, value_type: ValueType) -> Result<()> {
+        let info = self
+            .stack_ids
+            .last_mut()
+            .ok_or_else(|| anyhow!("missing value"))?;
+        ensure!(
+            info.value_type.same_shape(&value_type),
+            "top value annotation representation mismatch"
+        );
+        info.value_type = value_type;
+        Ok(())
+    }
+
+    /// Relabels a canonical tuple as its concrete opaque list using an explicit witness.
+    ///
+    /// No bytes move. The witness authorizes the concrete Rust destructor and
+    /// permits an ordinary typed operation or direct `Segment` conversion.
+    /// # Errors
+    /// Rejects a missing/nontuple value or any complete witness mismatch.
+    /// - Complexity: O(n) complete comparison for n descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut body = cel_runtime::DynSegment::new::<()>();
+    /// body.make_tuple(0, 0).unwrap();
+    /// body.pop_tuple_as::<cel_runtime::Nil>().unwrap();
+    /// ```
+    pub fn pop_tuple_as<R: ValueRepr>(&mut self) -> Result<()> {
+        let info = self
+            .stack_ids
+            .last_mut()
+            .ok_or_else(|| anyhow!("missing tuple"))?;
+        ensure!(
+            info.value_type.tuple_elements().is_some(),
+            "canonical tuple required"
+        );
+        info.value_type.validate::<R>()?;
+        info.value_type = ValueType::leaf::<R::Value>();
+        Ok(())
+    }
+
+    /// Relabels a concrete opaque canonical list as a structural tuple using its witness.
+    ///
+    /// # Errors
+    /// Rejects missing values, nontuple witnesses, or a different opaque concrete type.
+    /// - Complexity: O(n) witness construction for n tuple descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{DynSegment, Nil, IntoCStackList};
+    /// let mut body = DynSegment::new::<()>();
+    /// body.just(().into_c_stack_list());
+    /// body.push_tuple::<Nil>().unwrap();
+    /// ```
+    pub fn push_tuple<R: ValueRepr>(&mut self) -> Result<()> {
+        let value_type = R::value_type();
+        ensure!(
+            value_type.tuple_elements().is_some(),
+            "canonical tuple witness required"
+        );
+        let info = self
+            .stack_ids
+            .last_mut()
+            .ok_or_else(|| anyhow!("missing concrete list"))?;
+        info.value_type
+            .validate_opaque_leaf(TypeId::of::<R::Value>())?;
+        debug_assert_eq!(info.value_type.layout(), value_type.layout());
+        info.value_type = value_type;
+        Ok(())
+    }
+
+    /// Checks that this body starts on an independent empty raw execution stack.
+    ///
+    /// # Errors
+    /// Rejects preloaded arguments or a nonzero fragment origin.
     pub(crate) fn validate_independent_body(&self) -> Result<()> {
         ensure!(
             self.argument_ids.is_empty(),
@@ -1029,3899 +1135,951 @@ impl DynSegment {
         Ok(())
     }
 
-    /// Creates a new empty segment with no operations.
-    #[must_use]
-    pub fn new<Args: IntoCStackList>() -> Self
-    where
-        ReverseList<Args::Output>: ToTypeIdList,
-    {
-        let stack_ids = ReverseList::<Args::Output>::to_stack_info_list();
-        DynSegment {
-            segment: RawSegment::new(),
-            argument_ids: stack_ids.iter().map(|s| s.value_type.type_id).collect(),
-            argument_names: stack_ids
-                .iter()
-                .map(|s| s.value_type.type_name.clone())
-                .collect(),
-            stack_ids,
-            base_stack_index: size_of::<ReverseList<Args::Output>>(),
-            argument_reads: Vec::new(),
-        }
+    /// Executes the existing raw instruction sequence with trusted argument pointers.
+    ///
+    /// # Safety
+    /// The independent body and every read's complete identity/count/clone plan
+    /// must have been validated; arguments must stay live until return.
+    /// # Errors
+    /// Propagates body errors without changing their context.
+    /// - Complexity: Body-dependent; no descriptor comparisons or `Any` downcasts.
+    pub(crate) unsafe fn execute_raw(&mut self, arguments: &[*const u8]) -> Result<RawStack> {
+        let _guard = ArgumentGuard::install(arguments);
+        let mut output = RawStack::with_base_alignment(self.segment.base_alignment());
+        unsafe { self.segment.call0_stack(&mut output)? };
+        Ok(output)
     }
 
-    /// Create a DynSegment that is a fragment of a larger segment, it may
-    /// be used to implement conditional execution.
+    /// Evaluates a result at a checked external host boundary.
     ///
-    /// - Precondition: the top of the stack currently holds the condition
-    ///   value that [`join2`](Self::join2) will pop before this fragment's
-    ///   ops run — the fragment's own local offsets are computed as if that
-    ///   pop had already happened, matching the layout the fragment will
-    ///   actually see at execution time. (`join2` independently rejects a
-    ///   non-`bool` condition with an `Err`, so a mismatched condition type
-    ///   at this point is a pending parse error, not a violated invariant.)
-    #[must_use]
-    pub fn new_fragment(&self) -> Self {
-        debug_assert!(
-            !self.stack_ids.is_empty(),
-            "new_fragment requires a condition value on top of the stack"
-        );
-        DynSegment {
-            segment: RawSegment::new(),
-            argument_ids: Vec::new(),
-            argument_names: Vec::new(),
-            stack_ids: Vec::new(),
-            base_stack_index: self.stack_offset_after(self.stack_ids.len().saturating_sub(1)),
-            argument_reads: Vec::new(),
-        }
-    }
-
-    /// Verifies that the argument types match the expected types on the type stack.
-    ///
-    /// Returns an error if the argument types don't match the expected types or if
-    /// there are too many arguments.
-    ///
-    /// To avoid reversing the arguments and reversing the slice, this operation
-    /// is done in argument order, not stack order.
-    // REVISIT: pop_types should just return the last n padding values
-    fn pop_types<L: ListTypeIteratorAdvance<TypeId> + 'static>(&mut self) -> Result<()> {
-        ensure!(
-            L::LENGTH <= self.stack_ids.len(),
-            "wrong number of arguments: expected {}, got {}",
-            L::LENGTH,
-            self.stack_ids.len()
-        );
-        let start = self.stack_ids.len() - L::LENGTH;
-        ensure!(
-            TypeIdIterator::<L>::new().eq(self.stack_ids[start..]
-                .iter()
-                .map(|info| info.value_type.type_id)),
-            "stack type ids do not match"
-        );
-        self.stack_ids.truncate(start);
-        Ok(())
-    }
-
-    /// Computes the top-of-stack byte offset after the first `count` entries
-    /// of `stack_ids`, replaying each entry's own alignment/size from
-    /// `base_stack_index`.
-    ///
-    /// Recomputing on demand (rather than caching a running total) keeps this
-    /// correct after any operation that removes entries from `stack_ids`
-    /// (e.g. [`pop_types`](Self::pop_types)), since there is no cached value
-    /// that could fall out of sync with the actual entries left on the stack.
-    ///
-    /// - Complexity: O(count).
-    fn stack_offset_after(&self, count: usize) -> usize {
-        let mut offset = self.base_stack_index;
-        for info in &self.stack_ids[..count] {
-            offset = align_index(info.value_type.align, offset);
-            offset += info.value_type.size;
-        }
-        offset
-    }
-
-    /// Push type to stack and register dropper.
-    fn push_type<T>(&mut self)
-    where
-        T: 'static,
-    {
-        let current = self.stack_offset_after(self.stack_ids.len());
-        let aligned_index = align_index(align_of::<T>(), current);
-        let padded = aligned_index != current;
-
-        self.stack_ids.push(StackInfo {
-            padding: padded,
-            value_type: ValueType::leaf::<T>(),
-        });
-    }
-
-    /// Returns the current parse-time stack byte offset.
-    ///
-    /// Snapshot this before parsing a tuple's first element and pass it to
-    /// [`make_tuple`](Self::make_tuple).
-    #[must_use]
-    pub fn current_stack_offset(&self) -> usize {
-        self.stack_offset_after(self.stack_ids.len())
-    }
-
-    /// Returns the stack byte offset preceding the top `n` operands.
+    /// Structural results return canonical whole-value owners; callable results return
+    /// their concrete carrier. Interpreter operations never use this conversion.
+    /// Scalar inputs are borrowed after complete input preflight and cloned only
+    /// by executed reads; compound inputs borrow checked canonical owners.
     ///
     /// # Errors
-    /// Returns an error if fewer than `n` operand descriptors are available.
+    /// Rejects dependent bodies, non-single results, unsupported external shapes,
+    /// unavailable argument capabilities, or mismatched arguments/results; propagates body errors.
+    /// - Complexity: Boundary validation and argument clones plus evaluation.
     ///
-    /// - Complexity: O(k - n) for k available operand descriptors.
+    /// # Examples
+    /// See [`Self::push_arg`].
+    pub fn call_dyn<R: 'static>(&mut self, inputs: &[&dyn Any]) -> Result<R> {
+        let result = self.result_type()?;
+        match result.kind() {
+            ValueKind::Tuple(fields)
+                if fields.is_empty() && TypeId::of::<R>() == TypeId::of::<()>() =>
+            {
+                drop(self.call_dyn_value(inputs)?);
+                let unit: Box<dyn Any> = Box::new(());
+                return Ok(*unit.downcast::<R>().expect("checked host unit identity"));
+            }
+            ValueKind::Array(_) | ValueKind::Tuple(_) => {
+                ensure!(
+                    TypeId::of::<R>() == TypeId::of::<OwnedValue>(),
+                    "canonical result owner required"
+                );
+                let owner: Box<dyn Any> = Box::new(self.call_dyn_value(inputs)?);
+                return Ok(*owner
+                    .downcast::<R>()
+                    .map_err(|_| anyhow!("canonical result owner required"))?);
+            }
+            ValueKind::Callable { .. } => {
+                ensure!(
+                    TypeId::of::<R>() == TypeId::of::<crate::DynClosure>(),
+                    "external callable result type mismatch"
+                );
+            }
+            ValueKind::Leaf(_) => result.validate_opaque_leaf(TypeId::of::<R>())?,
+        }
+        let plan = ResultPlan::new(0, self.result_type()?.clone())?;
+        let mut output = self.call_external(inputs)?;
+        Ok(unsafe { plan.take_typed::<R>(&mut output) })
+    }
+
+    /// Evaluates an owned canonical value through a checked external argument boundary.
+    ///
+    /// # Errors
+    /// Rejects dependent bodies, non-single results, or invalid external arguments.
+    /// Propagates operation errors without erasing their context.
+    /// - Complexity: Boundary validation/cloning plus body evaluation and one raw result move.
     ///
     /// # Examples
     /// ```
-    /// use cel_runtime::DynSegment;
-    /// let mut segment = DynSegment::new::<()>();
-    /// segment.just(1u32);
-    /// assert_eq!(segment.stack_offset_before_top(1).unwrap(), 0);
-    /// assert!(segment.stack_offset_before_top(2).is_err());
+    /// let mut body = cel_runtime::DynSegment::new::<()>();
+    /// body.just(7i32);
+    /// assert_eq!(body.call_dyn_value(&[]).unwrap().try_into_typed::<cel_runtime::Leaf<i32>>().unwrap(), 7);
     /// ```
-    pub fn stack_offset_before_top(&self, n: usize) -> Result<usize> {
-        let count = self
-            .stack_ids
-            .len()
-            .checked_sub(n)
-            .ok_or_else(|| anyhow!("not enough operands on stack"))?;
-        Ok(self.stack_offset_after(count))
+    pub fn call_dyn_value(&mut self, inputs: &[&dyn Any]) -> Result<OwnedValue> {
+        let result = ResultPlan::new(0, self.result_type()?.clone())?;
+        let mut output = self.call_external(inputs)?;
+        Ok(unsafe { result.take(&mut output) })
     }
 
-    /// Returns the arity of the tuple on top of the stack, or `None` if the
-    /// top value isn't a tuple.
-    #[must_use]
-    pub fn peek_tuple_arity(&self) -> Option<usize> {
-        Some(self.stack_ids.last()?.value_type.tuple_elements()?.len())
-    }
-
-    /// Collapses the top `n` stack values (pushed starting at byte offset
-    /// `ambient_start`, e.g. via [`current_stack_offset`](Self::current_stack_offset)
-    /// captured before parsing the first element) into one tuple value.
+    /// Validates all external inputs, then borrows canonical storage.
     ///
-    /// The tuple's internal layout (offsets between elements) depends only on
-    /// the elements' own types — never on `ambient_start` — matching the
-    /// layout that [`CStackList`]'s own nested `#[repr(C)]` cons cells
-    /// produce when built via sequential `.push()` calls in the same
-    /// declaration order: each element is placed at its own alignment, then
-    /// the running offset is padded up to the maximum alignment of every
-    /// element seen so far (not just the tuple's overall alignment) before
-    /// the next element is placed, mirroring how each nested cons cell pads
-    /// itself to its own alignment before the next field is appended.
+    /// Scalar inputs remain borrowed for this call, including nested calls.
+    /// Only executed scalar reads clone them. Recursive validation completes
+    /// before any clone or body operation runs.
     ///
-    /// - Precondition: at least `n` values are on the stack, pushed
-    ///   contiguously starting at `ambient_start` with no other values
-    ///   interleaved.
-    ///
-    /// - Complexity: O(n).
-    pub fn make_tuple(&mut self, n: usize, ambient_start: usize) {
-        debug_assert!(n <= self.stack_ids.len());
-        let start = self.stack_ids.len() - n;
-        let elems: Vec<StackInfo> = self.stack_ids.drain(start..).collect();
-
-        // ambient_offset tracks where each element already sits on the ambient
-        // RawStack from ordinary sequential pushes — a plain flat layout,
-        // unrelated to the tuple's own (CStackList-matching) layout, which
-        // `ValueType::tuple` computes below.
-        let mut ambient_offset = ambient_start;
-        let mut src_offsets = Vec::with_capacity(n);
-        let mut associated = Vec::with_capacity(n);
-        for elem in elems {
-            ambient_offset = align_index(elem.value_type.align, ambient_offset);
-            src_offsets.push(ambient_offset);
-            ambient_offset += elem.value_type.size;
-
-            associated.push(AssociatedType {
-                offset: 0,
-                value_type: elem.value_type,
-            });
-        }
-
-        let value_type = ValueType::tuple(associated);
-        let total_size = value_type.size;
-        let dest_base = align_index(value_type.align, ambient_start);
-
-        let elements = value_type
-            .tuple_elements()
-            .expect("ValueType::tuple produces a tuple");
-        let dest_offsets: Vec<usize> = elements.iter().map(|a| a.offset).collect();
-        let sizes: Vec<usize> = elements.iter().map(|a| a.value_type.size).collect();
-
-        self.segment.raw0_(move |stack| {
-            unsafe {
-                stack.repack(
-                    ambient_start,
-                    dest_base,
-                    total_size,
-                    &src_offsets,
-                    &dest_offsets,
-                    &sizes,
+    /// # Errors
+    /// Rejects dependent bodies or invalid external reads; propagates body errors.
+    /// - Complexity: O(r + i) preflight for r read descriptor nodes and i inputs,
+    ///   plus host-value validation and body execution.
+    fn call_external(&mut self, inputs: &[&dyn Any]) -> Result<RawStack> {
+        self.validate_independent_body()?;
+        let mut first_reads: Vec<Option<&ValueType>> = vec![None; inputs.len()];
+        for (index, ty) in &self.argument_reads {
+            ensure!(*index < inputs.len(), "missing argument {index}");
+            if let Some(first) = first_reads[*index] {
+                ensure!(
+                    ty.same_shape(first),
+                    "inconsistent argument {index} representation"
                 );
-            }
-            Ok(())
-        });
-
-        self.stack_ids.push(StackInfo {
-            padding: dest_base != ambient_start,
-            value_type,
-        });
-    }
-
-    /// Collapses the top `n` stack values (pushed starting at byte offset `ambient_start`, e.g.
-    /// via [`current_stack_offset`](Self::current_stack_offset) captured before parsing the first
-    /// element) into one [`DynamicArray`] value owning all of them.
-    ///
-    /// Every element must have the same complete semantic shape, compared by
-    /// [`ValueType::same_shape`], so the resulting array carries exactly one element descriptor;
-    /// nested arrays are compared recursively, so `[[0], [1.0]]` is rejected. At execution time
-    /// each element's bytes move — once, without running its destructor — from the stack into one
-    /// exact-capacity allocation that a later `Vec<T>` conversion can adopt without reallocating.
-    ///
-    /// - Precondition: at least `n` values are on the stack, pushed contiguously starting at
-    ///   `ambient_start` with no other values interleaved.
-    ///
-    /// # Errors
-    /// Returns an error, leaving the segment exactly as it was, when `n` is zero (an empty array
-    /// literal has no inferable element type; see
-    /// <https://github.com/stlab/cel-rs/issues/212>), when the stack holds fewer than `n` values,
-    /// when an element is a CEL tuple (see <https://github.com/stlab/cel-rs/issues/213>), when
-    /// two elements have different shapes, or when the array's storage layout would overflow.
-    ///
-    /// - Complexity: O(n) in the total (nested) element count.
-    pub fn make_array(&mut self, n: usize, ambient_start: usize) -> Result<()> {
-        ensure!(
-            n != 0,
-            "an empty array literal has no inferable element type; \
-             see https://github.com/stlab/cel-rs/issues/212"
-        );
-        self.make_array_with_element_type(n, ambient_start, None)
-    }
-
-    /// Collapses the top `n` stack values into one [`DynamicArray`] validated against `element`.
-    ///
-    /// When `n` is zero, this emits a typed empty array that carries `element` without inferring
-    /// it from any value. When `n` is non-zero, every collected value must have exactly
-    /// `element`'s recursive shape and layout.
-    ///
-    /// - Precondition: at least `n` values are on the stack, pushed contiguously starting at
-    ///   `ambient_start` with no other values interleaved.
-    ///
-    /// # Errors
-    /// Returns an error, leaving the segment exactly as it was, when the stack holds fewer than
-    /// `n` values, when an element is a CEL tuple (see
-    /// <https://github.com/stlab/cel-rs/issues/213>), when a collected value does not match
-    /// `element`, or when the array's storage layout would overflow.
-    ///
-    /// - Complexity: O(n) in the total (nested) element count.
-    pub fn make_typed_array(
-        &mut self,
-        n: usize,
-        ambient_start: usize,
-        element: ArrayElementType,
-    ) -> Result<()> {
-        self.make_array_with_element_type(n, ambient_start, Some(element))
-    }
-
-    /// Collapses the top `n` stack values into one [`DynamicArray`], optionally validating them
-    /// against an explicit descriptor.
-    ///
-    /// - Precondition: at least `n` values are on the stack, pushed contiguously starting at
-    ///   `ambient_start` with no other values interleaved.
-    ///
-    /// # Errors
-    /// Returns an error under the combined conditions documented by
-    /// [`make_array`](Self::make_array) and [`make_typed_array`](Self::make_typed_array).
-    ///
-    /// - Complexity: O(n) in the total (nested) element count.
-    fn make_array_with_element_type(
-        &mut self,
-        n: usize,
-        ambient_start: usize,
-        explicit_element: Option<ArrayElementType>,
-    ) -> Result<()> {
-        ensure!(
-            n <= self.stack_ids.len(),
-            "make_array: expected {n} array element(s) on the stack, found {}",
-            self.stack_ids.len()
-        );
-
-        // Validate before touching any state: a rejected literal must leave this segment (and
-        // the ops that produced its elements) exactly as it found them.
-        let start = self.stack_ids.len() - n;
-        debug_assert_eq!(
-            ambient_start,
-            self.stack_offset_after(start),
-            "ambient_start must equal the stack offset where the array elements begin"
-        );
-        let element = match explicit_element {
-            Some(element) => {
-                for (index, info) in self.stack_ids[start..].iter().enumerate() {
-                    ensure!(
-                        !matches!(info.value_type.kind(), ValueKind::Tuple(_)),
-                        Self::tuple_element_error(index)
-                    );
-                    let found = info
-                        .value_type
-                        .as_array_element()
-                        .expect("non-tuple values have array element descriptors");
-                    ensure!(
-                        element.same_shape_and_layout(&found),
-                        "array element {index} has type {}, expected {}",
-                        info.value_type.type_name(),
-                        element.display_name()
-                    );
-                }
-                element
-            }
-            None => {
-                let expected = &self.stack_ids[start].value_type;
-                let element = expected
-                    .as_array_element()
-                    .ok_or_else(|| Self::tuple_element_error(0))?;
-                for (offset, info) in self.stack_ids[start + 1..].iter().enumerate() {
-                    let index = offset + 1;
-                    ensure!(
-                        !matches!(info.value_type.kind(), ValueKind::Tuple(_)),
-                        Self::tuple_element_error(index)
-                    );
-                    ensure!(
-                        expected.same_shape(&info.value_type),
-                        "array element {index} has type {}, expected {}",
-                        info.value_type.type_name(),
-                        expected.type_name()
-                    );
-                }
-                element
-            }
-        };
-        if n == 0 {
-            check_array_capacity(&element, 0)?;
-
-            let value_type = ValueType::array(element.clone());
-            let dest_base = align_index(value_type.align, ambient_start);
-            let padding = dest_base != ambient_start;
-            self.segment.update_base_alignment(value_type.align);
-            self.segment.raw0_(move |stack| {
-                let array = DynamicArray::empty_with_element_type(element.clone());
-                let pushed_padding = stack.push(array);
-                debug_assert_eq!(
-                    pushed_padding, padding,
-                    "the collected array's padding must match the parse-time prediction"
-                );
-                Ok(())
-            });
-            self.stack_ids.push(StackInfo {
-                padding,
-                value_type,
-            });
-            return Ok(());
-        }
-        check_array_capacity(&element, n)?;
-
-        // Every element has the same shape, so they sit on the ambient stack at a fixed stride:
-        // the first is placed at the element alignment, and each element's size is a multiple of
-        // that alignment, so no interior padding separates them.
-        let element_size = element.size();
-        let first_offset = align_index(element.align(), ambient_start);
-        debug_assert!(element_size.is_multiple_of(element.align()));
-        // Captured while the elements are still on the parse-time stack, so the (unreachable,
-        // since `check_array_capacity` already passed) allocation-failure path below drops every
-        // value the evaluation had produced instead of abandoning them.
-        let unwind = self.capture_unwind();
-        self.stack_ids.truncate(start);
-
-        let value_type = ValueType::array(element.clone());
-        let dest_base = align_index(value_type.align, ambient_start);
-        let padding = dest_base != ambient_start;
-        // raw0_ (unlike raw0/push_op0) does not fold its own result alignment into the segment's
-        // `base_alignment`, so a `RawStack` allocated for a later call could be aligned only for
-        // the (possibly less-aligned) element type, leaving the pushed array misaligned.
-        self.segment.update_base_alignment(value_type.align);
-
-        self.segment.raw0_(move |stack| {
-            // A fresh allocation per execution: a segment may be called repeatedly, and each
-            // call's array must own its own storage.
-            let mut builder = match DynamicArrayBuilder::with_capacity(element.clone(), n) {
-                Ok(builder) => builder,
-                Err(error) => return Self::unwind_on_err(&unwind, stack, Err(error.into())),
-            };
-            let mut offset = first_offset;
-            for _ in 0..n {
-                // Safety: `offset` is element `i`'s live, properly aligned value on the ambient
-                // stack (the precondition on `ambient_start`), and `push_bytes` moves out of it
-                // exactly once; the bytes it vacates are released below without being dropped,
-                // so each element is owned by the builder from here on. Byte moves cannot
-                // panic, so the builder's initialized prefix always matches the elements it has
-                // actually taken: if anything did unwind, it would drop exactly those and free
-                // its allocation, leaving the still-untransferred stack bytes to the ordinary
-                // (drop-free) teardown of the raw stack rather than double-dropping them.
-                unsafe {
-                    stack.read_at(offset, |src| {
-                        builder.push_bytes(src.cast::<MaybeUninit<u8>>());
-                    });
-                }
-                offset += element_size;
-            }
-            // Safety: every value at or above `ambient_start` was moved into the builder, so no
-            // live value remains there. Truncating the whole region at once is exactly the
-            // reverse-order removal of those values (nothing is left behind between them), and
-            // it strips the first element's leading pad too.
-            unsafe { stack.truncate_to(ambient_start, false) };
-
-            let array = builder.finish();
-            let pushed_padding = stack.push(array);
-            debug_assert_eq!(
-                pushed_padding, padding,
-                "the collected array's padding must match the parse-time prediction"
-            );
-            Ok(())
-        });
-
-        self.stack_ids.push(StackInfo {
-            padding,
-            value_type,
-        });
-        Ok(())
-    }
-
-    /// Returns the error reporting that array element `index` is a CEL tuple.
-    fn tuple_element_error(index: usize) -> anyhow::Error {
-        anyhow!(
-            "array element {index} is a tuple; CEL tuples cannot yet be array elements, \
-             see https://github.com/stlab/cel-rs/issues/213"
-        )
-    }
-
-    /// Extracts element `index` from the tuple on top of the stack, replacing
-    /// the whole tuple with just that element's value.
-    ///
-    /// - Precondition: the top-of-stack value is a tuple with at least
-    ///   `index + 1` elements.
-    ///
-    /// - Complexity: O(n) in the tuple's arity.
-    pub fn tuple_index(&mut self, index: usize) {
-        let info = self
-            .stack_ids
-            .pop()
-            .expect("tuple_index requires a value on the stack");
-        let tuple_padding = info.padding;
-        let tuple_size = info.value_type.size;
-        let ValueKind::Tuple(associated) = info.value_type.kind else {
-            unreachable!("tuple_index requires a tuple on top of the stack");
-        };
-        debug_assert!(index < associated.len(), "tuple_index out of range");
-
-        let target = associated[index].clone();
-
-        // The tuple's own leading pad becomes dead space once torn down to
-        // one element, so the extracted element gets its own padding flag:
-        // recomputed relative to the ambient offset the tuple was originally
-        // built from (with the tuple's own entry already popped above, this
-        // replay gives exactly that offset), not inherited from the tuple.
-        let ambient_before_tuple = self.stack_offset_after(self.stack_ids.len());
-        let new_offset = align_index(target.value_type.align, ambient_before_tuple);
-        let new_padding = new_offset != ambient_before_tuple;
-
-        self.segment.raw0_(move |stack| {
-            unsafe {
-                extract_tuple_element(
-                    stack,
-                    tuple_size,
-                    tuple_padding,
-                    &associated,
-                    index,
-                    new_padding,
-                );
-            }
-            Ok(())
-        });
-
-        self.stack_ids.push(StackInfo {
-            padding: new_padding,
-            value_type: target.value_type,
-        });
-    }
-
-    /// Returns the padding flags for the top N entries of the type stack.
-    ///
-    /// - Complexity: O(N).
-    fn get_last_n_padded<const N: usize>(&self) -> [bool; N] {
-        let mut result = [false; N];
-        let start = self.stack_ids.len().saturating_sub(N);
-        for (i, info) in self.stack_ids[start..].iter().enumerate() {
-            result[i] = info.padding;
-        }
-        result
-    }
-
-    /// Captures the current stack values' padding and types for use when unwinding on error.
-    ///
-    /// - Complexity: O(n) in the current stack depth.
-    fn capture_unwind(&self) -> Vec<(bool, ValueType)> {
-        self.stack_ids
-            .iter()
-            .map(|info| (info.padding, info.value_type.clone()))
-            .collect()
-    }
-
-    /// Runs the captured droppers in reverse order on error, then propagates the error.
-    fn unwind_on_err<R>(
-        unwind: &[(bool, ValueType)],
-        stack: &mut RawStack,
-        result: Result<R>,
-    ) -> Result<R> {
-        match result {
-            Ok(r) => Ok(r),
-            Err(e) => {
-                for (padding, value_type) in unwind.iter().rev() {
-                    unsafe {
-                        stack.drop_sized(value_type.size, *padding, |ptr| {
-                            (value_type.raw_dropper)(ptr, value_type.dropper_children());
-                        });
-                    }
-                }
-                Err(e)
-            }
-        }
-    }
-
-    /// Returns the `TypeId` of the value currently on top of the stack, or `None` if the stack is empty.
-    ///
-    /// Used to verify method output types at parse time without consuming the stack.
-    #[must_use]
-    pub fn peek_output_type_id(&self) -> Option<TypeId> {
-        self.stack_ids.last().map(|info| info.value_type.type_id)
-    }
-
-    /// Returns a slice of the top N [`StackInfo`] entries (stack order: oldest first in the slice).
-    ///
-    /// Use this for operation lookup so errors can report type names. Returns an empty slice
-    /// if `n` is 0 or greater than the current stack size.
-    #[must_use]
-    pub fn peek_stack_infos(&self, n: usize) -> &[StackInfo] {
-        if n > self.stack_ids.len() {
-            return &[];
-        }
-        let start = self.stack_ids.len() - n;
-        &self.stack_ids[start..]
-    }
-
-    /// Pushes a nullary operation that takes no arguments and returns a value of type R.
-    ///
-    /// The return type is tracked in the type stack for subsequent operations.
-    pub fn op0<R, F>(&mut self, op: F)
-    where
-        F: Fn() -> R + 'static,
-        R: 'static,
-    {
-        self.segment.push_op0(op);
-        self.push_type::<R>();
-    }
-
-    /// Pushes a nullary operation that takes no arguments and returns a `Result<R>`.
-    ///
-    /// If the operation succeeds, the result is pushed onto the stack. If it fails,
-    /// the stack is unwound to its previous state and the error is propagated.
-    pub fn op0r<R, F>(&mut self, op: F)
-    where
-        F: Fn() -> anyhow::Result<R> + 'static,
-        R: 'static,
-    {
-        let unwind = self.capture_unwind();
-        self.segment
-            .raw0(move |stack| Self::unwind_on_err(&unwind, stack, op()));
-        self.push_type::<R>();
-    }
-
-    /// Pushes a unary operation that takes one argument of type `T` and returns a `Result<R>`.
-    ///
-    /// If the operation succeeds, the result is pushed onto the stack. If it fails,
-    /// the stack is unwound to its previous state and the error is propagated.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the argument type does not match the expected type.
-    pub fn op1r<T, R, F>(&mut self, op: F) -> Result<()>
-    where
-        F: Fn(T) -> anyhow::Result<R> + 'static,
-        T: 'static,
-        R: 'static,
-    {
-        let [p0] = self.get_last_n_padded::<1>();
-        self.pop_types::<(T, ())>()?;
-        let unwind = self.capture_unwind();
-        self.segment.raw1(
-            move |stack, t| Self::unwind_on_err(&unwind, stack, op(t)),
-            p0,
-        );
-        self.push_type::<R>();
-        Ok(())
-    }
-
-    /// Pushes a binary operation that takes two arguments of types `T` and `U` and returns a `Result<R>`.
-    ///
-    /// If the operation succeeds, the result is pushed onto the stack. If it fails,
-    /// the stack is unwound to its previous state and the error is propagated.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the argument types do not match the expected types.
-    pub fn op2r<T, U, R, F>(&mut self, op: F) -> Result<()>
-    where
-        F: Fn(T, U) -> anyhow::Result<R> + 'static,
-        T: 'static,
-        U: 'static,
-        R: 'static,
-    {
-        let [p0, p1] = self.get_last_n_padded::<2>();
-        self.pop_types::<(T, (U, ()))>()?;
-        let unwind = self.capture_unwind();
-        self.segment.raw2(
-            move |stack, t, u| Self::unwind_on_err(&unwind, stack, op(t, u)),
-            p0,
-            p1,
-        );
-        self.push_type::<R>();
-        Ok(())
-    }
-
-    /// Pushes a value to the stack without any operations.
-    pub fn just<T: 'static + Clone>(&mut self, value: T) {
-        self.op0(move || value.clone());
-    }
-
-    /// Emits a zero-argument op that clones the call argument at `index` and pushes it.
-    ///
-    /// At execution time the op reads `inputs[index]` from the slice supplied to
-    /// [`call_dyn`](Self::call_dyn) and clones the value onto the stack.
-    ///
-    /// - Precondition: Every call to [`call_dyn`](Self::call_dyn) must supply an `inputs` slice where
-    ///   `inputs[index]` is a value of type `T`.
-    ///
-    /// - Complexity: O(1).
-    pub fn push_arg<T: 'static + Clone>(&mut self, index: usize) {
-        self.push_typed_arg::<T>(index, ValueType::leaf::<T>());
-    }
-
-    /// Emits a monomorphized argument clone with the supplied semantic descriptor.
-    ///
-    /// - Precondition: `value_type` describes `T`; runtime arguments match that descriptor.
-    pub(crate) fn push_typed_arg<T: 'static + Clone>(
-        &mut self,
-        index: usize,
-        value_type: ValueType,
-    ) {
-        debug_assert_eq!(value_type.type_id(), TypeId::of::<T>());
-        self.argument_reads.push((index, value_type.clone()));
-        self.segment.push_op0(move || {
-            let raw = CALL_RAW_PTR.with(Cell::get);
-            if !raw.is_null() {
-                // Safety: checked invocation installs live, exactly typed positional values
-                // for the duration of the body. Cloning does not consume their ownership.
-                return unsafe { (&*(*raw.add(index)).cast::<T>()).clone() };
-            }
-            CALL_DYN_PTR.with(|ptr_cell| {
-                CALL_DYN_LEN.with(|len_cell| {
-                    let raw_ptr = ptr_cell.get() as *const &dyn Any;
-                    let len = len_cell.get();
-                    assert!(!raw_ptr.is_null(), "push_arg op invoked outside call_dyn");
-                    debug_assert!(index < len, "push_arg index {index} out of range {len}");
-                    // Safety: raw_ptr is non-null (checked above) and valid for the duration
-                    // of the enclosing call_dyn call; DynCallGuard restores it on return.
-                    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
-                    slice[index]
-                        .downcast_ref::<T>()
-                        .expect("push_arg type mismatch at runtime")
-                        .clone()
-                })
-            })
-        });
-        let ambient = self.current_stack_offset();
-        self.stack_ids.push(StackInfo {
-            padding: align_index(value_type.align, ambient) != ambient,
-            value_type,
-        });
-    }
-
-    /// Emits a deep clone of a recursive array argument with statically registered leaf hooks.
-    ///
-    /// - Precondition: clone support was validated for `value_type`.
-    /// - Complexity: O(stack depth plus recursive array type depth) to capture descriptors;
-    ///   execution is O(total recursive element count), plus leaf clone costs.
-    fn push_array_argument(&mut self, index: usize, value_type: ValueType) {
-        self.argument_reads.push((index, value_type.clone()));
-        let element = value_type
-            .array_element()
-            .expect("array descriptor")
-            .clone();
-        let unwind = self.capture_unwind();
-        self.segment.raw0(move |stack| {
-            let result = (|| {
-                let raw = CALL_RAW_PTR.with(Cell::get);
-                if !raw.is_null() {
-                    // Safety: the checked invocation frame provides an exact array value.
-                    return Ok(unsafe {
-                        (&*(*raw.add(index)).cast::<DynamicArray>()).clone_as(&element)
-                    });
-                }
-                CALL_DYN_PTR.with(|ptr| {
-                    CALL_DYN_LEN.with(|len| {
-                        // Safety: the enclosing call_dyn owns the live Any slice.
-                        let inputs = unsafe {
-                            std::slice::from_raw_parts(ptr.get() as *const &dyn Any, len.get())
-                        };
-                        let array = inputs
-                            .get(index)
-                            .and_then(|input| input.downcast_ref::<DynamicArray>())
-                            .ok_or_else(|| anyhow!("array closure argument type mismatch"))?;
-                        ensure!(
-                            array.element_type().same_shape_and_layout(&element),
-                            "array closure argument element type mismatch"
-                        );
-                        Ok(unsafe { array.clone_as(&element) })
-                    })
-                })
-            })();
-            Self::unwind_on_err(&unwind, stack, result)
-        });
-        let ambient = self.current_stack_offset();
-        self.stack_ids.push(StackInfo {
-            padding: align_index(value_type.align, ambient) != ambient,
-            value_type,
-        });
-    }
-
-    /// Emits an op that clones `inputs[index]` (downcast to `&DynamicSequence`) onto the stack
-    /// as a live, tagged `DynTuple`, so ordinary CEL tuple indexing/operators work on a
-    /// tuple-typed input cell exactly as they would on an inline tuple literal. `associated`
-    /// describes the expected (declared) element types, recursively — a nested tuple element's
-    /// own elements describe its inner shape the same way, and are expanded back into a
-    /// nested on-stack tuple region (the inverse of
-    /// [`call_dyn_as_dynamic_sequence`](Self::call_dyn_as_dynamic_sequence)'s "nested tuple →
-    /// nested `DynamicSequence`" conversion). Offsets in `associated` are ignored and overwritten
-    /// internally, recursively, via [`layout_associated_recursive`] — callers only need to supply
-    /// each leaf element's own [`ValueType`] (see [`ValueType::leaf`]) or, for a nested tuple
-    /// element, a [`ValueType::tuple`] carrying its own recursively-built elements, whose
-    /// `size`/`align` are likewise recomputed here from that inner shape.
-    ///
-    /// - Precondition: every call to a `call_dyn`-family execution supplies an `inputs` slice
-    ///   where `inputs[index]` is a `DynamicSequence` whose own shape matches `associated`
-    ///   exactly (same arity and element `TypeId`s, recursively).
-    ///
-    /// - Complexity: O(total element count, including nested) to lay out the declared shape at
-    ///   parse time; the op itself is O(total element count, including nested) at execution time.
-    pub fn push_arg_as_dynamic_sequence_tuple(
-        &mut self,
-        index: usize,
-        associated: Vec<AssociatedType>,
-    ) {
-        // `ValueType::tuple` lays `associated` out through the same routine every other tuple
-        // goes through, recursively: a nested tuple element's *real* footprint is only known
-        // once its own elements have been laid out, so that happens first, bottom-up,
-        // overwriting the nested element's `size`/`align` before this level's own offsets (and
-        // total size) are computed from them. Skipping this step would let a nested tuple's
-        // declared placeholder `size` (however small) survive into this level's `total_size`,
-        // under-reserving the stack space the write below actually needs for the nested region —
-        // a buffer overrun, not just a wrong offset.
-        let value_type = ValueType::tuple(associated);
-        self.argument_reads.push((index, value_type.clone()));
-        let total_size = value_type.size;
-        let tuple_align = value_type.align;
-        // raw0_ (unlike raw0/push_op0) does not fold its own return-type alignment into the
-        // segment's `base_alignment`, and this op's write target has no return-type alignment to
-        // fold in anyway — the tuple's alignment is only known from `associated`. Without this,
-        // `base_alignment` could stay smaller than `tuple_align`, so the fresh `RawStack` a later
-        // `call_dyn` allocates would not actually be aligned as strictly as `tuple_align` requires
-        // (mirrors `join2`'s own explicit `update_base_alignment` call for the same reason).
-        self.segment.update_base_alignment(tuple_align);
-        let ambient_start = self.current_stack_offset();
-        let dest_base = align_index(tuple_align, ambient_start);
-
-        let write_shape = value_type
-            .tuple_elements()
-            .expect("ValueType::tuple produces a tuple")
-            .to_vec();
-        let raw_shape = value_type.clone();
-        self.segment.raw0_(move |stack| {
-            let raw = CALL_RAW_PTR.with(Cell::get);
-            if !raw.is_null() {
-                // Safety: invocation checked the recursive shape before installing the
-                // borrowed frame. The fresh destination has exactly that layout.
-                unsafe {
-                    stack.reserve_and_write(tuple_align, total_size, |dst| {
-                        raw_shape.clone_into(*raw.add(index), dst);
-                    });
-                }
-                return Ok(());
-            }
-            CALL_DYN_PTR.with(|ptr_cell| {
-                CALL_DYN_LEN.with(|len_cell| -> anyhow::Result<()> {
-                    let raw_ptr = ptr_cell.get() as *const &dyn Any;
-                    let len = len_cell.get();
-                    assert!(
-                        !raw_ptr.is_null(),
-                        "push_arg_as_dynamic_sequence_tuple invoked outside call_dyn"
-                    );
-                    debug_assert!(
-                        index < len,
-                        "push_arg_as_dynamic_sequence_tuple index {index} out of range {len}"
-                    );
-                    // Safety: raw_ptr is non-null (checked above) and valid for the duration of
-                    // the enclosing call_dyn call; DynCallGuard restores it on return.
-                    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
-                    let seq = slice[index]
-                        .downcast_ref::<DynamicSequence>()
-                        .expect("push_arg_as_dynamic_sequence_tuple: type mismatch at runtime");
-                    unsafe {
-                        stack.reserve_and_write(tuple_align, total_size, |dst| {
-                            write_dynamic_sequence_as_tuple(seq, &write_shape, dst);
-                        });
-                    }
-                    Ok(())
-                })
-            })
-        });
-
-        self.stack_ids.push(StackInfo {
-            padding: dest_base != ambient_start,
-            value_type,
-        });
-    }
-}
-
-/// Writes `seq`'s elements into `dst`, at the offsets in `dest_shape` (already computed via
-/// [`layout_associated_recursive`]), cloning each leaf and recursively expanding each
-/// nested-tuple element into its own nested on-stack tuple region.
-///
-/// # Safety
-/// `dst` must be valid for writes covering every offset + size in `dest_shape`; `dest_shape`'s
-/// element count and per-element shape (leaf vs. nested tuple, recursively) must match `seq`'s
-/// own shape exactly.
-///
-/// - Complexity: O(total element count, including nested).
-unsafe fn write_dynamic_sequence_as_tuple(
-    seq: &DynamicSequence,
-    dest_shape: &[AssociatedType],
-    dst: *mut u8,
-) {
-    debug_assert_eq!(
-        dest_shape.len(),
-        seq.shape().len(),
-        "write_dynamic_sequence_as_tuple: dest_shape and seq.shape() must have the same \
-         element count (precondition violated by caller)"
-    );
-    for (dest_elem, src_elem) in dest_shape.iter().zip(seq.shape()) {
-        if let Some(children) = dest_elem.value_type.tuple_elements() {
-            // Safety: `read_element_at`'s own contract requires `src_elem.offset` to be one of
-            // `seq`'s recorded element offsets (true by the zip above) and the callback not to
-            // retain the pointer past the call (true here — it's used only to build `nested`,
-            // itself a borrow, not retained beyond this statement). The nested `DynamicSequence`
-            // is *borrowed*, not moved, out of `seq`'s bytes — `write_dynamic_sequence_as_tuple`
-            // only ever clones through it, matching this function's own "clone, don't move"
-            // contract, so `seq` (and its nested value) remains fully live and droppable
-            // afterward. `dst.add(dest_elem.offset)` is in-bounds per this function's own safety
-            // precondition on `dst`/`dest_shape`, and `children`/the nested `seq`'s
-            // own shape match per this function's precondition (recursively).
-            unsafe {
-                seq.read_element_at(src_elem.offset, |src| {
-                    let nested = &*src.cast::<DynamicSequence>();
-                    write_dynamic_sequence_as_tuple(nested, children, dst.add(dest_elem.offset));
-                });
-            }
-        } else {
-            // Safety: same `read_element_at` contract as above; `src_elem.clone` clones (per
-            // `ElementCloner`'s own contract) rather than moving, so `seq`'s original bytes stay
-            // live; `dst.add(dest_elem.offset)` is in-bounds per this function's precondition.
-            unsafe {
-                seq.read_element_at(src_elem.offset, |src| {
-                    (src_elem.clone)(src, dst.add(dest_elem.offset));
-                });
-            }
-        }
-    }
-}
-
-impl DynSegment {
-    /// Executes the segment with `inputs` as call arguments and returns the final result.
-    ///
-    /// Ops registered via [`push_arg`](Self::push_arg) read their values from `inputs`
-    /// by index at execution time. Unlike [`call0`](Self::call0), this method does not
-    /// consume the type stack, so the same segment may be called repeatedly.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if:
-    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
-    /// - The stack does not contain exactly one value after expression compilation.
-    /// - The `TypeId` of `R` does not match the top-of-stack type.
-    /// - Any op returns an error during execution.
-    ///
-    /// - Complexity: O(n) in the number of ops.
-    pub fn call_dyn<R: 'static>(&mut self, inputs: &[&dyn Any]) -> anyhow::Result<R> {
-        ensure!(
-            self.argument_ids.is_empty(),
-            "call_dyn: segment requires {} pre-loaded argument(s); \
-             use call_dyn only with push_arg-based segments",
-            self.argument_ids.len()
-        );
-        ensure!(
-            self.stack_ids.len() == 1,
-            "call_dyn: expected exactly 1 value on stack, got {}",
-            self.stack_ids.len()
-        );
-        ensure!(
-            self.stack_ids[0].value_type.type_id == TypeId::of::<R>(),
-            "call_dyn: result type mismatch: expected {}, got {}",
-            std::any::type_name::<R>(),
-            self.stack_ids[0].value_type.type_name,
-        );
-        let _guard = DynCallGuard::install(inputs);
-        // Safety: type check above verified R matches stack top; bypasses pop_types
-        // so stack_ids is not consumed, enabling repeated calls.
-        unsafe { self.segment.call0() }
-    }
-
-    /// Executes the segment once and splits its tuple result into one boxed value
-    /// per element, using `extractors[i].1` to read element `i`, after checking that
-    /// `extractors[i].0` matches element `i`'s runtime type.
-    ///
-    /// Unlike [`tuple_index`](Self::tuple_index), which permanently specializes a
-    /// segment to extract one fixed element at parse time, this runs the segment
-    /// exactly once at call time and reads every element from that one evaluation.
-    ///
-    /// # Safety
-    /// Every `extractors[i].1` must satisfy [`BoxExtractor`]'s contract: it must clone
-    /// the value at the pointer it's given rather than take ownership of it (e.g. via
-    /// a move or `ptr::read`). This method checks that `extractors[i].0` matches
-    /// element `i`'s runtime `TypeId`, but it cannot check what the function pointer
-    /// actually does with the pointer — an extractor that moves instead of clones
-    /// causes a double-drop once this method drops the tuple's original bytes
-    /// afterward.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if:
-    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
-    /// - The stack does not contain exactly one value after expression compilation.
-    /// - That value is not a tuple, or its arity does not equal `extractors.len()`.
-    /// - Element `i`'s runtime `TypeId` does not equal `extractors[i].0`.
-    /// - Any op returns an error during execution.
-    ///
-    /// - Complexity: O(n) in the number of ops, plus O(extractors.len()) to split the result.
-    pub unsafe fn call_dyn_tuple(
-        &mut self,
-        inputs: &[&dyn Any],
-        extractors: &[(TypeId, BoxExtractor)],
-    ) -> anyhow::Result<Vec<Box<dyn Any>>> {
-        ensure!(
-            self.argument_ids.is_empty(),
-            "call_dyn_tuple: segment requires {} pre-loaded argument(s); \
-             use call_dyn_tuple only with push_arg-based segments",
-            self.argument_ids.len()
-        );
-        ensure!(
-            self.stack_ids.len() == 1,
-            "call_dyn_tuple: expected exactly 1 value on stack, got {}",
-            self.stack_ids.len()
-        );
-        let info = &self.stack_ids[0];
-        let elements = info.value_type.tuple_elements().ok_or_else(|| {
-            anyhow!(
-                "call_dyn_tuple: expected a tuple result, got {}",
-                info.value_type.type_name
-            )
-        })?;
-        ensure!(
-            elements.len() == extractors.len(),
-            "call_dyn_tuple: tuple has {} element(s) but {} extractor(s) were supplied",
-            elements.len(),
-            extractors.len(),
-        );
-        for (i, (elem, (expected_type_id, _))) in elements.iter().zip(extractors).enumerate() {
-            ensure!(
-                elem.value_type.type_id == *expected_type_id,
-                "call_dyn_tuple: element {i} type mismatch: expected type {:?}, got `{}`",
-                expected_type_id,
-                elem.value_type.type_name,
-            );
-        }
-
-        let tuple_size = info.value_type.size;
-        let tuple_padding = info.padding;
-        let associated = elements.to_vec();
-
-        let _guard = DynCallGuard::install(inputs);
-
-        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
-        // Safety: the checks above verified the segment builds exactly one tuple
-        // value with `extractors.len()` matching elements; call_dyn's own argument
-        // preconditions (no pre-loaded arguments) hold identically here.
-        unsafe {
-            self.segment.call0_stack(&mut stack)?;
-        }
-
-        let tuple_base = stack.len() - tuple_size;
-        let results: Vec<Box<dyn Any>> = associated
-            .iter()
-            .zip(extractors)
-            .map(|(elem, (_, extractor))| unsafe {
-                stack.read_at(tuple_base + elem.offset, |ptr| extractor(ptr))
-            })
-            .collect();
-
-        unsafe {
-            stack.drop_at(tuple_base, |ptr| drop_tuple(ptr, &associated));
-            stack.truncate_to(tuple_base, tuple_padding);
-        }
-
-        Ok(results)
-    }
-
-    /// Executes the segment once and reconstructs its tuple result directly as the concrete
-    /// tuple `T`, moving each element's bytes rather than splitting them into separate boxed
-    /// values (contrast with [`call_dyn_tuple`](Self::call_dyn_tuple)).
-    ///
-    /// # Errors
-    /// Returns `Err` if:
-    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
-    /// - The stack does not contain exactly one value after expression compilation.
-    /// - That value is not a tuple, or its element `TypeId` sequence doesn't match `T`'s.
-    /// - Any op returns an error during execution.
-    ///
-    /// - Complexity: O(n) in the number of ops, plus O(arity) to reconstruct `T`.
-    pub fn call_dyn_as_tuple<T: TupleSequence>(&mut self, inputs: &[&dyn Any]) -> anyhow::Result<T>
-    where
-        T::Output: SequenceList,
-    {
-        ensure!(
-            self.argument_ids.is_empty(),
-            "call_dyn_as_tuple: segment requires {} pre-loaded argument(s); \
-             use call_dyn_as_tuple only with push_arg-based segments",
-            self.argument_ids.len()
-        );
-        ensure!(
-            self.stack_ids.len() == 1,
-            "call_dyn_as_tuple: expected exactly 1 value on stack, got {}",
-            self.stack_ids.len()
-        );
-        let info = &self.stack_ids[0];
-        let elements = info.value_type.tuple_elements().ok_or_else(|| {
-            anyhow!(
-                "call_dyn_as_tuple: expected a tuple result, got {}",
-                info.value_type.type_name
-            )
-        })?;
-
-        let mut expected = Vec::new();
-        let mut max_align = 1usize;
-        T::Output::append_shape(&mut expected, 0, &mut max_align);
-        ensure!(
-            elements.len() == expected.len()
-                && elements
-                    .iter()
-                    .zip(&expected)
-                    .all(|(a, b)| a.value_type.type_id == b.type_id),
-            "call_dyn_as_tuple: tuple shape does not match `{}`",
-            std::any::type_name::<T>(),
-        );
-
-        let tuple_size = info.value_type.size;
-        let tuple_padding = info.padding;
-        let associated = elements.to_vec();
-
-        let _guard = DynCallGuard::install(inputs);
-
-        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
-        // Safety: the checks above verified the segment builds exactly one tuple value whose
-        // shape matches T; call_dyn's own argument preconditions (no pre-loaded arguments) hold
-        // identically here.
-        unsafe {
-            self.segment.call0_stack(&mut stack)?;
-        }
-
-        let tuple_base = stack.len() - tuple_size;
-        // `associated`'s offsets describe the tuple's actual, already-correct on-stack layout
-        // (computed by `make_tuple`) — using them, not a freshly-recomputed layout, is what
-        // makes this sound regardless of any layout convention `SequenceList` uses internally.
-        let offsets: Vec<usize> = associated.iter().map(|a| a.offset).collect();
-        let list: T::Output =
-            unsafe { stack.read_at(tuple_base, |base| T::Output::read_from(base, &offsets)) };
-        let result = T::from_list(list);
-
-        // `read_from` already moved every element's bytes out into `result` (per its own safety
-        // contract: the caller must not separately drop those bytes afterward), so the tuple's
-        // vacated bytes are dead space now, not a live value. This `truncate_to` is defensive
-        // bookkeeping that mirrors `call_dyn_tuple`'s cleanup shape above, not a double-drop
-        // guard: `stack` is a local `RawStack`, which has no `Drop` impl of its own that runs
-        // element destructors, so letting it go out of scope untruncated was never going to
-        // double-drop anything either way.
-        unsafe {
-            stack.truncate_to(tuple_base, tuple_padding);
-        }
-
-        Ok(result)
-    }
-
-    /// Executes the segment once and moves its tuple result into an owned `DynamicSequence`,
-    /// recursing into nested tuple elements as nested `DynamicSequence` leaves. `leaf` supplies
-    /// each non-tuple element's `Drop`/`Clone`/`PartialEq` function pointers by its runtime
-    /// `TypeId` (`AssociatedType` itself carries only a 2-argument tuple-recursing dropper, not
-    /// these three, and this method never calls that dropper — every leaf's bytes are moved, not
-    /// cloned, exactly like [`call_dyn_as_tuple`](Self::call_dyn_as_tuple)).
-    ///
-    /// # Errors
-    /// Returns `Err` if:
-    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
-    /// - The stack does not contain exactly one value after expression compilation.
-    /// - That value is not a tuple.
-    /// - `leaf` returns `None` for some non-tuple element's `TypeId`.
-    /// - Any op returns an error during execution.
-    ///
-    /// - Complexity: O(n) in the number of ops, plus O(total element count, including nested) to
-    ///   build the result.
-    pub fn call_dyn_as_dynamic_sequence(
-        &mut self,
-        inputs: &[&dyn Any],
-        leaf: &impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)>,
-    ) -> anyhow::Result<DynamicSequence> {
-        ensure!(
-            self.argument_ids.is_empty(),
-            "call_dyn_as_dynamic_sequence: segment requires {} pre-loaded argument(s); \
-             use call_dyn_as_dynamic_sequence only with push_arg-based segments",
-            self.argument_ids.len()
-        );
-        ensure!(
-            self.stack_ids.len() == 1,
-            "call_dyn_as_dynamic_sequence: expected exactly 1 value on stack, got {}",
-            self.stack_ids.len()
-        );
-        let info = &self.stack_ids[0];
-        let elements = info.value_type.tuple_elements().ok_or_else(|| {
-            anyhow!(
-                "call_dyn_as_dynamic_sequence: expected a tuple result, got {}",
-                info.value_type.type_name
-            )
-        })?;
-
-        // Validate every leaf's registration BEFORE executing the segment -- a purely static
-        // check over `associated`/`leaf`, independent of the segment's runtime values -- so a
-        // failure here means nothing has been executed, built, or moved yet, and there is
-        // nothing to clean up. This also rules out the double-free that a post-execution
-        // Err-cleanup path can't safely avoid: a nested tuple element can finish building (and
-        // moving its own interior bytes into a fresh DynamicSequence) before a later *sibling*
-        // element fails, at which point the original bytes of that already-moved nested element
-        // are no longer solely owned by the on-stack tuple -- dropping them again from here
-        // would double-drop them. Validating first means `build_dynamic_sequence` below is
-        // guaranteed to succeed, so that scenario can never arise.
-        validate_associated_shape(elements, leaf)?;
-
-        let tuple_size = info.value_type.size;
-        let tuple_padding = info.padding;
-        let associated = elements.to_vec();
-
-        let _guard = DynCallGuard::install(inputs);
-
-        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
-        // Safety: the checks above verified the segment builds exactly one tuple value;
-        // call_dyn's own argument preconditions (no pre-loaded arguments) hold identically here.
-        unsafe {
-            self.segment.call0_stack(&mut stack)?;
-        }
-
-        let tuple_base = stack.len() - tuple_size;
-        let result = unsafe {
-            stack.read_at(tuple_base, |base| {
-                build_dynamic_sequence(base, &associated, leaf)
-            })
-        }
-        .expect("validate_associated_shape already confirmed every leaf resolves");
-
-        // Every leaf at every nesting depth was moved (not cloned) into a fresh DynamicSequence
-        // above; the vacated bytes are dead space now, matching call_dyn_as_tuple's own cleanup.
-        unsafe {
-            stack.truncate_to(tuple_base, tuple_padding);
-        }
-
-        Ok(result)
-    }
-
-    /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
-    ///
-    /// Verifies that the top of the type stack matches the expected input type T
-    /// before adding the operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the argument type doesn't match the expected type.
-    pub fn op1<T, R, F>(&mut self, op: F) -> Result<()>
-    where
-        F: Fn(T) -> R + 'static,
-        T: 'static,
-        R: 'static,
-    {
-        let [p0] = self.get_last_n_padded::<1>();
-        self.pop_types::<(T, ())>()?;
-        self.segment.push_op1(op, p0);
-        self.push_type::<R>();
-        Ok(())
-    }
-
-    /// Pushes a binary operation that takes two arguments of types T and U and returns a value of type R.
-    ///
-    /// Verifies that the top two types on the type stack match the expected input types U and T
-    /// (in that order) before adding the operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the argument types do not match the expected types.
-    pub fn op2<T, U, R, F>(&mut self, op: F) -> Result<()>
-    where
-        F: Fn(T, U) -> R + 'static,
-        T: 'static,
-        U: 'static,
-        R: 'static,
-    {
-        let [p0, p1] = self.get_last_n_padded::<2>();
-        self.pop_types::<(T, (U, ()))>()?;
-        self.segment.push_op2(op, p0, p1);
-        self.push_type::<R>();
-        Ok(())
-    }
-
-    /// Pushes a ternary operation that takes three arguments of types T, U, and V and returns a value of type R.
-    ///
-    /// Verifies that the top three types on the type stack match the expected input types V, U, and T
-    /// (in that order) before adding the operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the argument types do not match the expected types.
-    pub fn op3<T, U, V, R, F>(&mut self, op: F) -> Result<()>
-    where
-        F: Fn(T, U, V) -> R + 'static,
-        T: 'static,
-        U: 'static,
-        V: 'static,
-        R: 'static,
-    {
-        let [p0, p1, p2] = self.get_last_n_padded::<3>();
-        self.pop_types::<(T, (U, (V, ())))>()?;
-        self.segment.push_op3(op, p0, p1, p2);
-        self.push_type::<R>();
-        Ok(())
-    }
-
-    /// Pushes a ternary operation that takes three arguments of types `T`, `U`, and `V` and
-    /// returns a `Result<R>`.
-    ///
-    /// If the operation succeeds, the result is pushed onto the stack. If it fails,
-    /// the stack is unwound to its previous state and the error is propagated.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the argument types do not match the expected types.
-    pub fn op3r<T, U, V, R, F>(&mut self, op: F) -> Result<()>
-    where
-        F: Fn(T, U, V) -> anyhow::Result<R> + 'static,
-        T: 'static,
-        U: 'static,
-        V: 'static,
-        R: 'static,
-    {
-        let [p0, p1, p2] = self.get_last_n_padded::<3>();
-        self.pop_types::<(T, (U, (V, ())))>()?;
-        let unwind = self.capture_unwind();
-        self.segment.raw3(
-            move |stack, t, u, v| Self::unwind_on_err(&unwind, stack, op(t, u, v)),
-            p0,
-            p1,
-            p2,
-        );
-        self.push_type::<R>();
-        Ok(())
-    }
-
-    /// Joins two conditional fragments into a conditional execution operation.
-    ///
-    /// This method creates a conditional operation that executes one of two fragments
-    /// based on a boolean value on the stack. Both fragments must have no arguments
-    /// and return the same type.
-    ///
-    /// # Arguments
-    ///
-    /// * `fragment_0` - The fragment to execute when the condition is true
-    /// * `fragment_1` - The fragment to execute when the condition is false
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// * Either fragment takes arguments
-    /// * Either fragment doesn't return exactly one value
-    /// * The fragments return different types
-    /// * The top of the stack is not a boolean value
-    /// * Either fragment's compiled origin differs from the stack offset after popping the condition
-    ///
-    /// - Complexity: O(stack depth plus recursive result type nodes and fragment argument reads).
-    pub fn join2(&mut self, mut fragment_0: DynSegment, fragment_1: DynSegment) -> Result<()> {
-        let origin = self.stack_offset_before_top(1)?;
-        ensure!(
-            fragment_0.base_stack_index == origin && fragment_1.base_stack_index == origin,
-            "fragment origins must match the stack offset after popping the condition"
-        );
-        let [p0] = self.get_last_n_padded::<1>();
-        self.pop_types::<(bool, ())>()?;
-
-        // fragment results must match and cannot take arguments.
-        ensure!(
-            fragment_0.argument_ids.is_empty(),
-            "fragment 0 cannot take arguments, but has {} argument(s)",
-            fragment_0.argument_ids.len()
-        );
-        ensure!(
-            fragment_1.argument_ids.is_empty(),
-            "fragment 1 cannot take arguments, but has {} argument(s)",
-            fragment_1.argument_ids.len()
-        );
-        ensure!(
-            fragment_0.stack_ids.len() == 1,
-            "fragment 0 must have exactly 1 result, but has {}",
-            fragment_0.stack_ids.len()
-        );
-        ensure!(
-            fragment_1.stack_ids.len() == 1,
-            "fragment 1 must have exactly 1 result, but has {}",
-            fragment_1.stack_ids.len()
-        );
-        ensure!(
-            fragment_0.stack_ids[0]
-                .value_type
-                .same_shape(&fragment_1.stack_ids[0].value_type),
-            "fragment result types must match"
-        );
-
-        let unwind = self.capture_unwind();
-        self.stack_ids.push(fragment_0.stack_ids.pop().unwrap());
-        self.argument_reads.extend(fragment_0.argument_reads);
-        self.argument_reads.extend(fragment_1.argument_reads);
-        self.segment.update_base_alignment(max(
-            fragment_0.segment.base_alignment(),
-            fragment_1.segment.base_alignment(),
-        ));
-
-        let raw_segment_0 = fragment_0.segment;
-        let raw_segment_1 = fragment_1.segment;
-
-        /*
-           - pass the stack to call0
-        */
-        self.segment.raw0_(move |stack| {
-            let conditional = unsafe { stack.pop(p0) };
-            let result = if conditional {
-                unsafe { raw_segment_0.call0_stack(stack) }
             } else {
-                unsafe { raw_segment_1.call0_stack(stack) }
-            };
-            Self::unwind_on_err(&unwind, stack, result)
-        });
-        Ok(())
+                first_reads[*index] = Some(ty);
+            }
+        }
+        let mut pointers = vec![std::ptr::null(); inputs.len()];
+        for (index, ty) in first_reads.into_iter().enumerate() {
+            if let Some(ty) = ty {
+                pointers[index] = HostValuePlan::new(ty.clone())?.validate_any(inputs[index])?;
+            }
+        }
+        unsafe { self.execute_raw(&pointers) }
     }
 
-    /// Executes all operations in the segment and returns the final result.
-    ///
-    /// # Returns
-    /// - `Ok(R)` if execution succeeds and the final value is of type R
+    /// Borrows the sole canonical result metadata.
     ///
     /// # Errors
-    ///
-    /// Returns an error if:
-    ///   - There are unexpected arguments (expected none)
-    ///   - The final type doesn't match R
-    ///   - There are remaining values on the stack after getting the result
-    ///
-    pub fn call0<R>(&mut self) -> Result<R>
-    where
-        R: 'static,
-    {
-        if !self.argument_ids.is_empty() {
-            return Err(anyhow::anyhow!(
-                "expected no arguments, but segment requires {} argument(s)",
-                self.argument_ids.len()
-            ));
-        }
-        self.pop_types::<(R, ())>()?;
-        if !self.stack_ids.is_empty() {
-            return Err(anyhow::anyhow!(
-                "{} value(s) left on execution stack",
-                self.stack_ids.len()
-            ));
-        }
-        unsafe { self.segment.call0() }
+    /// Rejects zero or multiple results.
+    pub(crate) fn result_type(&self) -> Result<&ValueType> {
+        ensure!(
+            self.stack_ids.len() == 1,
+            "body must produce exactly one value"
+        );
+        Ok(&self.stack_ids[0].value_type)
     }
 
-    /// Executes all operations in the segment with one argument and returns the final result.
+    /// Executes a checked no-argument host call without consuming type metadata.
     ///
     /// # Errors
+    /// Rejects a result mismatch, extra stack values, or required preloaded arguments.
+    /// - Complexity: Body-dependent evaluation plus boundary checks.
     ///
-    /// Returns an error if:
-    ///   - The number of arguments doesn't match (expected one)
-    ///   - The argument type doesn't match the expected type
-    ///   - The final type doesn't match R
-    ///   - There are remaining values on the stack after getting the result
+    /// # Examples
+    /// See [`Self::op0`].
+    pub fn call0<R: 'static>(&mut self) -> Result<R> {
+        self.call_dyn(&[])
+    }
+
+    /// Executes a preloaded single opaque-leaf argument and result.
     ///
-    pub fn call1<A, R>(&mut self, arg: A) -> Result<R>
-    where
-        A: 'static,
-        R: 'static,
-    {
-        if self.argument_ids.len() != 1 {
-            return Err(anyhow::anyhow!(
-                "expected 1 argument, but segment requires {} argument(s)",
-                self.argument_ids.len()
-            ));
-        }
-        if self.argument_ids[0] != TypeId::of::<A>() {
-            let got = self.argument_names.first().map(Cow::as_ref).unwrap_or("?");
-            return Err(anyhow::anyhow!(
-                "argument type mismatch: expected {}, got {}",
-                std::any::type_name::<A>(),
-                got
-            ));
-        }
-        self.pop_types::<(R, ())>()?;
-        if !self.stack_ids.is_empty() {
-            return Err(anyhow::anyhow!(
-                "{} value(s) left on execution stack",
-                self.stack_ids.len()
-            ));
-        }
+    /// # Errors
+    /// Rejects nonmatching argument/result identities, positional reads, or extra results.
+    /// - Complexity: Body-dependent.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<(i32,)>();
+    /// b.op1(|x: i32| x.to_string()).unwrap();
+    /// assert_eq!(b.call1::<i32, String>(7).unwrap(), "7");
+    /// ```
+    pub fn call1<A: 'static, R: 'static>(&mut self, arg: A) -> Result<R> {
+        ensure!(
+            self.argument_ids == [TypeId::of::<A>()],
+            "argument type mismatch"
+        );
+        ensure!(
+            self.argument_reads.is_empty(),
+            "preloaded call cannot use positional argument reads"
+        );
+        self.result_type()?
+            .validate_opaque_leaf(TypeId::of::<R>())?;
         unsafe { self.segment.call1(arg) }
     }
 
-    /// Reinterprets the tuple on top of the stack as a concrete `L`
-    /// (typically a `CStackList<...>` chain), replacing its `StackInfo` with
-    /// `L`'s. No bytes move: both sides already use the same
-    /// natural-alignment, declaration-order layout, so this is a relabel, not
-    /// a copy.
-    ///
-    /// - Precondition: `L` was assembled via sequential `.push()` calls in
-    ///   the same field order as the tuple (not via `into_c_stack_list()` on
-    ///   a same-order plain tuple, which reverses element order).
+    /// Prepares a complete borrowed argument list and owned result once.
     ///
     /// # Errors
-    /// Returns an error if the top of stack isn't a tuple, or its element
-    /// `TypeId`s (in order) don't match `L`'s.
-    pub fn pop_tuple_as<L: List + ToTypeIdList + 'static>(&mut self) -> Result<()> {
-        let info = self
-            .stack_ids
-            .last()
-            .ok_or_else(|| anyhow!("pop_tuple_as: stack is empty"))?;
-        let elements = info
-            .value_type
-            .tuple_elements()
-            .ok_or_else(|| anyhow!("pop_tuple_as: top of stack is not a tuple"))?;
-        let expected: Vec<TypeId> = L::to_stack_info_list()
-            .iter()
-            .map(|s| s.value_type.type_id)
-            .collect();
-        let actual: Vec<TypeId> = elements.iter().map(|a| a.value_type.type_id).collect();
-        ensure!(
-            expected == actual,
-            "pop_tuple_as: tuple element types do not match `{}`",
-            std::any::type_name::<L>()
-        );
-        debug_assert_eq!(info.value_type.size, size_of::<L>());
-        debug_assert_eq!(info.value_type.align, align_of::<L>());
+    /// Rejects dependent bodies, non-list arguments, mismatched reads/results,
+    /// missing borrowed clone capabilities, or inconsistent reads of one argument.
+    /// - Complexity: O(n) complete comparisons for n frame/descriptor nodes.
+    ///
+    /// # Examples
+    /// See the module example.
+    pub fn prepare<A: ValueRepr, R: ValueRepr>(self) -> Result<crate::PreparedSegment<A, R>> {
+        crate::PreparedSegment::new(self)
+    }
 
-        let info = self.stack_ids.last_mut().expect("checked above");
-        info.value_type = ValueType::leaf::<L>();
+    /// Pushes a known callable with complete metadata and shared body ownership.
+    ///
+    /// # Errors
+    /// Rejects an untyped/invalid closure or unavailable trusted binding.
+    /// - Complexity: O(n) signature/body validation for n descriptor nodes.
+    ///
+    /// # Examples
+    /// See [`Self::invoke_closure`].
+    pub fn push_closure(&mut self, closure: crate::DynClosure) -> Result<()> {
+        let signature = closure
+            .signature()
+            .ok_or_else(|| anyhow!("closure signature metadata is unavailable"))?;
+        closure.validate_body_signature()?;
+        let ty = ValueType::callable(signature.parameters.clone(), signature.result.clone());
+        // The lease is retained by the emitted constant, across every alias.
+        let closure = closure.bind_canonical()?;
+        self.segment.update_base_alignment(ty.align());
+        self.segment.raw0_(move |stack| {
+            stack.push(closure.clone());
+            Ok(())
+        });
+        self.replace(0, ty);
         Ok(())
     }
 
-    /// Relabels the concrete `L` value on top of the stack as a tuple,
-    /// exposing its elements for `.N` indexing and tuple-shaped op matching.
-    /// No bytes move — see [`pop_tuple_as`](Self::pop_tuple_as) for why this
-    /// is sound.
+    /// Invokes a canonical callable below its source-ordered evaluated arguments.
     ///
-    /// - Precondition: the top of the stack currently holds a value of type
-    ///   `L`, assembled via sequential `.push()` calls (not
-    ///   `into_c_stack_list()` on a same-order plain tuple).
-    pub fn push_tuple<L: List + ToTypeIdList + 'static>(&mut self) {
-        let info = self
-            .stack_ids
-            .last_mut()
-            .expect("push_tuple requires a value on the stack");
-        debug_assert_eq!(
-            info.value_type.type_id,
-            TypeId::of::<L>(),
-            "push_tuple: top of stack is not the expected type"
-        );
-        let elements = L::to_stack_info_list()
-            .into_iter()
-            .map(|elem_info| AssociatedType {
-                offset: 0,
-                value_type: elem_info.value_type,
-            })
-            .collect();
-        // `L`'s own size/align are the tuple's: `ValueType::tuple` lays the elements out with
-        // the same natural-alignment, declaration-order convention `L` itself uses.
-        let value_type = ValueType::tuple(elements);
-        debug_assert_eq!(value_type.size, size_of::<L>());
-        debug_assert_eq!(value_type.align, align_of::<L>());
-        info.value_type = value_type;
-    }
-}
-
-/// Recursively converts a described tuple region at `base` into an owned `DynamicSequence`,
-/// moving each leaf's bytes and recursing into nested tuple elements as nested `DynamicSequence`
-/// values.
-///
-/// # Safety
-/// `base` must point to a live value laid out exactly as described by `associated`.
-unsafe fn build_dynamic_sequence(
-    base: *const u8,
-    associated: &[AssociatedType],
-    leaf: &(
-         impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> + ?Sized
-     ),
-) -> anyhow::Result<DynamicSequence> {
-    enum Built {
-        Leaf,
-        Tuple(DynamicSequence),
-    }
-
-    // Pass 1: recursively build nested values and resolve each leaf's descriptor, computing
-    // this level's own destination shape/offsets as we go. All fallible work happens here,
-    // before any bytes are written.
-    let mut shape = Vec::with_capacity(associated.len());
-    let mut built: Vec<Built> = Vec::with_capacity(associated.len());
-    let mut max_align = 1usize;
-    let mut offset = 0usize;
-    for elem in associated {
-        let children = elem.value_type.tuple_elements();
-        let is_tuple = children.is_some();
-        let (size, align, drop, clone, eq, debug, value) = if let Some(children) = children {
-            let nested = unsafe { build_dynamic_sequence(base.add(elem.offset), children, leaf)? };
-            (
-                size_of::<DynamicSequence>(),
-                align_of::<DynamicSequence>(),
-                element_dropper_for::<DynamicSequence>(),
-                element_cloner_for::<DynamicSequence>(),
-                element_eq_for::<DynamicSequence>(),
-                element_debug_for::<DynamicSequence>(),
-                Built::Tuple(nested),
-            )
-        } else {
-            let (drop, clone, eq, debug) = leaf(elem.value_type.type_id).ok_or_else(|| {
-                anyhow!(
-                    "call_dyn_as_dynamic_sequence: no Clone/PartialEq registered for element \
-                     type `{}`",
-                    elem.value_type.type_name
-                )
-            })?;
-            (
-                elem.value_type.size,
-                elem.value_type.align,
-                drop,
-                clone,
-                eq,
-                debug,
-                Built::Leaf,
-            )
-        };
-        let aligned = align_index(align, offset);
-        max_align = max_align.max(align);
-        shape.push(SequenceElement {
-            type_id: if is_tuple {
-                TypeId::of::<DynamicSequence>()
-            } else {
-                elem.value_type.type_id
-            },
-            type_name: if is_tuple {
-                Cow::Borrowed(std::any::type_name::<DynamicSequence>())
-            } else {
-                elem.value_type.type_name.clone()
-            },
-            offset: aligned,
-            size,
-            align,
-            drop,
-            clone,
-            eq,
-            debug,
-        });
-        built.push(value);
-        offset = aligned + size;
-    }
-    let total_size = align_index(max_align, offset);
-
-    // Pass 2: write bytes. Infallible -- everything fallible already happened in pass 1.
-    let mut buffer = RawStack::with_base_alignment(max_align);
-    unsafe {
-        buffer.reserve_and_write(max_align, total_size, |dst| {
-            for ((elem, src_elem), value) in shape.iter().zip(associated).zip(built) {
-                match value {
-                    Built::Tuple(nested) => {
-                        std::ptr::write(dst.add(elem.offset).cast::<DynamicSequence>(), nested);
-                    }
-                    Built::Leaf => {
-                        std::ptr::copy_nonoverlapping(
-                            base.add(src_elem.offset),
-                            dst.add(elem.offset),
-                            src_elem.value_type.size,
-                        );
-                    }
-                }
-            }
-        });
-    }
-
-    Ok(unsafe { DynamicSequence::from_raw_parts(buffer, shape, max_align) })
-}
-
-/// Recursively confirms every non-tuple element in `associated` has a leaf descriptor
-/// available from `leaf`, without moving or reading any bytes — a pure validation pass so a
-/// caller can call this *before* executing a segment, guaranteeing that
-/// `build_dynamic_sequence` (called afterward, on the same `associated`/`leaf`) cannot fail.
-///
-/// # Errors
-/// Returns `Err` naming the first element (at any nesting depth) whose `TypeId` `leaf` doesn't
-/// recognize.
-fn validate_associated_shape(
-    associated: &[AssociatedType],
-    leaf: &(
-         impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> + ?Sized
-     ),
-) -> anyhow::Result<()> {
-    for elem in associated {
-        if let Some(children) = elem.value_type.tuple_elements() {
-            validate_associated_shape(children, leaf)?;
-        } else {
-            leaf(elem.value_type.type_id).ok_or_else(|| {
-                anyhow!(
-                    "no Clone/PartialEq registered for element type `{}`",
-                    elem.value_type.type_name
-                )
-            })?;
-        }
-    }
-    Ok(())
-}
-
-/// One N>1-output slot's extraction, for [`DynSegment::call_dyn_tuple_mixed`]: either a scalar
-/// leaf (the existing [`BoxExtractor`] path, identical to [`call_dyn_tuple`](DynSegment::call_dyn_tuple)),
-/// or a nested tuple, converted to a boxed `DynamicSequence` via the same recursive machinery
-/// [`call_dyn_as_dynamic_sequence`](DynSegment::call_dyn_as_dynamic_sequence) uses.
-#[allow(clippy::type_complexity)]
-pub enum DynExtractor {
-    /// A scalar element: `extractors[i].0` must match that element's runtime `TypeId`;
-    /// `extractors[i].1` reads and clones it (see [`BoxExtractor`]'s own safety contract).
-    Scalar(TypeId, BoxExtractor),
-    /// A nested-tuple element: the closure supplies each of *its own* leaves'
-    /// `Drop`/`Clone`/`PartialEq`/`Debug` function pointers by `TypeId`, exactly like
-    /// `call_dyn_as_dynamic_sequence`'s `leaf` parameter.
-    Tuple(Box<dyn Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)>>),
-}
-
-impl DynSegment {
-    /// Executes the segment once and splits its tuple result into one boxed value per element —
-    /// a scalar `Box<T>` for a `DynExtractor::Scalar` slot (identical to
-    /// [`call_dyn_tuple`](Self::call_dyn_tuple)'s own behavior for an all-scalar split), or a
-    /// boxed `DynamicSequence` for a `DynExtractor::Tuple` slot, built from just that one
-    /// element's own nested region (not the whole top-of-stack value).
-    ///
-    /// # Safety
-    /// Every `DynExtractor::Scalar`'s `BoxExtractor` must satisfy the same contract
-    /// [`call_dyn_tuple`](Self::call_dyn_tuple) requires: clone rather than move.
+    /// Moving the bound callee into its concrete carrier does not allocate.
+    /// Argument and result transfers retain their erased ownership.
     ///
     /// # Errors
-    /// Returns `Err` if:
-    /// - The segment requires pre-loaded arguments.
-    /// - The stack does not contain exactly one value after expression compilation.
-    /// - That value is not a tuple, or its arity does not equal `extractors.len()`.
-    /// - Some element's runtime `TypeId` doesn't match its `DynExtractor::Scalar` type, or (for
-    ///   `DynExtractor::Tuple`) the element isn't itself a tuple, or one of *its* leaves has no
-    ///   registered descriptor.
-    /// - Any op returns an error during execution.
+    /// Rejects unavailable/mismatched callable metadata or insufficient operands.
+    /// Execution propagates body errors, retaining their original context.
+    /// - Complexity: O(n) setup; body execution plus argument/result raw moves.
     ///
-    /// - Complexity: O(n) in the number of ops, plus O(total element count, including nested) to
-    ///   build the result.
-    pub unsafe fn call_dyn_tuple_mixed(
-        &mut self,
-        inputs: &[&dyn Any],
-        extractors: &[DynExtractor],
-    ) -> anyhow::Result<Vec<Box<dyn Any>>> {
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{DynClosure, DynSegment};
+    /// let mut body = DynSegment::new::<()>(); body.just(7i32);
+    /// let closure = DynClosure::typed(vec![], body).unwrap();
+    /// let mut b = DynSegment::new::<()>();
+    /// b.push_closure(closure).unwrap(); b.invoke_closure(0).unwrap();
+    /// assert_eq!(b.call0::<i32>().unwrap(), 7);
+    /// ```
+    pub fn invoke_closure(&mut self, arity: usize) -> Result<()> {
         ensure!(
             self.argument_ids.is_empty(),
-            "call_dyn_tuple_mixed: segment requires {} pre-loaded argument(s); \
-             use call_dyn_tuple_mixed only with push_arg-based segments",
-            self.argument_ids.len()
+            "closure invocation requires a positional body"
         );
+        let first = self
+            .stack_ids
+            .len()
+            .checked_sub(arity + 1)
+            .ok_or_else(|| anyhow!("missing callee"))?;
+        let callee_type = self.stack_ids[first].value_type.clone();
+        let ValueKind::Callable { parameters, result } = callee_type.kind() else {
+            anyhow::bail!("callable signature required")
+        };
+        ensure!(parameters.len() == arity, "closure arity mismatch");
         ensure!(
-            self.stack_ids.len() == 1,
-            "call_dyn_tuple_mixed: expected exactly 1 value on stack, got {}",
-            self.stack_ids.len()
+            parameters
+                .iter()
+                .zip(&self.stack_ids[first + 1..])
+                .all(|(expected, actual)| expected.same_shape(&actual.value_type)),
+            "closure argument type mismatch"
         );
-        let info = &self.stack_ids[0];
-        let elements = info.value_type.tuple_elements().ok_or_else(|| {
-            anyhow!(
-                "call_dyn_tuple_mixed: expected a tuple result, got {}",
-                info.value_type.type_name
-            )
-        })?;
-        ensure!(
-            elements.len() == extractors.len(),
-            "call_dyn_tuple_mixed: tuple has {} element(s) but {} extractor(s) were supplied",
-            elements.len(),
-            extractors.len(),
-        );
-        // Validate every element BEFORE executing the segment: a Scalar slot's type_id must
-        // match, and a Tuple slot must itself be a nested tuple whose own leaves (at every
-        // nesting depth) all resolve via its own `leaf` closure. This is a purely static check
-        // over the result's elements/`extractors`, independent of the segment's runtime values,
-        // so a failure here means nothing has been executed, built, or moved yet, and there is
-        // nothing to clean up. It also rules out a double-free that a post-execution
-        // Err-cleanup path can't safely avoid: a Tuple slot's own nested build can partially
-        // succeed (moving some of its interior bytes into a fresh DynamicSequence) before a
-        // later *sibling* slot fails, at which point those already-moved bytes are no longer
-        // solely owned by the on-stack tuple -- dropping them again from here would double-drop
-        // them. Validating first means every `build_dynamic_sequence` call below is guaranteed
-        // to succeed, so that scenario can never arise.
-        for (i, (elem, extractor)) in elements.iter().zip(extractors).enumerate() {
-            match extractor {
-                DynExtractor::Scalar(expected_type_id, _) => {
-                    ensure!(
-                        elem.value_type.type_id == *expected_type_id,
-                        "call_dyn_tuple_mixed: element {i} type mismatch: expected type {:?}, \
-                         got `{}`",
-                        expected_type_id,
-                        elem.value_type.type_name,
-                    );
+        let result_type = result.as_ref().clone();
+        let ambient = self.offset_after(first);
+        let argument_type = ValueType::tuple(
+            parameters
+                .iter()
+                .map(|value_type| AssociatedType {
+                    offset: 0,
+                    value_type: value_type.clone(),
+                })
+                .collect(),
+        )?;
+        let arguments_start = self.offset_after(first + 1);
+        let frame = StackFramePlan::new(arguments_start, argument_type.clone())?;
+        let callee = ResultPlan::new(ambient, callee_type.clone())?;
+        let destination = ResultPlan::new(ambient, result_type.clone())?;
+        self.segment.update_base_alignment(result_type.align());
+        let output_type = result_type.clone();
+        self.segment.raw0_(move |stack| {
+            // Move every operand to independent guarded owners before user code.
+            let arguments = unsafe { frame.take(stack) };
+            // SAFETY: Every validated callable descriptor uses the DynClosure carrier.
+            let closure = unsafe { callee.take_typed::<crate::DynClosure>(stack) };
+            // Compiler-produced carriers retain a freeze lease; typed native
+            // and prepared payloads have no mutable compiler-facing escape.
+            let allocation = crate::owned_value::Allocation::new(output_type.layout());
+            let evaluated = unsafe {
+                closure.call_frame_trusted(arguments.as_ptr(), allocation.pointer.as_ptr())
+            };
+            match evaluated {
+                Ok(()) => {
+                    let mut result = unsafe {
+                        crate::OwnedValue::from_allocation(allocation, output_type.clone())
+                    };
+                    drop(arguments);
+                    drop(closure);
+                    unsafe { destination.push(stack, &mut result) };
+                    Ok(())
                 }
-                DynExtractor::Tuple(leaf) => {
-                    let children = elem.value_type.tuple_elements().ok_or_else(|| {
-                        anyhow!(
-                            "call_dyn_tuple_mixed: element {i}: expected a nested tuple, got `{}`",
-                            elem.value_type.type_name
-                        )
-                    })?;
-                    validate_associated_shape(children, leaf.as_ref())?;
+                Err(error) => {
+                    drop(arguments);
+                    drop(closure);
+                    Err(error)
                 }
             }
-        }
+        });
+        self.replace(arity + 1, result_type);
+        Ok(())
+    }
 
-        let tuple_size = info.value_type.size;
-        let tuple_padding = info.padding;
-        let associated = elements.to_vec();
-
-        let _guard = DynCallGuard::install(inputs);
-
-        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
-        // Safety: the checks above verified the segment builds exactly one tuple value with
-        // `extractors.len()` matching elements; call_dyn's own argument preconditions (no
-        // pre-loaded arguments) hold identically here.
-        unsafe {
-            self.segment.call0_stack(&mut stack)?;
-        }
-
-        let tuple_base = stack.len() - tuple_size;
-        let results: Vec<Box<dyn Any>> = associated
-            .iter()
-            .zip(extractors)
-            .map(|(elem, extractor)| match extractor {
-                DynExtractor::Scalar(_, boxextractor) => unsafe {
-                    stack.read_at(tuple_base + elem.offset, |ptr| boxextractor(ptr))
-                },
-                DynExtractor::Tuple(leaf) => {
-                    let children = elem
-                        .value_type
-                        .tuple_elements()
-                        .expect("validated above: a Tuple slot's element is a nested tuple");
-                    let nested = unsafe {
-                        stack.read_at(tuple_base + elem.offset, |base| {
-                            build_dynamic_sequence(base, children, leaf.as_ref())
-                        })
-                    }
-                    .expect("validated above: every leaf in this region is registered");
-                    Box::new(nested) as Box<dyn Any>
-                }
-            })
-            .collect();
-
-        // Every DynExtractor::Scalar element's bytes were only cloned above (BoxExtractor's own
-        // contract, matching call_dyn_tuple) -- those must still be dropped normally. Every
-        // DynExtractor::Tuple element's bytes were *moved* into the nested DynamicSequence above
-        // (build_dynamic_sequence's contract, matching call_dyn_as_dynamic_sequence) -- running
-        // that element's own dropper again would double-drop/use-after-move, so its dropper is
-        // replaced with a no-op for this cleanup pass only (mirroring how
-        // DynamicSequence::try_into_tuple clears its own `shape` to make its `Drop` a no-op after
-        // moving every element out).
-        let drop_associated: Vec<AssociatedType> = associated
-            .iter()
-            .zip(extractors)
-            .map(|(elem, extractor)| match extractor {
-                DynExtractor::Scalar(..) => elem.clone(),
-                DynExtractor::Tuple(_) => AssociatedType {
-                    offset: elem.offset,
-                    value_type: elem.value_type.with_dropper_suppressed(),
-                },
-            })
-            .collect();
-        unsafe {
-            stack.drop_at(tuple_base, |ptr| drop_tuple(ptr, &drop_associated));
-            stack.truncate_to(tuple_base, tuple_padding);
-        }
-
-        Ok(results)
+    /// Joins conditional fragments with identical complete results and origins.
+    ///
+    /// # Errors
+    /// Rejects a nonboolean condition, wrong fragment origins, or different results.
+    /// - Complexity: O(n) setup for n frame/descriptor nodes; executes one branch.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = cel_runtime::DynSegment::new::<()>(); b.just(true);
+    /// let mut yes = b.new_fragment(); yes.just(1i32);
+    /// let mut no = b.new_fragment(); no.just(2i32);
+    /// b.join2(yes, no).unwrap(); assert_eq!(b.call0::<i32>().unwrap(), 1);
+    /// ```
+    pub fn join2(&mut self, yes: Self, no: Self) -> Result<()> {
+        let origin = self.stack_offset_before_top(1)?;
+        self.stack_ids
+            .last()
+            .unwrap()
+            .value_type
+            .validate_opaque_leaf(TypeId::of::<bool>())?;
+        ensure!(
+            yes.base_stack_index == origin && no.base_stack_index == origin,
+            "fragment origins must match"
+        );
+        ensure!(
+            yes.argument_ids.is_empty() && no.argument_ids.is_empty(),
+            "fragments cannot take preloaded arguments"
+        );
+        let result = yes.result_type()?.clone();
+        ensure!(
+            result.same_shape(no.result_type()?),
+            "fragment result types must match"
+        );
+        let condition = ResultPlan::new(origin, ValueType::leaf::<bool>())?;
+        self.segment.update_base_alignment(
+            yes.segment
+                .base_alignment()
+                .max(no.segment.base_alignment()),
+        );
+        self.argument_reads.extend(yes.argument_reads);
+        self.argument_reads.extend(no.argument_reads);
+        self.segment.raw0_(move |stack| {
+            // SAFETY: Construction validates bool; the bound plan restores the
+            // exact ambient origin before the cleanup guard is armed.
+            let value = unsafe { condition.take_typed::<bool>(stack) };
+            let branch = if value { &yes.segment } else { &no.segment };
+            unsafe { branch.call0_stack(stack) }
+        });
+        self.replace(1, result);
+        Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod performance_tests {
     use super::*;
-    use std::any::Any;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::{Array, ArrayOf, Cons, IntoCStackList, Nil};
+    use std::cell::RefCell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::rc::Rc;
 
-    struct DropCounter(Arc<AtomicUsize>);
-
-    impl Drop for DropCounter {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
+    /// Records only live runtime owners, not borrowed sources or registration values.
+    #[repr(align(128))]
+    struct CloneDrop {
+        name: &'static str,
+        events: Rc<RefCell<Vec<&'static str>>>,
+        fail: Rc<Cell<bool>>,
+        owned: bool,
     }
 
-    impl Clone for DropCounter {
+    impl Clone for CloneDrop {
+        /// Creates an aligned owner unless this source requests a clone panic.
         fn clone(&self) -> Self {
-            DropCounter(self.0.clone())
-        }
-    }
-
-    /// Returns a tuple value type whose elements are the given value types, laid out in order.
-    fn tuple_of(elements: Vec<ValueType>) -> ValueType {
-        ValueType::tuple(
-            elements
-                .into_iter()
-                .map(|value_type| AssociatedType {
-                    offset: 0,
-                    value_type,
-                })
-                .collect(),
-        )
-    }
-
-    /// Returns a tuple element of type `T`, at a placeholder offset.
-    fn leaf_element<T: 'static>() -> AssociatedType {
-        AssociatedType {
-            offset: 0,
-            value_type: ValueType::leaf::<T>(),
-        }
-    }
-
-    #[test]
-    fn value_shapes_distinguish_nested_array_element_types() {
-        let i32_array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-        let f64_array = ValueType::array(ArrayElementType::leaf::<f64>().unwrap());
-        assert!(!i32_array.same_shape(&f64_array));
-    }
-
-    #[test]
-    fn value_shapes_distinguish_array_nesting_depth() {
-        let flat = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-        let nested = ValueType::array(ArrayElementType::array_of(
-            ArrayElementType::leaf::<i32>().unwrap(),
-        ));
-        assert!(!flat.same_shape(&nested));
-        assert!(flat.same_shape(&ValueType::array(ArrayElementType::leaf::<i32>().unwrap())));
-    }
-
-    #[test]
-    fn value_shapes_distinguish_leaves_tuples_and_arrays() {
-        let leaf = ValueType::leaf::<i32>();
-        let tuple = tuple_of(vec![ValueType::leaf::<i32>()]);
-        let array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-        assert!(!leaf.same_shape(&tuple));
-        assert!(!tuple.same_shape(&array));
-        assert!(!array.same_shape(&leaf));
-        assert!(leaf.same_shape(&ValueType::leaf::<i32>()));
-        assert!(!leaf.same_shape(&ValueType::leaf::<f64>()));
-    }
-
-    #[test]
-    fn nested_tuple_shapes_compare_by_every_nested_leaf() {
-        let shape = || {
-            tuple_of(vec![
-                ValueType::leaf::<i32>(),
-                tuple_of(vec![ValueType::leaf::<u8>(), ValueType::leaf::<f64>()]),
-            ])
-        };
-        assert!(shape().same_shape(&shape()));
-
-        let changed_leaf = tuple_of(vec![
-            ValueType::leaf::<i32>(),
-            tuple_of(vec![ValueType::leaf::<u8>(), ValueType::leaf::<i64>()]),
-        ]);
-        assert!(!shape().same_shape(&changed_leaf));
-
-        let changed_arity = tuple_of(vec![
-            ValueType::leaf::<i32>(),
-            tuple_of(vec![ValueType::leaf::<u8>()]),
-        ]);
-        assert!(!shape().same_shape(&changed_arity));
-    }
-
-    #[test]
-    fn tuple_shapes_distinguish_nested_array_element_types() {
-        let with_i32 = tuple_of(vec![
-            ValueType::leaf::<i32>(),
-            ValueType::array(ArrayElementType::leaf::<i32>().unwrap()),
-        ]);
-        let with_f64 = tuple_of(vec![
-            ValueType::leaf::<i32>(),
-            ValueType::array(ArrayElementType::leaf::<f64>().unwrap()),
-        ]);
-        assert!(!with_i32.same_shape(&with_f64));
-    }
-
-    #[test]
-    fn array_value_types_are_named_for_their_element_type() {
-        let flat = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-        assert_eq!(flat.type_name(), "[i32]");
-
-        let nested = ValueType::array(ArrayElementType::array_of(
-            ArrayElementType::leaf::<i32>().unwrap(),
-        ));
-        assert_eq!(nested.type_name(), "[[i32]]");
-    }
-
-    #[test]
-    fn array_value_types_carry_the_dynamic_array_layout() {
-        let array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-        assert_eq!(array.type_id(), TypeId::of::<DynamicArray>());
-        assert_eq!(array.size(), size_of::<DynamicArray>());
-        assert_eq!(array.align(), align_of::<DynamicArray>());
-        assert!(matches!(array.kind(), ValueKind::Array(_)));
-    }
-
-    #[test]
-    #[should_panic(expected = "a leaf value type must not claim an aggregate marker TypeId")]
-    fn leaf_rejects_the_array_marker_type() {
-        let _ = ValueType::leaf::<DynamicArray>();
-    }
-
-    #[test]
-    #[should_panic(expected = "a leaf value type must not claim an aggregate marker TypeId")]
-    fn leaf_from_parts_rejects_the_tuple_marker_type() {
-        let _ = ValueType::leaf_from_parts(
-            TypeId::of::<DynTuple>(),
-            Cow::Borrowed("DynTuple"),
-            0,
-            1,
-            raw_dropper_for::<DynTuple>(),
-        );
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "align must be a power of two")]
-    fn leaf_from_parts_rejects_a_non_power_of_two_alignment() {
-        let _ = ValueType::leaf_from_parts(
-            TypeId::of::<i32>(),
-            Cow::Borrowed("i32"),
-            6,
-            3,
-            raw_dropper_for::<i32>(),
-        );
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "size must be a multiple of align")]
-    fn leaf_from_parts_rejects_a_size_that_is_not_a_multiple_of_align() {
-        let _ = ValueType::leaf_from_parts(
-            TypeId::of::<i32>(),
-            Cow::Borrowed("i32"),
-            3,
-            4,
-            raw_dropper_for::<i32>(),
-        );
-    }
-
-    /// The aggregate-marker check is reachable from the public op API — an op returning a
-    /// `DynamicArray` would otherwise register an array value as an opaque leaf — so it must
-    /// fire in every build profile, not only where `debug_assert!` is compiled in.
-    #[test]
-    #[should_panic(expected = "a leaf value type must not claim an aggregate marker TypeId")]
-    fn op0_rejects_an_array_typed_result() {
-        let mut segment = DynSegment::new::<()>();
-        segment.op0(|| DynamicArray::try_from_vec(vec![1i32]).expect("i32 is a valid element"));
-    }
-
-    #[test]
-    fn drop_on_error() -> Result<(), anyhow::Error> {
-        let mut segment = DynSegment::new::<()>();
-
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let tracker = DropCounter(drop_count.clone());
-
-        segment.op0(move || tracker.clone());
-        segment.op0r(|| -> Result<u32> { Err(anyhow::anyhow!("error")) });
-        segment.op2(|_: DropCounter, _: u32| 42u32)?;
-
-        assert_eq!(drop_count.load(Ordering::SeqCst), 0); // Nothing dropped yet
-        let result = segment.call0::<u32>();
-        assert!(matches!(result, Err(e) if e.to_string() == "error"));
-        assert_eq!(drop_count.load(Ordering::SeqCst), 1); // The DropCounter from op0 was dropped
-
-        Ok(())
-    }
-
-    #[test]
-    fn op1r_success() -> Result<(), anyhow::Error> {
-        let mut segment = DynSegment::new::<()>();
-        segment.op0(|| 21u32);
-        segment.op1r(|n: u32| Ok::<_, anyhow::Error>(n * 2))?;
-        let result: u32 = segment.call0()?;
-        assert_eq!(result, 42);
-        Ok(())
-    }
-
-    #[test]
-    fn op1r_error_unwinds() -> Result<(), anyhow::Error> {
-        let mut segment = DynSegment::new::<()>();
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let tracker = DropCounter(drop_count.clone());
-        segment.op0(move || tracker.clone());
-        segment.op0(|| 7u32);
-        segment.op1r(|_n: u32| -> Result<DropCounter> { Err(anyhow::anyhow!("op1r error")) })?;
-        segment.op1(|_: DropCounter| 0u32)?;
-        segment.op2(|_: DropCounter, x: u32| x)?; // consume to single u32 for call0
-        let result = segment.call0::<u32>();
-        assert!(result.is_err(), "expected Err, got {:?}", result);
-        assert_eq!(result.unwrap_err().to_string(), "op1r error");
-        // DropCounter (under the u32) was unwound when op1r failed.
-        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn op2r_success() -> Result<(), anyhow::Error> {
-        let mut segment = DynSegment::new::<()>();
-        segment.op0(|| 10u32);
-        segment.op0(|| 32u32);
-        segment.op2r(|a: u32, b: u32| Ok::<_, anyhow::Error>(a + b))?;
-        let result: u32 = segment.call0()?;
-        assert_eq!(result, 42);
-        Ok(())
-    }
-
-    #[test]
-    fn op2r_error_unwinds() -> Result<(), anyhow::Error> {
-        let mut segment = DynSegment::new::<()>();
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let tracker = DropCounter(drop_count.clone());
-        segment.op0(move || tracker.clone());
-        segment.op0(|| 7u32);
-        segment.op0(|| 8u32);
-        segment.op2r(|_a: u32, _b: u32| -> Result<DropCounter> {
-            Err(anyhow::anyhow!("op2r error"))
-        })?;
-        segment.op1(|_: DropCounter| 0u32)?;
-        segment.op2(|_: DropCounter, x: u32| x)?; // consume to single u32 for call0
-        let result = segment.call0::<u32>();
-        assert!(result.is_err(), "expected Err, got {:?}", result);
-        assert_eq!(result.unwrap_err().to_string(), "op2r error");
-        // DropCounter (under the two u32s) was unwound when op2r failed.
-        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn op3r_success() -> Result<(), anyhow::Error> {
-        let mut segment = DynSegment::new::<()>();
-        segment.op0(|| 10u32);
-        segment.op0(|| 20u32);
-        segment.op0(|| 12u32);
-        segment.op3r(|a: u32, b: u32, c: u32| Ok::<_, anyhow::Error>(a + b + c))?;
-        let result: u32 = segment.call0()?;
-        assert_eq!(result, 42);
-        Ok(())
-    }
-
-    #[test]
-    fn op3r_error_unwinds() -> Result<(), anyhow::Error> {
-        let mut segment = DynSegment::new::<()>();
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let tracker = DropCounter(drop_count.clone());
-        segment.op0(move || tracker.clone());
-        segment.op0(|| 7u32);
-        segment.op0(|| 8u32);
-        segment.op0(|| 9u32);
-        segment.op3r(|_a: u32, _b: u32, _c: u32| -> Result<DropCounter> {
-            Err(anyhow::anyhow!("op3r error"))
-        })?;
-        segment.op1(|_: DropCounter| 0u32)?;
-        segment.op2(|_: DropCounter, x: u32| x)?; // consume to single u32 for call0
-        let result = segment.call0::<u32>();
-        assert!(result.is_err(), "expected Err, got {:?}", result);
-        assert_eq!(result.unwrap_err().to_string(), "op3r error");
-        // DropCounter (under the three u32s) was unwound when op3r failed.
-        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn segment_operations() -> Result<(), anyhow::Error> {
-        let mut operations = DynSegment::new::<()>();
-
-        operations.op0(|| -> u32 { 30 });
-        operations.op0(|| -> u32 { 12 });
-        operations.op2(|x: u32, y: u32| -> u32 { x + y })?;
-        operations.op0(|| -> u32 { 100 });
-        operations.op0(|| -> u32 { 10 });
-        operations.op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z })?;
-        operations.op1(|x: u32| -> String { format!("result: {}", x) })?;
-
-        let final_result: String = operations.call0()?;
-        assert_eq!(final_result, "result: 132");
-
-        Ok(())
-    }
-
-    #[test]
-    fn segment_with_just() -> Result<(), anyhow::Error> {
-        let mut operations = DynSegment::new::<()>();
-        operations.just(42u32);
-        let result: u32 = operations.call0()?;
-        assert_eq!(result, 42);
-        operations.just("hello".to_string());
-        let result: String = operations.call0()?;
-        assert_eq!(result, "hello");
-        Ok(())
-    }
-    #[test]
-    fn segment_with_argument() -> Result<(), anyhow::Error> {
-        let mut operations = DynSegment::new::<(u32,)>();
-
-        operations.op0(|| -> u32 { 12 });
-        operations.op2(|x: u32, y: u32| -> u32 { x + y })?;
-        operations.op0(|| -> u32 { 100 });
-        operations.op0(|| -> u32 { 10 });
-        operations.op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z })?;
-        operations.op1(|x: u32| -> String { format!("result: {}", x) })?;
-
-        let final_result: String = operations.call1(30u32)?;
-        assert_eq!(final_result, "result: 132");
-
-        Ok(())
-    }
-
-    #[test]
-    fn example_conditional_expression() -> Result<(), anyhow::Error> {
-        let mut root_segment = DynSegment::new::<()>();
-        root_segment.op0(|| true);
-        root_segment.op0(|| false);
-        root_segment.op2(|x: bool, y: bool| x && y)?;
-
-        let mut segment_1 = root_segment.new_fragment();
-        segment_1.op0(|| 42u32);
-
-        let mut segment_2 = root_segment.new_fragment();
-        segment_2.op0(|| 2u32);
-
-        root_segment.join2(segment_1, segment_2)?;
-
-        let result = root_segment.call0::<u32>()?;
-        println!("Result: {}", result);
-
-        Ok(())
-    }
-
-    #[test]
-    fn push_arg_single_input() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        seg.push_arg::<i32>(0);
-        let x: i32 = 42;
-        let result: i32 = seg.call_dyn(&[&x as &dyn Any])?;
-        assert_eq!(result, 42);
-        Ok(())
-    }
-
-    #[test]
-    fn push_arg_two_inputs_with_op() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        seg.push_arg::<i32>(0);
-        seg.push_arg::<i32>(1);
-        seg.op2(|a: i32, b: i32| a + b)?;
-        let a: i32 = 3;
-        let b: i32 = 4;
-        let result: i32 = seg.call_dyn(&[&a as &dyn Any, &b as &dyn Any])?;
-        assert_eq!(result, 7);
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_is_repeatable() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        seg.push_arg::<i32>(0);
-        let x: i32 = 5;
-        let r1: i32 = seg.call_dyn(&[&x as &dyn Any])?;
-        let y: i32 = 10;
-        let r2: i32 = seg.call_dyn(&[&y as &dyn Any])?;
-        assert_eq!(r1, 5);
-        assert_eq!(r2, 10);
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_type_mismatch_returns_error() {
-        let mut seg = DynSegment::new::<()>();
-        seg.push_arg::<i32>(0);
-        let x: i32 = 5;
-        let result = seg.call_dyn::<String>(&[&x as &dyn Any]);
-        assert!(result.is_err(), "expected Err on type mismatch");
-    }
-
-    #[test]
-    fn call_dyn_errors_if_segment_has_preloaded_arguments() {
-        // DynSegment::new::<(T,)>() creates a segment that expects a pre-loaded T argument.
-        let mut seg = DynSegment::new::<(i32,)>();
-        let result = seg.call_dyn::<i32>(&[]);
-        assert!(
-            result.is_err(),
-            "expected Err when segment has pre-loaded argument types"
-        );
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("pre-loaded"),
-            "error message should mention pre-loaded: {msg}"
-        );
-    }
-
-    #[test]
-    fn call_dyn_errors_if_stack_has_wrong_count() {
-        let mut seg = DynSegment::new::<()>();
-        seg.push_arg::<i32>(0);
-        seg.push_arg::<i32>(1);
-        // Two values on stack, no combining op — stack_ids.len() == 2
-        let x: i32 = 1;
-        let y: i32 = 2;
-        let result = seg.call_dyn::<i32>(&[&x as &dyn Any, &y as &dyn Any]);
-        assert!(result.is_err(), "expected Err when stack has 2 values");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("exactly 1"),
-            "error message should mention count: {msg}"
-        );
-    }
-
-    #[test]
-    fn call_dyn_errors_if_op_returns_error() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        seg.push_arg::<i32>(0);
-        seg.op1r(|_x: i32| -> anyhow::Result<i32> {
-            Err(anyhow::anyhow!("op failed deliberately"))
-        })?;
-        let x: i32 = 5;
-        let result = seg.call_dyn::<i32>(&[&x as &dyn Any]);
-        assert!(result.is_err(), "expected Err when op fails");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("op failed"),
-            "error message should propagate op error: {msg}"
-        );
-        Ok(())
-    }
-
-    unsafe fn extract_u32(ptr: *const u8) -> Box<dyn Any> {
-        unsafe { Box::new(*ptr.cast::<u32>()) }
-    }
-
-    unsafe fn extract_str(ptr: *const u8) -> Box<dyn Any> {
-        unsafe { Box::new(*ptr.cast::<&'static str>()) }
-    }
-
-    #[test]
-    fn call_dyn_tuple_splits_result_into_boxed_elements() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 10u32);
-        seg.op0(|| "hello");
-        seg.make_tuple(2, ambient_start);
-
-        let extractors = [
-            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
-            (TypeId::of::<&'static str>(), extract_str as BoxExtractor),
-        ];
-        let results = unsafe { seg.call_dyn_tuple(&[], &extractors) }?;
-        assert_eq!(results.len(), 2);
-        assert_eq!(*results[0].downcast_ref::<u32>().unwrap(), 10);
-        assert_eq!(*results[1].downcast_ref::<&'static str>().unwrap(), "hello");
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_tuple_is_repeatable() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1u32);
-        seg.op0(|| 2u32);
-        seg.make_tuple(2, ambient_start);
-
-        let extractors = [
-            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
-            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
-        ];
-        let r1 = unsafe { seg.call_dyn_tuple(&[], &extractors) }?;
-        let r2 = unsafe { seg.call_dyn_tuple(&[], &extractors) }?;
-        assert_eq!(*r1[0].downcast_ref::<u32>().unwrap(), 1);
-        assert_eq!(*r2[1].downcast_ref::<u32>().unwrap(), 2);
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_tuple_errors_if_result_is_not_a_tuple() {
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(|| 5u32);
-        let extractors = [(TypeId::of::<u32>(), extract_u32 as BoxExtractor)];
-        let result = unsafe { seg.call_dyn_tuple(&[], &extractors) };
-        assert!(result.is_err(), "expected Err when result is not a tuple");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("tuple"),
-            "error message should mention tuple: {msg}"
-        );
-    }
-
-    #[test]
-    fn call_dyn_tuple_errors_on_arity_mismatch() {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1u32);
-        seg.op0(|| 2u32);
-        seg.make_tuple(2, ambient_start);
-
-        let extractors = [(TypeId::of::<u32>(), extract_u32 as BoxExtractor)];
-        let result = unsafe { seg.call_dyn_tuple(&[], &extractors) };
-        assert!(result.is_err(), "expected Err on arity mismatch");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("2") && msg.contains("1"),
-            "error should mention both arities: {msg}"
-        );
-    }
-
-    #[test]
-    fn call_dyn_tuple_errors_on_element_type_mismatch() {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1u32);
-        seg.op0(|| 2u32);
-        seg.make_tuple(2, ambient_start);
-
-        // Element 1 is u32 at runtime, but the extractor table claims &str.
-        let extractors = [
-            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
-            (TypeId::of::<&'static str>(), extract_str as BoxExtractor),
-        ];
-        let result = unsafe { seg.call_dyn_tuple(&[], &extractors) };
-        assert!(result.is_err(), "expected Err on element type mismatch");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("type mismatch"),
-            "error should mention type mismatch: {msg}"
-        );
-    }
-
-    #[test]
-    fn call_dyn_tuple_errors_if_op_returns_error() {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1u32);
-        seg.op0r(|| -> anyhow::Result<u32> { Err(anyhow::anyhow!("op failed deliberately")) });
-        seg.make_tuple(2, ambient_start);
-
-        let extractors = [
-            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
-            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
-        ];
-        let result = unsafe { seg.call_dyn_tuple(&[], &extractors) };
-        assert!(result.is_err(), "expected Err when op fails");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("op failed"),
-            "error message should propagate op error: {msg}"
-        );
-    }
-
-    #[test]
-    fn call_dyn_as_tuple_reconstructs_the_tuple_result() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 10i32);
-        seg.op0(|| 2.5f64);
-        seg.make_tuple(2, ambient_start);
-
-        let result: (i32, f64) = seg.call_dyn_as_tuple(&[])?;
-        assert_eq!(result, (10, 2.5));
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_as_tuple_is_repeatable() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1i32);
-        seg.op0(|| 2i32);
-        seg.make_tuple(2, ambient_start);
-
-        let first: (i32, i32) = seg.call_dyn_as_tuple(&[])?;
-        let second: (i32, i32) = seg.call_dyn_as_tuple(&[])?;
-        assert_eq!(first, (1, 2));
-        assert_eq!(second, (1, 2));
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_as_tuple_errors_if_result_is_not_a_tuple() {
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(|| 5i32);
-        let result = seg.call_dyn_as_tuple::<(i32,)>(&[]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn call_dyn_as_tuple_errors_on_shape_mismatch() {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1i32);
-        seg.op0(|| 2i32);
-        seg.make_tuple(2, ambient_start);
-
-        let result = seg.call_dyn_as_tuple::<(i32, f64)>(&[]);
-        assert!(result.is_err(), "(i32, i32) should not match (i32, f64)");
-    }
-
-    #[test]
-    fn call_dyn_as_tuple_moves_fields_without_double_dropping_or_leaking() {
-        // Regression test: read_from moves each element's bytes out of the tuple by
-        // std::ptr::read (per its own safety contract, the caller must not separately drop
-        // those bytes afterward). If call_dyn_as_tuple also ran the tuple's drop glue over the
-        // same bytes, any element with a real Drop impl would be dropped twice.
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone, Debug)]
-        struct DropCounter(Arc<AtomicUsize>);
-        impl PartialEq for DropCounter {
-            fn eq(&self, other: &Self) -> bool {
-                Arc::ptr_eq(&self.0, &other.0)
+            assert!(!self.fail.get(), "deliberate clone panic");
+            Self {
+                name: self.name,
+                events: self.events.clone(),
+                fail: self.fail.clone(),
+                owned: true,
             }
         }
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let tracker = DropCounter(drop_count.clone());
-
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(move || tracker.clone());
-        seg.op0(|| 7i32);
-        seg.make_tuple(2, ambient_start);
-
-        let (extracted, n): (DropCounter, i32) = seg.call_dyn_as_tuple(&[]).unwrap();
-        assert_eq!(n, 7);
-        assert_eq!(
-            drop_count.load(Ordering::SeqCst),
-            0,
-            "moving out must not drop the element"
-        );
-        drop(extracted);
-        assert_eq!(
-            drop_count.load(Ordering::SeqCst),
-            1,
-            "the moved-out value must still drop exactly once, on its own schedule"
-        );
     }
 
-    #[test]
-    fn call_dyn_as_dynamic_sequence_builds_a_flat_sequence() -> anyhow::Result<()> {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 10i32);
-        seg.op0(|| 2.5f64);
-        seg.make_tuple(2, ambient_start);
-
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                if type_id == TypeId::of::<i32>() {
-                    Some((
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    ))
-                } else if type_id == TypeId::of::<f64>() {
-                    Some((
-                        element_dropper_for::<f64>(),
-                        element_cloner_for::<f64>(),
-                        element_eq_for::<f64>(),
-                        element_debug_for::<f64>(),
-                    ))
-                } else {
-                    None
-                }
-            };
-        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
-        assert_eq!(seq.arity(), 2);
-        let (a, b): (i32, f64) = seq.try_to_tuple()?;
-        assert_eq!((a, b), (10, 2.5));
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_as_dynamic_sequence_result_debug_formats_correctly() -> anyhow::Result<()> {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 10i32);
-        seg.op0(|| 2.5f64);
-        seg.make_tuple(2, ambient_start);
-
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                if type_id == TypeId::of::<i32>() {
-                    Some((
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    ))
-                } else if type_id == TypeId::of::<f64>() {
-                    Some((
-                        element_dropper_for::<f64>(),
-                        element_cloner_for::<f64>(),
-                        element_eq_for::<f64>(),
-                        element_debug_for::<f64>(),
-                    ))
-                } else {
-                    None
-                }
-            };
-        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
-        assert_eq!(format!("{seq:?}"), "(10, 2.5)");
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_as_dynamic_sequence_recurses_into_nested_tuples() -> anyhow::Result<()> {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1i32);
-        let inner_start = seg.current_stack_offset();
-        seg.op0(|| 2i32);
-        seg.op0(|| 3i32);
-        seg.make_tuple(2, inner_start);
-        seg.make_tuple(2, ambient_start);
-
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                (type_id == TypeId::of::<i32>()).then(|| {
-                    (
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    )
-                })
-            };
-        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
-        assert_eq!(seq.arity(), 2);
-        let (a, nested): (i32, DynamicSequence) = seq.try_to_tuple()?;
-        assert_eq!(a, 1);
-        assert_eq!(nested.arity(), 2);
-        let (b, c): (i32, i32) = nested.try_to_tuple()?;
-        assert_eq!((b, c), (2, 3));
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_as_dynamic_sequence_errors_if_result_is_not_a_tuple() {
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(|| 5i32);
-        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-            None
-        };
-        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("tuple"));
-    }
-
-    #[test]
-    fn call_dyn_as_dynamic_sequence_errors_on_unregistered_leaf_type() {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1i32);
-        seg.op0(|| 2i32);
-        seg.make_tuple(2, ambient_start);
-        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-            None
-        };
-        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn call_dyn_as_dynamic_sequence_drops_every_element_exactly_once() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone, Debug)]
-        struct DropCounter(Arc<AtomicUsize>);
-        impl PartialEq for DropCounter {
-            fn eq(&self, other: &Self) -> bool {
-                Arc::ptr_eq(&self.0, &other.0)
-            }
-        }
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let count = Arc::new(AtomicUsize::new(0));
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        let a = DropCounter(count.clone());
-        seg.op0(move || a.clone());
-        seg.op0(|| 7i32);
-        seg.make_tuple(2, ambient_start);
-
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                if type_id == TypeId::of::<DropCounter>() {
-                    Some((
-                        element_dropper_for::<DropCounter>(),
-                        element_cloner_for::<DropCounter>(),
-                        element_eq_for::<DropCounter>(),
-                        element_debug_for::<DropCounter>(),
-                    ))
-                } else if type_id == TypeId::of::<i32>() {
-                    Some((
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    ))
-                } else {
-                    None
-                }
-            };
-        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf).unwrap();
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            0,
-            "moving out must not drop the element"
-        );
-        drop(seq);
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            1,
-            "must still drop exactly once"
-        );
-    }
-
-    #[test]
-    fn call_dyn_as_dynamic_sequence_never_executes_when_a_leaf_is_unregistered() {
-        // Regression test: if `leaf` doesn't recognize some element's type, that must be caught
-        // by validation *before* the segment ever executes -- there is nothing on the stack to
-        // build, move, or clean up. The op closures' own captured state (here, the DropCounter
-        // `a`) is untouched by the failed call and drops normally, exactly once, whenever `seg`
-        // itself is later dropped -- not leaked (dropped zero times), and not double-dropped.
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone, Debug)]
-        struct DropCounter(Arc<AtomicUsize>);
-        impl PartialEq for DropCounter {
-            fn eq(&self, other: &Self) -> bool {
-                Arc::ptr_eq(&self.0, &other.0)
-            }
-        }
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let count = Arc::new(AtomicUsize::new(0));
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        let a = DropCounter(count.clone());
-        seg.op0(move || a.clone());
-        seg.op0(|| 7i32);
-        seg.make_tuple(2, ambient_start);
-
-        // Only DropCounter's type is registered; i32 (the element after it) is not, so
-        // call_dyn_as_dynamic_sequence must fail during validation, before executing the
-        // segment at all.
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                (type_id == TypeId::of::<DropCounter>()).then(|| {
-                    (
-                        element_dropper_for::<DropCounter>(),
-                        element_cloner_for::<DropCounter>(),
-                        element_eq_for::<DropCounter>(),
-                        element_debug_for::<DropCounter>(),
-                    )
-                })
-            };
-        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
-        assert!(result.is_err());
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            0,
-            "the segment must never execute -- nothing was ever built or moved, so there is \
-             nothing to drop yet"
-        );
-        drop(seg);
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            1,
-            "the op closure's own captured DropCounter must still drop exactly once, normally, \
-             when `seg` itself is dropped"
-        );
-    }
-
-    #[test]
-    fn call_dyn_as_dynamic_sequence_errors_on_unregistered_sibling_after_nested_tuple() {
-        // Regression test for a double-free a prior (now-reverted) fix attempt introduced: a
-        // nested tuple element (element 0) whose own interior leaf *is* registered, followed by
-        // a sibling scalar element (element 1) whose leaf is *not* registered. A naive
-        // post-execution error-path cleanup could double-drop element 0's interior bytes, since
-        // its own nested build could already have completed (moving its bytes into a fresh
-        // DynamicSequence) before element 1's failure was discovered. Validating the whole shape
-        // recursively before ever executing the segment means this is caught up front, before
-        // anything is built -- so there is nothing to double-drop.
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        let inner_start = seg.current_stack_offset();
-        seg.op0(|| 1i32);
-        seg.make_tuple(1, inner_start);
-        seg.op0(|| 2.5f64);
-        seg.make_tuple(2, ambient_start);
-
-        // Only i32 (the nested tuple's own interior element) is registered; f64 (the outer
-        // sibling element) is not.
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                (type_id == TypeId::of::<i32>()).then(|| {
-                    (
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    )
-                })
-            };
-        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn call_dyn_tuple_mixed_splits_a_tuple_output_among_scalar_and_tuple_slots()
-    -> anyhow::Result<()> {
-        // (i32, (i32, i32)) split into 2 declared outputs: a scalar, and a nested tuple.
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1i32);
-        let inner_start = seg.current_stack_offset();
-        seg.op0(|| 2i32);
-        seg.op0(|| 3i32);
-        seg.make_tuple(2, inner_start);
-        seg.make_tuple(2, ambient_start);
-
-        fn extract_i32(ptr: *const u8) -> Box<dyn Any> {
-            Box::new(unsafe { *ptr.cast::<i32>() })
-        }
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                (type_id == TypeId::of::<i32>()).then(|| {
-                    (
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    )
-                })
-            };
-        let extractors = [
-            DynExtractor::Scalar(TypeId::of::<i32>(), extract_i32 as BoxExtractor),
-            DynExtractor::Tuple(Box::new(leaf)),
-        ];
-        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }?;
-        assert_eq!(results.len(), 2);
-        assert_eq!(*results[0].downcast_ref::<i32>().unwrap(), 1);
-        let nested = results[1].downcast_ref::<DynamicSequence>().unwrap();
-        assert_eq!(nested.arity(), 2);
-        let (b, c): (i32, i32) = nested.try_to_tuple()?;
-        assert_eq!((b, c), (2, 3));
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_tuple_mixed_tuple_slot_result_debug_formats_correctly() -> anyhow::Result<()> {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1i32);
-        let inner_start = seg.current_stack_offset();
-        seg.op0(|| 2i32);
-        seg.op0(|| 3i32);
-        seg.make_tuple(2, inner_start);
-        seg.make_tuple(2, ambient_start);
-
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                (type_id == TypeId::of::<i32>()).then(|| {
-                    (
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    )
-                })
-            };
-        fn extract_i32(ptr: *const u8) -> Box<dyn Any> {
-            Box::new(unsafe { *ptr.cast::<i32>() })
-        }
-        let extractors = [
-            DynExtractor::Scalar(TypeId::of::<i32>(), extract_i32 as BoxExtractor),
-            DynExtractor::Tuple(Box::new(leaf)),
-        ];
-        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }?;
-        let nested = results[1]
-            .downcast_ref::<DynamicSequence>()
-            .expect("slot 1 is a DynamicSequence");
-        assert_eq!(format!("{nested:?}"), "(2, 3)");
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_tuple_mixed_matches_call_dyn_tuple_for_all_scalar_slots() -> anyhow::Result<()> {
-        // Regression: an all-scalar split must behave identically to today's call_dyn_tuple.
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 10u32);
-        seg.op0(|| 20u32);
-        seg.make_tuple(2, ambient_start);
-
-        fn extract_u32(ptr: *const u8) -> Box<dyn Any> {
-            Box::new(unsafe { *ptr.cast::<u32>() })
-        }
-        let extractors = [
-            DynExtractor::Scalar(TypeId::of::<u32>(), extract_u32 as BoxExtractor),
-            DynExtractor::Scalar(TypeId::of::<u32>(), extract_u32 as BoxExtractor),
-        ];
-        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }?;
-        assert_eq!(*results[0].downcast_ref::<u32>().unwrap(), 10);
-        assert_eq!(*results[1].downcast_ref::<u32>().unwrap(), 20);
-        Ok(())
-    }
-
-    #[test]
-    fn call_dyn_tuple_mixed_errors_on_arity_mismatch() {
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(|| 5u32);
-        fn extract_u32(ptr: *const u8) -> Box<dyn Any> {
-            Box::new(unsafe { *ptr.cast::<u32>() })
-        }
-        let extractors = [DynExtractor::Scalar(
-            TypeId::of::<u32>(),
-            extract_u32 as BoxExtractor,
-        )];
-        let result = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) };
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn call_dyn_tuple_mixed_drops_a_moved_out_tuple_slot_exactly_once() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone, Debug)]
-        struct DropCounter(Arc<AtomicUsize>);
-        impl PartialEq for DropCounter {
-            fn eq(&self, other: &Self) -> bool {
-                Arc::ptr_eq(&self.0, &other.0)
-            }
-        }
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let count = Arc::new(AtomicUsize::new(0));
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        let inner_start = seg.current_stack_offset();
-        let a = DropCounter(count.clone());
-        seg.op0(move || a.clone());
-        seg.op0(|| 7i32);
-        seg.make_tuple(2, inner_start);
-        seg.make_tuple(1, ambient_start);
-
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                if type_id == TypeId::of::<DropCounter>() {
-                    Some((
-                        element_dropper_for::<DropCounter>(),
-                        element_cloner_for::<DropCounter>(),
-                        element_eq_for::<DropCounter>(),
-                        element_debug_for::<DropCounter>(),
-                    ))
-                } else if type_id == TypeId::of::<i32>() {
-                    Some((
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    ))
-                } else {
-                    None
-                }
-            };
-        let extractors = [DynExtractor::Tuple(Box::new(leaf))];
-        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }.unwrap();
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            0,
-            "moving out must not drop the element"
-        );
-        drop(results);
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            1,
-            "must still drop exactly once, not zero or twice"
-        );
-    }
-
-    #[test]
-    fn call_dyn_tuple_mixed_never_executes_when_a_tuple_slots_leaf_is_unregistered() {
-        // Regression test: element 0 is a Scalar slot; element 1 is a Tuple slot whose own
-        // nested leaf lookup is unregistered. That must be caught by validation *before* the
-        // segment executes -- not discovered partway through building results, where element 0
-        // might already have been cloned. The op closures' own captured state (here, the
-        // DropCounter `a`) is untouched by the failed call and drops normally, exactly once,
-        // whenever `seg` itself is later dropped -- not leaked, and not double-dropped.
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone)]
-        struct DropCounter(Arc<AtomicUsize>);
-        impl PartialEq for DropCounter {
-            fn eq(&self, other: &Self) -> bool {
-                Arc::ptr_eq(&self.0, &other.0)
-            }
-        }
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        fn extract_drop_counter(ptr: *const u8) -> Box<dyn Any> {
-            Box::new(unsafe { (*ptr.cast::<DropCounter>()).clone() })
-        }
-
-        let count = Arc::new(AtomicUsize::new(0));
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        let a = DropCounter(count.clone());
-        seg.op0(move || a.clone());
-        let inner_start = seg.current_stack_offset();
-        seg.op0(|| 1i32);
-        seg.make_tuple(1, inner_start);
-        seg.make_tuple(2, ambient_start);
-
-        // The nested tuple's own element type (i32) is never registered, so validation must
-        // fail before the segment ever executes.
-        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-            None
-        };
-        let extractors = [
-            DynExtractor::Scalar(
-                TypeId::of::<DropCounter>(),
-                extract_drop_counter as BoxExtractor,
-            ),
-            DynExtractor::Tuple(Box::new(leaf)),
-        ];
-        let result = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) };
-        assert!(result.is_err());
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            0,
-            "the segment must never execute -- element 0 was never cloned, so there is \
-             nothing to drop yet"
-        );
-        drop(seg);
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            1,
-            "the op closure's own captured DropCounter must still drop exactly once, normally, \
-             when `seg` itself is dropped"
-        );
-    }
-
-    #[test]
-    fn stack_info_records_size_and_align() {
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(|| 7u32);
-        let infos = seg.peek_stack_infos(1);
-        assert_eq!(infos[0].value_type.size(), size_of::<u32>());
-        assert_eq!(infos[0].value_type.align(), align_of::<u32>());
-        assert!(matches!(infos[0].value_type.kind(), ValueKind::Leaf));
-    }
-
-    #[test]
-    fn associated_type_carries_offset_size_align_dropper() {
-        let a = AssociatedType {
-            offset: 4,
-            value_type: ValueType::leaf::<u32>(),
-        };
-        assert_eq!(a.offset, 4);
-        assert_eq!(a.value_type.size(), 4);
-        assert_eq!(a.value_type.align(), 4);
-        assert_eq!(a.value_type.type_id(), TypeId::of::<u32>());
-    }
-
-    #[test]
-    fn make_tuple_then_index_each_element() {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 10u32);
-        seg.op0(|| "hello");
-        seg.make_tuple(2, ambient_start);
-        assert_eq!(seg.peek_tuple_arity(), Some(2));
-
-        // Index element 1 first on a clone-free single segment isn't possible
-        // (tuple_index consumes the tuple), so build two segments to check both.
-        let mut seg0 = DynSegment::new::<()>();
-        let ambient_start0 = seg0.current_stack_offset();
-        seg0.op0(|| 10u32);
-        seg0.op0(|| "hello");
-        seg0.make_tuple(2, ambient_start0);
-        seg0.tuple_index(0);
-        assert_eq!(seg0.call0::<u32>().unwrap(), 10);
-
-        seg.tuple_index(1);
-        assert_eq!(seg.call0::<&'static str>().unwrap(), "hello");
-    }
-
-    #[test]
-    fn tuple_layout_is_independent_of_ambient_stack_depth() {
-        // (u8, u32): with nothing ahead of it vs. with a u8 already on the stack,
-        // internal padding between elements must be identical either way.
-        let mut seg_a = DynSegment::new::<()>();
-        let ambient_a = seg_a.current_stack_offset();
-        seg_a.op0(|| 1u8);
-        seg_a.op0(|| 2u32);
-        seg_a.make_tuple(2, ambient_a);
-
-        let mut seg_b = DynSegment::new::<()>();
-        seg_b.op0(|| 99u8); // extra value ahead, shifts ambient depth
-        let ambient_b = seg_b.current_stack_offset();
-        seg_b.op0(|| 1u8);
-        seg_b.op0(|| 2u32);
-        seg_b.make_tuple(2, ambient_b);
-
-        seg_a.tuple_index(1);
-        seg_b.tuple_index(1);
-        assert_eq!(seg_a.call0::<u32>().unwrap(), 2);
-        // Return the deeper (pre-tuple) value, not the just-extracted one: the
-        // extracted u32's own read doesn't depend on its padding flag being
-        // correct (it's computed from the live buffer length), but correctly
-        // recovering `extra` underneath it does.
-        seg_b.op2(|extra: u8, _x: u32| extra).unwrap();
-        assert_eq!(seg_b.call0::<u8>().unwrap(), 99);
-    }
-
-    #[test]
-    fn tuple_index_drops_every_other_element_exactly_once() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone)]
-        struct DropCounter(Arc<AtomicUsize>);
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let tracker = DropCounter(drop_count.clone());
-
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(move || tracker.clone());
-        seg.op0(|| 42u32);
-        seg.make_tuple(2, ambient_start);
-        seg.tuple_index(1); // keep the u32, drop the DropCounter
-
-        assert_eq!(seg.call0::<u32>().unwrap(), 42);
-        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn repack_relocated_element_drops_exactly_once() {
-        // Regression test for the concern that repack's ptr::copy-based move
-        // never runs destructors at an element's old (pre-relocation) offset:
-        // that's the same memmove-without-drop pattern std itself uses (e.g.
-        // Vec::remove) and is sound as long as nothing treats the vacated
-        // slot as live afterward, which make_tuple's bookkeeping guarantees.
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone)]
-        struct DropCounter(Arc<AtomicUsize>);
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        #[repr(align(16))]
-        #[allow(dead_code)]
-        struct Over16(u8);
-
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let tracker = DropCounter(drop_count.clone());
-
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(|| 0xEEu8); // sentinel, forces a misaligned ambient_start
-        let ambient_start = seg.current_stack_offset(); // 1
-        seg.op0(move || tracker.clone()); // element 0: DropCounter, align 8
-        seg.op0(|| Over16(0)); // element 1: align 16, forces tuple_align=16
-        // tuple_align (16) > DropCounter's own align (8), so dest_base
-        // (align_index(16, 1) == 16) differs from DropCounter's natural
-        // ambient position (align_index(8, 1) == 8): repack must physically
-        // relocate it, leaving its old bytes behind.
-        seg.make_tuple(2, ambient_start);
-        seg.tuple_index(0); // keep the DropCounter, drop Over16 in place
-        seg.op2(|_sentinel: u8, val: DropCounter| val).unwrap();
-
-        let extracted = seg.call0::<DropCounter>().unwrap();
-        assert_eq!(
-            drop_count.load(Ordering::SeqCst),
-            0,
-            "extracting must not have already dropped the relocated element"
-        );
-        drop(extracted);
-        assert_eq!(
-            drop_count.load(Ordering::SeqCst),
-            1,
-            "relocated element must drop exactly once (no leak, no double-drop)"
-        );
-    }
-
-    #[test]
-    fn tuple_index_combined_with_another_op() {
-        // Mirrors the spec's `5 + (0, 1).1` case: indexing must leave the stack in
-        // a state a subsequent op can correctly consume.
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(|| 5u32);
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 0u32);
-        seg.op0(|| 1u32);
-        seg.make_tuple(2, ambient_start);
-        seg.tuple_index(1);
-        seg.op2(|a: u32, b: u32| a + b).unwrap();
-        assert_eq!(seg.call0::<u32>().unwrap(), 6);
-    }
-
-    #[test]
-    fn tuple_index_result_inherits_leading_padding_when_element_align_is_smaller() {
-        // Regression test: index element 0 (u32, align 4) out of a leading-
-        // padded (u32, u64) tuple (tuple_align 8) at a misaligned ambient
-        // start. The extracted element's align (4) is smaller than the
-        // tuple's own align (8), which previously caused the result's
-        // padding flag and stack_index bookkeeping to disagree with the
-        // actual runtime layout (see plan/task-5 review history) — popping a
-        // deeper sentinel afterward would silently read the wrong bytes.
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(|| 0xEEu8); // sentinel, ambient offset 0
-        let ambient_start = seg.current_stack_offset(); // 1: misaligned for align-8 tuple
-        seg.op0(|| 0xAABB_CCDDu32); // element 0
-        seg.op0(|| 0x1122_3344_5566_7788u64); // element 1
-        seg.make_tuple(2, ambient_start);
-        seg.tuple_index(0);
-        // Return the deeper sentinel, not the just-extracted u32: recovering
-        // it correctly is exactly what depends on the fixed padding/offset
-        // bookkeeping (the u32's own read would succeed even under the bug).
-        seg.op2(|sentinel: u8, _x: u32| sentinel).unwrap();
-        assert_eq!(seg.call0::<u8>().unwrap(), 0xEE);
-    }
-
-    #[test]
-    fn one_tuple_round_trips() {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 99u32);
-        seg.make_tuple(1, ambient_start);
-        assert_eq!(seg.peek_tuple_arity(), Some(1));
-        seg.tuple_index(0);
-        assert_eq!(seg.call0::<u32>().unwrap(), 99);
-    }
-
-    #[test]
-    fn push_tuple_then_pop_tuple_as_round_trips() -> Result<(), anyhow::Error> {
-        let mut seg = DynSegment::new::<()>();
-        // Build a concrete CStackList<u32, CStackList<&str, CNil<()>>> by pushing
-        // fields in declaration order (NOT via into_c_stack_list, which reverses
-        // order — see pop_tuple_as's doc comment). `CNil`'s inner field is
-        // private, so build the empty base via the public `IntoCStackList`
-        // conversion on `()` rather than the tuple-struct constructor.
-        seg.op0(|| CStackList(().into_c_stack_list(), 7u32).push("hi"));
-        seg.push_tuple::<CStackList<&str, CStackList<u32, CNil<()>>>>();
-        assert_eq!(seg.peek_tuple_arity(), Some(2));
-
-        seg.pop_tuple_as::<CStackList<&str, CStackList<u32, CNil<()>>>>()?;
-        let result = seg.call0::<CStackList<&str, CStackList<u32, CNil<()>>>>()?;
-        assert_eq!(result.head(), &"hi");
-        assert_eq!(result.tail().head(), &7u32);
-        Ok(())
-    }
-
-    #[test]
-    fn pop_tuple_as_rejects_shape_mismatch() {
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 1u32);
-        seg.op0(|| 2u32);
-        seg.make_tuple(2, ambient_start);
-
-        let result = seg.pop_tuple_as::<CStackList<&str, CStackList<u32, CNil<()>>>>();
-        assert!(result.is_err(), "(u32, u32) should not match (u32, &str)");
-    }
-
-    /// `(u32, u8, u8)` shape used to distinguish the correct CStackList-nested
-    /// layout (offsets `[0, 4, 8]`, size 12) from the old flat `#[repr(C)]`
-    /// struct formula (offsets `[0, 4, 5]`, size 8): a higher-alignment
-    /// element (`u32`) is followed by two lower-alignment elements (`u8`,
-    /// `u8`), which is exactly the case the two formulas disagree on.
-    type DivergentAlignmentShape = CStackList<u8, CStackList<u8, CStackList<u32, CNil<()>>>>;
-
-    fn build_divergent_alignment_shape() -> DivergentAlignmentShape {
-        // Declaration order (u32, u8, u8): elem0 = u32 is pushed first (innermost
-        // tail), elem2 = the second u8 is pushed last (outermost head).
-        CStackList(
-            CStackList(CStackList(().into_c_stack_list(), 0xAAu32), 0xBBu8),
-            0xCCu8,
-        )
-    }
-
-    #[test]
-    fn make_tuple_then_index_last_element_of_divergent_alignment_shape() {
-        // Confirms element 2 reads back correctly via make_tuple's own
-        // internally consistent repack. This alone can't distinguish offset 8
-        // from offset 5 (make_tuple's write and read paths both use the same
-        // formula) — see `push_tuple_round_trips_divergent_alignment_shape`
-        // below for the test that actually exercises the real CStackList
-        // layout and would fail under the old (flat) formula.
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 0xAAu32);
-        seg.op0(|| 0xBBu8);
-        seg.op0(|| 0xCCu8);
-        seg.make_tuple(3, ambient_start);
-        assert_eq!(seg.peek_tuple_arity(), Some(3));
-        seg.tuple_index(2);
-        assert_eq!(seg.call0::<u8>().unwrap(), 0xCCu8);
-    }
-
-    #[test]
-    fn push_tuple_round_trips_divergent_alignment_shape() {
-        // Round-trips a real `CStackList<u8, CStackList<u8, CStackList<u32,
-        // CNil<()>>>>` value (memory layout produced by rustc itself, not by
-        // our offset formula) through `push_tuple`, then indexes each
-        // element. This test fails under the old flat-struct offset formula
-        // (which computes offset 5 for the last element, when the real
-        // struct places it at offset 8) and passes under the fix.
-        let sample = build_divergent_alignment_shape();
-        // Confirm construction order really is (u32, u8, u8) in declaration
-        // order (outermost push is last / head — see pop_tuple_as's doc
-        // comment for this convention).
-        assert_eq!(*sample.head(), 0xCCu8);
-        assert_eq!(*sample.tail().head(), 0xBBu8);
-        assert_eq!(*sample.tail().tail().head(), 0xAAu32);
-
-        let mut seg = DynSegment::new::<()>();
-        seg.op0(build_divergent_alignment_shape);
-        seg.push_tuple::<DivergentAlignmentShape>();
-        assert_eq!(seg.peek_tuple_arity(), Some(3));
-
-        // tuple_index consumes the tuple, so index each element in its own
-        // segment (mirrors make_tuple_then_index_each_element's pattern).
-        let mut seg0 = DynSegment::new::<()>();
-        seg0.op0(build_divergent_alignment_shape);
-        seg0.push_tuple::<DivergentAlignmentShape>();
-        seg0.tuple_index(0);
-        assert_eq!(seg0.call0::<u32>().unwrap(), 0xAAu32);
-
-        let mut seg1 = DynSegment::new::<()>();
-        seg1.op0(build_divergent_alignment_shape);
-        seg1.push_tuple::<DivergentAlignmentShape>();
-        seg1.tuple_index(1);
-        assert_eq!(seg1.call0::<u8>().unwrap(), 0xBBu8);
-
-        seg.tuple_index(2);
-        assert_eq!(seg.call0::<u8>().unwrap(), 0xCCu8);
-    }
-
-    #[test]
-    fn make_tuple_then_pop_tuple_as_round_trips_divergent_alignment_shape()
-    -> Result<(), anyhow::Error> {
-        // Closes the loop on the other bridge direction: build via
-        // make_tuple (which now computes the CStackList-matching layout),
-        // relabel with pop_tuple_as, and confirm the resulting concrete
-        // value's fields (read by rustc's own layout, via .head()/.tail())
-        // agree with what was pushed for every element, including the
-        // divergent-alignment last element.
-        let mut seg = DynSegment::new::<()>();
-        let ambient_start = seg.current_stack_offset();
-        seg.op0(|| 0xAAu32);
-        seg.op0(|| 0xBBu8);
-        seg.op0(|| 0xCCu8);
-        seg.make_tuple(3, ambient_start);
-        assert_eq!(seg.peek_tuple_arity(), Some(3));
-
-        seg.pop_tuple_as::<DivergentAlignmentShape>()?;
-        let result = seg.call0::<DivergentAlignmentShape>()?;
-        assert_eq!(*result.tail().tail().head(), 0xAAu32);
-        assert_eq!(*result.tail().head(), 0xBBu8);
-        assert_eq!(*result.head(), 0xCCu8);
-        Ok(())
-    }
-
-    #[test]
-    fn raw_dropper_for_ignores_associated_and_drops_the_correct_type_exactly_once() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        struct DropCounter(Arc<AtomicUsize>);
-        impl Drop for DropCounter {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        let count = Arc::new(AtomicUsize::new(0));
-        let mut value = DropCounter(count.clone());
-        let dropper = raw_dropper_for::<DropCounter>();
-        unsafe { dropper((&raw mut value).cast::<u8>(), &[]) };
-        std::mem::forget(value);
-        assert_eq!(count.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn layout_associated_matches_make_tuples_own_padding_convention() {
-        // Mirrors make_tuple's documented layout for (f64, i8, i8): each element at its own
-        // alignment, then padded up to the running max alignment seen so far — inserting extra
-        // padding between the two i8 elements once f64 raises the running max to 8.
-        let mut elements = vec![
-            leaf_element::<f64>(),
-            leaf_element::<i8>(),
-            leaf_element::<i8>(),
-        ];
-        let (total_size, align) = layout_associated(&mut elements);
-        assert_eq!(
-            elements.iter().map(|e| e.offset).collect::<Vec<_>>(),
-            vec![0, 8, 16]
-        );
-        assert_eq!(total_size, 24);
-        assert_eq!(align, 8);
-    }
-
-    #[test]
-    fn layout_associated_returns_zero_size_for_no_elements() {
-        let mut elements: Vec<AssociatedType> = Vec::new();
-        let (total_size, align) = layout_associated(&mut elements);
-        assert_eq!(total_size, 0);
-        assert_eq!(align, 1);
-    }
-
-    #[test]
-    fn push_arg_as_dynamic_sequence_tuple_supports_tuple_indexing() -> anyhow::Result<()> {
-        let seq = DynamicSequence::from_tuple((10i32, 2.5f64));
-        let mut seg = DynSegment::new::<()>();
-        let shape = vec![leaf_element::<i32>(), leaf_element::<f64>()];
-        seg.push_arg_as_dynamic_sequence_tuple(0, shape);
-        assert_eq!(seg.peek_tuple_arity(), Some(2));
-        seg.tuple_index(1);
-        let result: f64 = seg.call_dyn(&[&seq as &dyn Any])?;
-        assert_eq!(result, 2.5);
-        Ok(())
-    }
-
-    #[test]
-    fn push_arg_as_dynamic_sequence_tuple_recurses_into_nested_tuples() -> anyhow::Result<()> {
-        // Build the same shape call_dyn_as_dynamic_sequence's nesting test produces: (i32, (i32,i32)).
-        let mut source = DynSegment::new::<()>();
-        let ambient_start = source.current_stack_offset();
-        source.op0(|| 1i32);
-        let inner_start = source.current_stack_offset();
-        source.op0(|| 2i32);
-        source.op0(|| 3i32);
-        source.make_tuple(2, inner_start);
-        source.make_tuple(2, ambient_start);
-        let leaf =
-            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
-                (type_id == TypeId::of::<i32>()).then(|| {
-                    (
-                        element_dropper_for::<i32>(),
-                        element_cloner_for::<i32>(),
-                        element_eq_for::<i32>(),
-                        element_debug_for::<i32>(),
-                    )
-                })
-            };
-        let seq = source.call_dyn_as_dynamic_sequence(&[], &leaf)?;
-
-        let inner_shape = vec![leaf_element::<i32>(), leaf_element::<i32>()];
-        let outer_shape = vec![
-            leaf_element::<i32>(),
-            AssociatedType {
-                offset: 0,
-                value_type: ValueType::tuple(inner_shape),
-            },
-        ];
-
-        let mut seg = DynSegment::new::<()>();
-        seg.push_arg_as_dynamic_sequence_tuple(0, outer_shape);
-        seg.tuple_index(1); // the nested (i32, i32)
-        seg.tuple_index(0); // its first element
-        let result: i32 = seg.call_dyn(&[&seq as &dyn Any])?;
-        assert_eq!(result, 2);
-        Ok(())
-    }
-
-    #[test]
-    fn push_arg_as_dynamic_sequence_tuple_clones_leaving_the_input_usable() -> anyhow::Result<()> {
-        let seq = DynamicSequence::from_tuple((1i32, 2i32));
-        let shape = || vec![leaf_element::<i32>(), leaf_element::<i32>()];
-
-        let mut seg_a = DynSegment::new::<()>();
-        seg_a.push_arg_as_dynamic_sequence_tuple(0, shape());
-        seg_a.tuple_index(0);
-        let a: i32 = seg_a.call_dyn(&[&seq as &dyn Any])?;
-
-        let mut seg_b = DynSegment::new::<()>();
-        seg_b.push_arg_as_dynamic_sequence_tuple(0, shape());
-        seg_b.tuple_index(1);
-        let b: i32 = seg_b.call_dyn(&[&seq as &dyn Any])?;
-
-        assert_eq!((a, b), (1, 2));
-        Ok(())
-    }
-
-    /// An element type with no derived traits at all, to prove array collection needs none.
-    #[derive(Debug, PartialEq)]
-    struct NoTraits(u32);
-
-    #[repr(align(64))]
-    #[derive(Debug, PartialEq)]
-    struct OverAligned(u64);
-
-    static ZST_ELEMENT_DROPS: AtomicUsize = AtomicUsize::new(0);
-
-    /// A zero-sized element whose destructor must still run once per collected element.
-    struct ZstWithDrop;
-
-    impl Drop for ZstWithDrop {
+    impl Drop for CloneDrop {
+        /// Records each initialized runtime owner exactly once.
         fn drop(&mut self) {
-            ZST_ELEMENT_DROPS.fetch_add(1, Ordering::SeqCst);
+            if self.owned {
+                self.events.borrow_mut().push(self.name);
+            }
         }
     }
 
+    /// Checks recursive clone rollback, branch origins, reverse cleanup, and replay.
     #[test]
-    fn make_array_collects_homogeneous_values() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.just(0i32);
-        segment.just(1i32);
-        segment.just(2i32);
-        segment.make_array(3, start)?;
+    fn direct_clone_panic_restores_branch_and_ambient_ownership() {
+        type Pair = Cons<ArrayOf<Leaf<CloneDrop>>, Cons<Leaf<CloneDrop>, Nil>>;
+        for external_constant in [false, true] {
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let fail = Rc::new(Cell::new(true));
+            let leaf = |name, fail: Rc<Cell<bool>>, owned| CloneDrop {
+                name,
+                events: events.clone(),
+                fail,
+                owned,
+            };
+            let descriptor = ValueType::tuple(vec![
+                AssociatedType {
+                    offset: 0,
+                    value_type: ValueType::array(ValueType::cloneable_leaf::<CloneDrop>()),
+                },
+                AssociatedType {
+                    offset: 0,
+                    value_type: ValueType::cloneable_leaf::<CloneDrop>(),
+                },
+            ])
+            .unwrap();
+            let mut source = Some(
+                OwnedValue::new::<Pair>(
+                    (
+                        Array::from_vec(vec![leaf("child", Rc::new(Cell::new(false)), false)]),
+                        leaf("panic", fail.clone(), false),
+                    )
+                        .into_c_stack_list(),
+                )
+                .with_value_type(descriptor.clone())
+                .unwrap(),
+            );
+            let mut body = DynSegment::new::<()>();
+            for name in ["outer-a", "outer-b"] {
+                let log = events.clone();
+                body.op0(move || CloneDrop {
+                    name,
+                    events: log.clone(),
+                    fail: Rc::new(Cell::new(false)),
+                    owned: true,
+                });
+            }
+            body.just(true);
+            let mut yes = body.new_fragment();
+            let log = events.clone();
+            yes.op0(move || CloneDrop {
+                name: "branch",
+                events: log.clone(),
+                fail: Rc::new(Cell::new(false)),
+                owned: true,
+            });
+            if external_constant {
+                yes.just_external(descriptor, Box::new(source.take().unwrap()))
+                    .unwrap();
+            } else {
+                yes.push_argument(0, descriptor).unwrap();
+            }
+            yes.drop_value().unwrap();
+            yes.drop_value().unwrap();
+            yes.just(9u32);
+            let mut no = body.new_fragment();
+            no.just(3u32);
+            body.join2(yes, no).unwrap();
+            body.op3(|_: CloneDrop, _: CloneDrop, result: u32| result)
+                .unwrap();
 
-        let array: DynamicArray = segment.call0()?;
-        assert_eq!(array.len(), 3);
-        assert_eq!(array.capacity(), 3);
-        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1, 2]);
-        Ok(())
-    }
-
-    #[test]
-    fn make_array_rejects_mismatched_values_before_execution() {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.just(0i32);
-        segment.just(1f64);
-
-        let error = segment.make_array(2, start).unwrap_err().to_string();
-
-        assert!(error.contains("element 1"), "{error}");
-        assert!(error.contains("i32") && error.contains("f64"), "{error}");
-    }
-
-    #[test]
-    fn make_array_rejects_an_empty_element_list() {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-
-        let error = segment.make_array(0, start).unwrap_err().to_string();
-
-        assert!(error.contains("212"), "{error}");
-    }
-
-    #[test]
-    fn make_array_rejects_more_elements_than_the_stack_holds() {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.just(0i32);
-
-        assert!(segment.make_array(2, start).is_err());
-    }
-
-    #[test]
-    fn make_array_collects_values_of_a_type_without_clone() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.op0(|| NoTraits(1));
-        segment.op0(|| NoTraits(2));
-        segment.make_array(2, start)?;
-
-        let array: DynamicArray = segment.call0()?;
-        assert_eq!(
-            array.try_into_vec::<NoTraits>()?,
-            vec![NoTraits(1), NoTraits(2)]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn make_array_preserves_over_aligned_elements() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.op0(|| OverAligned(1));
-        segment.op0(|| OverAligned(2));
-        segment.make_array(2, start)?;
-
-        let array: DynamicArray = segment.call0()?;
-        let values = array.try_as_slice::<OverAligned>()?;
-        assert!(
-            (values.as_ptr() as usize).is_multiple_of(align_of::<OverAligned>()),
-            "collected storage must satisfy the element's alignment"
-        );
-        assert_eq!(values, &[OverAligned(1), OverAligned(2)]);
-        Ok(())
-    }
-
-    #[test]
-    fn make_array_drops_each_collected_element_exactly_once() -> anyhow::Result<()> {
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        for _ in 0..3 {
-            let tracker = DropCounter(drop_count.clone());
-            segment.op0(move || tracker.clone());
+            let pointers: Vec<_> = source.iter().map(OwnedValue::as_ptr).collect();
+            for _ in 0..2 {
+                let mut stack = RawStack::with_base_alignment(body.segment.base_alignment());
+                let _arguments = ArgumentGuard::install(&pointers);
+                // SAFETY: The source and body share the complete bound descriptor.
+                assert!(
+                    catch_unwind(AssertUnwindSafe(|| unsafe {
+                        body.segment.call0_stack(&mut stack)
+                    }))
+                    .is_err()
+                );
+                assert_eq!(stack.len(), 0);
+                assert_eq!(
+                    &*events.borrow(),
+                    &["child", "branch", "outer-b", "outer-a"]
+                );
+                events.borrow_mut().clear();
+            }
+            fail.set(false);
+            let inputs: Vec<&dyn Any> = source.iter().map(|owner| owner as &dyn Any).collect();
+            assert_eq!(body.call_dyn::<u32>(&inputs).unwrap(), 9);
+            assert_eq!(
+                events
+                    .borrow()
+                    .iter()
+                    .filter(|name| **name == "child")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                events
+                    .borrow()
+                    .iter()
+                    .filter(|name| **name == "panic")
+                    .count(),
+                1
+            );
         }
-        segment.make_array(3, start)?;
-
-        let array: DynamicArray = segment.call0()?;
-        assert_eq!(array.len(), 3);
-        assert_eq!(drop_count.load(Ordering::SeqCst), 0);
-
-        drop(array);
-        assert_eq!(drop_count.load(Ordering::SeqCst), 3);
-        Ok(())
     }
 
+    /// Rejects inconsistent descriptors before executing any instruction on every call.
     #[test]
-    fn make_array_rejection_leaves_the_segment_usable() -> anyhow::Result<()> {
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let tracker = DropCounter(drop_count.clone());
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.op0(move || tracker.clone());
-        segment.op0(|| 1f64);
-        let offset_before = segment.current_stack_offset();
-
-        assert!(segment.make_array(2, start).is_err());
-        assert_eq!(
-            segment.current_stack_offset(),
-            offset_before,
-            "a rejected make_array must not change the parse-time stack"
-        );
-
-        segment.op2(|counted: DropCounter, value: f64| {
-            drop(counted);
-            value
-        })?;
-        assert_eq!(segment.call0::<f64>()?, 1.0);
-        assert_eq!(
-            drop_count.load(Ordering::SeqCst),
-            1,
-            "the one produced element must be dropped exactly once"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn make_array_unwinds_already_produced_elements_when_an_element_fails() -> anyhow::Result<()> {
-        let drop_count = Arc::new(AtomicUsize::new(0));
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
+    fn inconsistent_reads_precede_body_effects() {
+        let effects = Rc::new(Cell::new(0));
+        let counter = effects.clone();
+        let mut body = DynSegment::new::<()>();
+        body.op0(move || counter.set(counter.get() + 1));
+        body.drop_value().unwrap();
+        body.push_arg::<i32>(0);
+        body.drop_value().unwrap();
+        body.push_arg::<String>(0);
+        body.drop_value().unwrap();
+        body.just(7u32);
         for _ in 0..2 {
-            let tracker = DropCounter(drop_count.clone());
-            segment.op0(move || tracker.clone());
+            let error = body.call_dyn::<u32>(&[&1i32]).unwrap_err();
+            assert!(error.to_string().contains("inconsistent argument 0"));
+            assert_eq!(effects.get(), 0);
         }
-        segment.op0r(|| -> Result<DropCounter> { Err(anyhow!("element failed")) });
-        segment.make_array(3, start)?;
-
-        let result = segment.call0::<DynamicArray>();
-        assert!(result.is_err());
-        assert_eq!(
-            drop_count.load(Ordering::SeqCst),
-            2,
-            "each already-produced element is dropped exactly once"
-        );
-        Ok(())
     }
 
+    /// Keeps captureless typed operations free of retained instruction state.
     #[test]
-    fn make_array_collects_zero_sized_elements_with_drop_glue() -> anyhow::Result<()> {
-        ZST_ELEMENT_DROPS.store(0, Ordering::SeqCst);
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.op0(|| ZstWithDrop);
-        segment.op0(|| ZstWithDrop);
-        segment.op0(|| ZstWithDrop);
-        segment.make_array(3, start)?;
-
-        let array: DynamicArray = segment.call0()?;
-        assert_eq!(array.len(), 3);
-        assert_eq!(ZST_ELEMENT_DROPS.load(Ordering::SeqCst), 0);
-
-        drop(array);
-        assert_eq!(ZST_ELEMENT_DROPS.load(Ordering::SeqCst), 3);
-        Ok(())
+    fn captureless_operations_retain_no_instruction_state() {
+        let mut body = DynSegment::new::<()>();
+        body.just(1i32);
+        let initial = body.segment.storage_size();
+        for _ in 0..4_000 {
+            body.op1(|value: i32| value).unwrap();
+        }
+        assert_eq!(body.segment.storage_size(), initial);
+        assert_eq!(body.call0::<i32>().unwrap(), 1);
     }
 
+    /// Packs large literal arrays without retaining per-slot cleanup graphs.
     #[test]
-    fn make_array_collects_elements_above_other_stack_values() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        segment.just(9u8);
-        let start = segment.current_stack_offset();
-        segment.just(1i32);
-        segment.just(2i32);
-        segment.make_array(2, start)?;
-        segment.op2(|head: u8, array: DynamicArray| {
-            (
-                head,
-                array.try_into_vec::<i32>().expect("collected i32 elements"),
-            )
-        })?;
-
-        let (head, values) = segment.call0::<(u8, Vec<i32>)>()?;
-        assert_eq!(head, 9);
-        assert_eq!(values, vec![1, 2]);
-        Ok(())
+    fn large_literal_arrays_preserve_values() {
+        for length in [1_000, 2_000, 4_000] {
+            let mut body = DynSegment::new::<()>();
+            for _ in 0..length {
+                body.just(1i32);
+            }
+            body.make_array(length, 0).unwrap();
+            let output = body.call_dyn_value(&[]).unwrap();
+            assert_eq!(
+                output
+                    .try_into_typed::<crate::ArrayOf<Leaf<i32>>>()
+                    .unwrap()
+                    .len(),
+                length
+            );
+        }
     }
 
+    /// Packs large arrays from borrowed reads and imported constants.
     #[test]
-    fn make_array_collects_nested_arrays() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let outer_start = segment.current_stack_offset();
-        let first_start = segment.current_stack_offset();
-        segment.just(0i32);
-        segment.just(1i32);
-        segment.make_array(2, first_start)?;
-        let second_start = segment.current_stack_offset();
-        segment.just(2i32);
-        segment.make_array(1, second_start)?;
-        segment.make_array(2, outer_start)?;
-
-        let array: DynamicArray = segment.call0()?;
-        let inner = array.try_into_vec::<DynamicArray>()?;
-        assert_eq!(inner.len(), 2);
-        assert_eq!(inner[0].try_as_slice::<i32>()?, &[0, 1]);
-        assert_eq!(inner[1].try_as_slice::<i32>()?, &[2]);
-        Ok(())
+    fn large_cloned_arrays_preserve_values() {
+        for length in [1_000, 2_000, 4_000] {
+            for external_constant in [false, true] {
+                let mut body = DynSegment::new::<()>();
+                for _ in 0..length {
+                    if external_constant {
+                        body.just_external(ValueType::cloneable_leaf::<i32>(), Box::new(1i32))
+                            .unwrap();
+                    } else {
+                        body.push_arg::<i32>(0);
+                    }
+                }
+                body.make_array(length, 0).unwrap();
+                let result = body.call_dyn_value(&[&1i32]).unwrap();
+                assert_eq!(
+                    result.try_into_typed::<ArrayOf<Leaf<i32>>>().unwrap().len(),
+                    length
+                );
+            }
+        }
     }
 
+    /// Checks that prepared calls allocate only their erased argument and result frames.
     #[test]
-    fn make_array_rejects_mismatched_nested_element_types() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let outer_start = segment.current_stack_offset();
-        let first_start = segment.current_stack_offset();
-        segment.just(0i32);
-        segment.make_array(1, first_start)?;
-        let second_start = segment.current_stack_offset();
-        segment.just(1f64);
-        segment.make_array(1, second_start)?;
+    fn prepared_callees_avoid_temporary_operand_allocations() {
+        use crate::{Callable, FnOf};
 
-        let error = segment.make_array(2, outer_start).unwrap_err().to_string();
-
-        assert!(error.contains("element 1"), "{error}");
-        assert!(
-            error.contains("[i32]") && error.contains("[f64]"),
-            "{error}"
-        );
-        Ok(())
+        type Args = Cons<Leaf<u64>, Nil>;
+        type Function = FnOf<Args, Leaf<u64>>;
+        /// Adds one through a native borrowed argument frame.
+        fn increment(args: &<Args as ValueRepr>::Value) -> Result<u64> {
+            args.1.checked_add(1).ok_or_else(|| anyhow!("overflow"))
+        }
+        let mut interpreted = DynSegment::new::<()>();
+        interpreted.push_arg::<u64>(0);
+        interpreted.just(1u64);
+        interpreted
+            .op2r(|a: u64, b: u64| a.checked_add(b).ok_or_else(|| anyhow!("overflow")))
+            .unwrap();
+        let interpreted =
+            Callable::from_prepared(interpreted.prepare::<Args, Leaf<u64>>().unwrap());
+        for function in [Callable::from_fn(increment), interpreted] {
+            for calls in [1u64, 10, 100] {
+                let mut body = DynSegment::new::<()>();
+                body.just(17u64);
+                for _ in 0..calls {
+                    let function = function.clone();
+                    body.op0_repr::<Function, _>(move || function.clone())
+                        .unwrap();
+                    body.push_arg::<u64>(0);
+                    body.invoke_closure(1).unwrap();
+                    body.op2r(|a: u64, b: u64| a.checked_add(b).ok_or_else(|| anyhow!("overflow")))
+                        .unwrap();
+                }
+                let mut prepared = body.prepare::<Args, Leaf<u64>>().unwrap();
+                let args = (7u64,).into_c_stack_list();
+                let expected = 17 + calls * 8;
+                assert_eq!(prepared.call(&args).unwrap(), expected);
+                crate::owned_value::ALLOCATIONS.with(|count| count.set(0));
+                for _ in 0..100 {
+                    assert_eq!(prepared.call(&args).unwrap(), expected);
+                }
+                let allocations = crate::owned_value::ALLOCATIONS.with(Cell::get);
+                assert_eq!(allocations, 200 * calls as usize, "{calls} calls");
+            }
+        }
     }
 
+    /// Checks that prepared indexing allocates only the erased array and selected value.
     #[test]
-    fn make_array_rejects_mismatched_nesting_depth() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let outer_start = segment.current_stack_offset();
-        let flat_start = segment.current_stack_offset();
-        segment.just(0i32);
-        segment.make_array(1, flat_start)?;
-        let nested_start = segment.current_stack_offset();
-        let inner_start = segment.current_stack_offset();
-        segment.just(1i32);
-        segment.make_array(1, inner_start)?;
-        segment.make_array(1, nested_start)?;
-
-        let error = segment.make_array(2, outer_start).unwrap_err().to_string();
-
-        assert!(error.contains("element 1"), "{error}");
-        assert!(
-            error.contains("[i32]") && error.contains("[[i32]]"),
-            "{error}"
-        );
-        Ok(())
+    fn prepared_indices_avoid_temporary_operand_allocations() {
+        for accesses in [1u64, 10, 100] {
+            let mut body = DynSegment::new::<()>();
+            body.just(17u64);
+            for _ in 0..accesses {
+                let array = Array::from_vec(vec![7u64]);
+                body.op0_repr::<ArrayOf<Leaf<u64>>, _>(move || array.clone())
+                    .unwrap();
+                body.push_arg::<i32>(0);
+                body.array_index::<i32>().unwrap();
+                body.op2r(|a: u64, b: u64| a.checked_add(b).ok_or_else(|| anyhow!("overflow")))
+                    .unwrap();
+            }
+            let mut prepared = body.prepare::<Cons<Leaf<i32>, Nil>, Leaf<u64>>().unwrap();
+            let args = (0i32,).into_c_stack_list();
+            let expected = 17 + accesses * 7;
+            assert_eq!(prepared.call(&args).unwrap(), expected);
+            crate::owned_value::ALLOCATIONS.with(|count| count.set(0));
+            for _ in 0..100 {
+                assert_eq!(prepared.call(&args).unwrap(), expected);
+            }
+            let allocations = crate::owned_value::ALLOCATIONS.with(Cell::get);
+            assert_eq!(allocations, 200 * accesses as usize, "{accesses} accesses");
+        }
     }
 
+    /// Checks callee, argument, and aligned ambient ownership across retries and unwinding.
     #[test]
-    fn make_array_rejects_a_leading_tuple_element() {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        let tuple_start = segment.current_stack_offset();
-        segment.just(0i32);
-        segment.just(1i32);
-        segment.make_tuple(2, tuple_start);
+    fn prepared_callee_moves_preserve_error_and_unwind_cleanup() {
+        use crate::{Callable, FnOf};
 
-        let error = segment.make_array(1, start).unwrap_err().to_string();
-
-        assert!(error.contains("element 0"), "{error}");
-        assert!(error.contains("213"), "{error}");
+        type Args = Cons<Leaf<CloneDrop>, Nil>;
+        type Function = FnOf<Args, Leaf<u64>>;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mode = Rc::new(Cell::new(0u8));
+        let leaf = |name| CloneDrop {
+            name,
+            events: events.clone(),
+            fail: Rc::new(Cell::new(false)),
+            owned: true,
+        };
+        let mut body = DynSegment::new::<()>();
+        let ambient = leaf("ambient");
+        body.op0(move || ambient.clone());
+        body.just(9u8);
+        let callee_events = events.clone();
+        let callee_mode = mode.clone();
+        body.op0_repr::<Function, _>(move || {
+            let sentinel = CloneDrop {
+                name: "callee",
+                events: callee_events.clone(),
+                fail: Rc::new(Cell::new(false)),
+                owned: true,
+            };
+            let mode = callee_mode.clone();
+            let mut inner = DynSegment::new::<()>();
+            inner.push_arg::<CloneDrop>(0);
+            inner
+                .op1r(move |argument: CloneDrop| {
+                    let _sentinel = &sentinel;
+                    drop(argument);
+                    match mode.get() {
+                        0 => Ok(7u64),
+                        1 => Err(anyhow!("callee failure")),
+                        _ => panic!("callee panic"),
+                    }
+                })
+                .unwrap();
+            Callable::from_prepared(inner.prepare::<Args, Leaf<u64>>().unwrap())
+        })
+        .unwrap();
+        let argument = leaf("argument");
+        body.op0(move || argument.clone());
+        body.invoke_closure(1).unwrap();
+        body.op3(|ambient: CloneDrop, marker: u8, value: u64| {
+            assert_eq!(marker, 9);
+            drop(ambient);
+            value
+        })
+        .unwrap();
+        let mut prepared = body.prepare::<Nil, Leaf<u64>>().unwrap();
+        let args = ().into_c_stack_list();
+        for _ in 0..2 {
+            for next in [0, 1, 0, 2, 0] {
+                mode.set(next);
+                let result = catch_unwind(AssertUnwindSafe(|| prepared.call(&args)));
+                match next {
+                    0 => assert_eq!(result.unwrap().unwrap(), 7),
+                    1 => assert_eq!(result.unwrap().unwrap_err().to_string(), "callee failure"),
+                    _ => assert!(result.is_err()),
+                }
+                let expected = if next == 2 {
+                    ["argument", "callee", "argument", "ambient"]
+                } else {
+                    ["argument", "argument", "callee", "ambient"]
+                };
+                assert_eq!(&*events.borrow(), &expected);
+                events.borrow_mut().clear();
+            }
+        }
     }
 
+    /// Owns an over-aligned index whose conversion can succeed, fail, or unwind.
+    #[repr(align(128))]
+    struct TrackedIndex {
+        mode: u8,
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl TryFrom<TrackedIndex> for usize {
+        type Error = ();
+
+        /// Converts valid indices, reports conversion failure, or triggers a test unwind.
+        fn try_from(index: TrackedIndex) -> std::result::Result<Self, Self::Error> {
+            match index.mode {
+                0 => Ok(1),
+                1 => Err(()),
+                2 => panic!("index conversion panic"),
+                _ => Ok(2),
+            }
+        }
+    }
+
+    impl Drop for TrackedIndex {
+        /// Records destruction of the uniquely owned index on every exit.
+        fn drop(&mut self) {
+            self.events.borrow_mut().push("index");
+        }
+    }
+
+    /// Checks index, array, and misaligned ambient ownership across all conversion exits.
     #[test]
-    fn make_array_rejects_a_trailing_tuple_element() {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.just(0i32);
-        let tuple_start = segment.current_stack_offset();
-        segment.just(1i32);
-        segment.just(2i32);
-        segment.make_tuple(2, tuple_start);
-
-        let error = segment.make_array(2, start).unwrap_err().to_string();
-
-        assert!(error.contains("element 1"), "{error}");
-        assert!(error.contains("213"), "{error}");
+    fn prepared_index_moves_preserve_error_and_unwind_cleanup() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mode = Rc::new(Cell::new(0u8));
+        let mut body = DynSegment::new::<()>();
+        let log = events.clone();
+        body.op0(move || CloneDrop {
+            name: "ambient",
+            events: log.clone(),
+            fail: Rc::new(Cell::new(false)),
+            owned: true,
+        });
+        body.just(9u8);
+        let origin = body.current_stack_offset();
+        for name in ["first", "last"] {
+            let log = events.clone();
+            body.op0(move || CloneDrop {
+                name,
+                events: log.clone(),
+                fail: Rc::new(Cell::new(false)),
+                owned: true,
+            });
+        }
+        body.make_array(2, origin).unwrap();
+        let index_events = events.clone();
+        let index_mode = mode.clone();
+        body.op0(move || TrackedIndex {
+            mode: index_mode.get(),
+            events: index_events.clone(),
+        });
+        body.array_index::<TrackedIndex>().unwrap();
+        body.op3(|ambient: CloneDrop, marker: u8, value: CloneDrop| {
+            assert_eq!(marker, 9);
+            drop(ambient);
+            value
+        })
+        .unwrap();
+        let mut prepared = body.prepare::<Nil, Leaf<CloneDrop>>().unwrap();
+        let args = ().into_c_stack_list();
+        for _ in 0..2 {
+            for next in [0, 1, 0, 2, 0, 3, 0] {
+                mode.set(next);
+                let result = catch_unwind(AssertUnwindSafe(|| prepared.call(&args)));
+                match next {
+                    0 => drop(result.unwrap().unwrap()),
+                    1 => assert_eq!(
+                        result.unwrap().err().unwrap().to_string(),
+                        "array index is negative or unrepresentable"
+                    ),
+                    2 => assert!(result.is_err()),
+                    _ => assert!(
+                        result
+                            .unwrap()
+                            .err()
+                            .unwrap()
+                            .to_string()
+                            .contains("out of bounds")
+                    ),
+                }
+                let expected = if next == 0 {
+                    ["index", "first", "ambient", "last"]
+                } else {
+                    ["index", "last", "first", "ambient"]
+                };
+                assert_eq!(&*events.borrow(), &expected);
+                events.borrow_mut().clear();
+            }
+        }
     }
 
+    /// Checks that prepared conditionals and short-circuit branches allocate no owners.
     #[test]
-    fn make_typed_array_collects_an_empty_array_from_a_leaf_descriptor() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let element = ArrayElementType::leaf::<i32>().unwrap();
-
-        segment.make_typed_array(0, segment.current_stack_offset(), element)?;
-
-        let array: DynamicArray = segment.call0()?;
-        assert!(array.is_empty());
-        assert_eq!(
-            array.element_type(),
-            &ArrayElementType::leaf::<i32>().unwrap()
-        );
-        assert!(array.try_into_vec::<i32>()?.is_empty());
-        Ok(())
+    fn prepared_branches_avoid_temporary_allocations() {
+        type Inputs = Cons<Leaf<bool>, Cons<Leaf<bool>, Nil>>;
+        for kind in ["if", "&&", "||"] {
+            for conditions in [1u64, 10, 100] {
+                let mut body = DynSegment::new::<()>();
+                body.just(17u64);
+                for _ in 0..conditions {
+                    body.push_arg::<bool>(0);
+                    let mut yes = body.new_fragment();
+                    let mut no = body.new_fragment();
+                    match kind {
+                        "if" => {
+                            yes.push_arg::<bool>(1);
+                            no.push_arg::<bool>(1);
+                            no.op1(|value: bool| !value).unwrap();
+                        }
+                        "&&" => {
+                            yes.push_arg::<bool>(1);
+                            no.just(false);
+                        }
+                        "||" => {
+                            yes.just(true);
+                            no.push_arg::<bool>(1);
+                        }
+                        _ => unreachable!(),
+                    }
+                    body.join2(yes, no).unwrap();
+                    body.op2r(|total: u64, value: bool| {
+                        total
+                            .checked_add(u64::from(value))
+                            .ok_or_else(|| anyhow!("overflow"))
+                    })
+                    .unwrap();
+                }
+                let mut prepared = body.prepare::<Inputs, Leaf<u64>>().unwrap();
+                for condition in [false, true] {
+                    for rhs in [false, true] {
+                        let value = match kind {
+                            "if" => {
+                                if condition {
+                                    rhs
+                                } else {
+                                    !rhs
+                                }
+                            }
+                            "&&" => condition && rhs,
+                            "||" => condition || rhs,
+                            _ => unreachable!(),
+                        };
+                        let expected = 17 + conditions * u64::from(value);
+                        let inputs = (condition, rhs).into_c_stack_list();
+                        assert_eq!(prepared.call(&inputs).unwrap(), expected);
+                        crate::owned_value::ALLOCATIONS.with(|count| count.set(0));
+                        for _ in 0..100 {
+                            assert_eq!(prepared.call(&inputs).unwrap(), expected);
+                        }
+                        let allocations = crate::owned_value::ALLOCATIONS.with(Cell::get);
+                        assert_eq!(allocations, 0, "{kind}, {conditions} conditions");
+                    }
+                }
+            }
+        }
     }
 
+    /// Checks that scalar reads and imported constants need no temporary owners.
     #[test]
-    fn make_typed_array_collects_an_empty_array_from_a_nested_descriptor() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
-
-        segment.make_typed_array(0, segment.current_stack_offset(), element.clone())?;
-
-        let array: DynamicArray = segment.call0()?;
-        assert!(array.is_empty());
-        assert_eq!(array.element_type(), &element);
-        assert!(array.try_into_vec::<DynamicArray>()?.is_empty());
-        Ok(())
+    fn scalar_cloning_avoids_temporary_allocations() {
+        for reads in [1, 10, 100] {
+            for external_constant in [false, true] {
+                let mut body = DynSegment::new::<()>();
+                for read in 0..reads {
+                    if external_constant {
+                        body.just_external(ValueType::cloneable_leaf::<i32>(), Box::new(1i32))
+                            .unwrap();
+                    } else {
+                        body.push_arg::<i32>(0);
+                    }
+                    if read != 0 {
+                        body.op2r(|a: i32, b: i32| {
+                            a.checked_add(b).ok_or_else(|| anyhow!("overflow"))
+                        })
+                        .unwrap();
+                    }
+                }
+                let mut prepared = body.prepare::<Cons<Leaf<i32>, Nil>, Leaf<i32>>().unwrap();
+                let input = (1i32,).into_c_stack_list();
+                assert_eq!(prepared.call(&input).unwrap(), reads);
+                crate::owned_value::ALLOCATIONS.with(|count| count.set(0));
+                for _ in 0..100 {
+                    assert_eq!(prepared.call(&input).unwrap(), reads);
+                }
+                let allocations = crate::owned_value::ALLOCATIONS.with(Cell::get);
+                eprintln!(
+                    "{reads} reads, constant={external_constant}: {allocations} temporary allocations"
+                );
+                assert_eq!(allocations, 0);
+            }
+        }
     }
 
+    /// Checks linear descriptor work on every checked call and none after preparation.
     #[test]
-    fn make_typed_array_rejects_a_descriptor_whose_layout_mismatches_the_values() {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.just(0i32);
-        segment.just(1i32);
-
-        let error = segment
-            .make_typed_array(2, start, ArrayElementType::leaf::<u32>().unwrap())
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("element 0"), "{error}");
-        assert!(error.contains("i32") && error.contains("u32"), "{error}");
-    }
-
-    /// Drops a `String` in place through a distinct function item, standing in for the separate
-    /// `raw_dropper_for::<String>` instantiation another crate would supply.
-    ///
-    /// # Safety
-    ///
-    /// Same contract as [`RawDropper`]: `ptr` points to a live, aligned `String`.
-    unsafe fn drop_string_through_another_instantiation(
-        ptr: *mut u8,
-        associated: &[AssociatedType],
-    ) {
-        // SAFETY: the caller upholds `RawDropper`'s contract for `String`, which is exactly what
-        // `raw_dropper_for::<String>()` requires.
-        unsafe { raw_dropper_for::<String>()(ptr, associated) }
-    }
-
-    /// A host resolving a source-level annotation (`[]: [Celsius]`) builds its descriptor in its
-    /// own crate, with its own `raw_dropper_for::<T>` instantiation and its own source-level type
-    /// name. Such a descriptor describes the same values and must be accepted.
-    #[test]
-    fn make_typed_array_accepts_a_host_resolved_descriptor_for_the_same_type() -> anyhow::Result<()>
-    {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.just("20".to_string());
-        segment.just("21".to_string());
-
-        let host_resolved = ArrayElementType::leaf_from_parts(
-            TypeId::of::<String>(),
-            Cow::Borrowed("Celsius"),
-            std::mem::size_of::<String>(),
-            std::mem::align_of::<String>(),
-            drop_string_through_another_instantiation,
-        );
-
-        segment.make_typed_array(2, start, host_resolved)?;
-
-        let array: DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<String>()?, vec!["20", "21"]);
-        Ok(())
-    }
-
-    #[test]
-    fn make_array_is_repeatable() -> anyhow::Result<()> {
-        let mut segment = DynSegment::new::<()>();
-        let start = segment.current_stack_offset();
-        segment.just(1i32);
-        segment.just(2i32);
-        segment.make_array(2, start)?;
-
-        let first: DynamicArray = segment.call_dyn(&[])?;
-        let second: DynamicArray = segment.call_dyn(&[])?;
-
-        assert_eq!(first.try_as_slice::<i32>()?, &[1, 2]);
-        assert_eq!(second.try_as_slice::<i32>()?, &[1, 2]);
-        assert_ne!(
-            first.try_as_slice::<i32>()?.as_ptr(),
-            second.try_as_slice::<i32>()?.as_ptr(),
-            "each execution must own its own allocation"
-        );
-        Ok(())
+    fn repeated_read_preflight_is_linear() {
+        for reads in [1_000, 2_000, 4_000] {
+            let mut body = DynSegment::new::<()>();
+            body.push_arg::<i32>(0);
+            for _ in 1..reads {
+                body.push_arg::<i32>(0);
+                body.op2r(|a: i32, b: i32| a.checked_add(b).ok_or_else(|| anyhow!("overflow")))
+                    .unwrap();
+            }
+            for _ in 0..2 {
+                crate::value_type::SHAPE_COMPARISONS.with(|count| count.set(0));
+                assert_eq!(body.call_dyn::<i32>(&[&1i32]).unwrap(), reads);
+                let comparisons = crate::value_type::SHAPE_COMPARISONS.with(Cell::get);
+                eprintln!("{reads} checked reads: {comparisons} descriptor comparisons");
+                assert!(comparisons <= 4 * reads as usize + 16);
+                assert!(body.call_dyn::<i32>(&[]).is_err());
+                assert!(body.call_dyn::<i32>(&[&1u32]).is_err());
+            }
+            let mut prepared = body.prepare::<Cons<Leaf<i32>, Nil>, Leaf<i32>>().unwrap();
+            crate::value_type::SHAPE_COMPARISONS.with(|count| count.set(0));
+            assert_eq!(prepared.call(&(1i32,).into_c_stack_list()).unwrap(), reads);
+            crate::value_type::SHAPE_COMPARISONS.with(|count| assert_eq!(count.get(), 0));
+        }
     }
 }

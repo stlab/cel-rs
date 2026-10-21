@@ -14,6 +14,7 @@ pub struct RawSegment {
     storage: RawSequence,
     dropper: Vec<fn(&mut RawSequence, usize) -> usize>,
     base_alignment: usize,
+    frame: Option<(usize, usize)>,
 }
 
 impl Default for RawSegment {
@@ -31,6 +32,7 @@ impl RawSegment {
             storage: RawSequence::new(),
             dropper: Vec::new(),
             base_alignment: 0,
+            frame: None,
         }
     }
 
@@ -43,6 +45,22 @@ impl RawSegment {
     pub(crate) fn update_base_alignment(&mut self, alignment: usize) {
         debug_assert!(alignment.is_power_of_two());
         self.base_alignment = max(self.base_alignment, alignment);
+    }
+
+    /// Sets the caller-owned byte prefix and number of owned input values.
+    pub(crate) fn set_frame(&mut self, origin: usize, owned_inputs: usize) {
+        self.frame = Some((origin, owned_inputs));
+    }
+
+    /// Binds the initial frame unless an enclosing segment already supplied it.
+    pub(crate) fn bind_frame(&mut self, origin: usize, owned_inputs: usize) {
+        self.frame.get_or_insert((origin, owned_inputs));
+    }
+
+    /// Returns the byte length occupied by instruction closure state.
+    #[cfg(test)]
+    pub(crate) fn storage_size(&self) -> usize {
+        self.storage.len()
     }
 
     /// Pushes a value into the segment's storage and registers its dropper.
@@ -363,11 +381,22 @@ impl RawSegment {
     /// Precondition: The stack must be in the correct state (base alignment, index, and values)
     /// for the operations in the segment.
     pub unsafe fn call0_stack(&self, stack: &mut RawStack) -> Result<()> {
-        let mut p = 0;
-        for op in &self.ops {
-            p = op(&self.storage, p, stack)?;
-        }
-        Ok(())
+        let (origin, depth) = self.frame.map_or((0, 0), |(origin, inputs)| {
+            (
+                origin,
+                stack
+                    .depth()
+                    .checked_sub(inputs)
+                    .expect("valid input frame"),
+            )
+        });
+        stack.with_unwind(origin, depth, |stack| {
+            let mut p = 0;
+            for op in &self.ops {
+                p = op(&self.storage, p, stack)?;
+            }
+            Ok(())
+        })
     }
 
     /// Executes all operations in the segment and returns the final result.
@@ -398,16 +427,13 @@ impl RawSegment {
     /// # Safety
     /// This function is unsafe if the argument and result types do not match the types expected or
     /// returned by the operations in the segment.
-    pub unsafe fn call1<A, T>(&self, arg: A) -> Result<T>
+    pub unsafe fn call1<A: 'static, T>(&self, arg: A) -> Result<T>
     where
         T: 'static,
     {
         let mut stack = RawStack::with_base_alignment(self.base_alignment);
         stack.push(arg);
-        let mut p = 0;
-        for op in &self.ops {
-            p = op(&self.storage, p, &mut stack)?;
-        }
+        unsafe { self.call0_stack(&mut stack)? };
         Ok(unsafe { stack.pop(false) })
     }
 
@@ -420,17 +446,14 @@ impl RawSegment {
     /// # Safety
     /// This function is unsafe if the arguments and result types do not match the types expected or
     /// returned by the operations in the segment.
-    pub unsafe fn call2<A, B, T>(&self, arg: (A, B)) -> Result<T>
+    pub unsafe fn call2<A: 'static, B: 'static, T>(&self, arg: (A, B)) -> Result<T>
     where
         T: 'static,
     {
         let mut stack = RawStack::with_base_alignment(self.base_alignment);
         stack.push(arg.0);
         stack.push(arg.1);
-        let mut p = 0;
-        for op in &self.ops {
-            p = op(&self.storage, p, &mut stack)?;
-        }
+        unsafe { self.call0_stack(&mut stack)? };
         Ok(unsafe { stack.pop(false) })
     }
 }

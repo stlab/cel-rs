@@ -1,5 +1,9 @@
 # pm-lang: native tuple outputs
 
+> **Historical status (2026-10-19):** Adam now moves/destructures canonical list
+> results through prepared compound-cell frames. The original proposal below
+> records the earlier API; see the [current handoff](../2026-10-19-composable-containers-handoff.md).
+
 **Date:** 2026-07-17
 **Author:** Sean Parent (via Claude)
 **Status:** Approved

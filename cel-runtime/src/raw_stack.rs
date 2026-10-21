@@ -1,13 +1,53 @@
 use crate::memory::align_index;
 use crate::raw_vec::RawVec;
+use crate::value_type::ValueType;
 use std::mem::MaybeUninit;
 use std::mem::size_of;
 
 /// A simple raw stack that stores values as raw bytes. Each value is naturally aligned given the
 /// base alignment of the stack, which is the maximum alignment of any value stored in the stack.
+/// Live values are owned until popped, explicitly released, or destroyed in reverse push order.
 #[derive(Debug)]
 pub struct RawStack {
     buffer: RawVec,
+    owners: Vec<fn(&mut RawStack)>,
+    raw_owners: Vec<RawOwner>,
+}
+
+/// Records layout and optional erased destruction only for a raw-byte slot.
+#[derive(Debug)]
+struct RawOwner {
+    depth: usize,
+    before: usize,
+    align: usize,
+    size: usize,
+    ty: Option<ValueType>,
+}
+
+/// Restores a stack checkpoint unless explicitly disarmed.
+struct UnwindGuard<'a> {
+    stack: &'a mut RawStack,
+    byte_origin: usize,
+    depth: usize,
+    armed: bool,
+}
+
+impl Drop for UnwindGuard<'_> {
+    /// Resumes suffix cleanup, including while another destructor unwinds.
+    fn drop(&mut self) {
+        if self.armed {
+            self.stack.unwind_to(self.byte_origin, self.depth);
+        }
+    }
+}
+
+impl Drop for RawStack {
+    /// Destroys every live owner in reverse order.
+    ///
+    /// - Complexity: O(n) plus destructor costs for n live slots.
+    fn drop(&mut self) {
+        self.unwind_to(0, 0);
+    }
 }
 
 impl RawStack {
@@ -23,6 +63,127 @@ impl RawStack {
     pub fn with_base_alignment(base_alignment: usize) -> Self {
         RawStack {
             buffer: RawVec::with_base_alignment(base_alignment),
+            owners: Vec::new(),
+            raw_owners: Vec::new(),
+        }
+    }
+
+    /// Returns the logical slot count, including zero-sized values.
+    pub(crate) fn depth(&self) -> usize {
+        self.owners.len()
+    }
+
+    /// Destroys the top owner after removing its ownership and preceding padding.
+    ///
+    /// - Precondition: The stack has at least one logical slot.
+    /// - Postcondition: The preceding prefix retains its bytes and ownership,
+    ///   including when the top value is zero-sized or its destructor panics.
+    /// - Complexity: O(p) for p padding bytes, plus destructor costs.
+    pub(crate) fn drop_top(&mut self) {
+        debug_assert!(self.depth() > 0);
+        let destroy = *self.owners.last().expect("top owner exists");
+        destroy(self);
+    }
+
+    /// Removes the latest ownership entries without destroying or changing their bytes.
+    ///
+    /// - Precondition: `count` does not exceed the logical depth.
+    /// - Complexity: O(count), excluding descriptor destruction.
+    pub(crate) fn release_top(&mut self, count: usize) {
+        debug_assert!(count <= self.depth());
+        let depth = self.depth() - count;
+        while self
+            .raw_owners
+            .last()
+            .is_some_and(|owner| owner.depth > depth)
+        {
+            self.raw_owners.pop();
+        }
+        self.owners.truncate(depth);
+    }
+
+    /// Installs erased destruction for the latest raw-byte slot.
+    ///
+    /// - Precondition: The top slot is raw, has no erased owner yet, and contains a
+    ///   valid value with the shape and layout described by `ty`.
+    pub(crate) fn own_top(&mut self, ty: ValueType) {
+        let depth = self.depth();
+        let owner = self.raw_owners.last_mut().expect("top slot must be raw");
+        debug_assert_eq!(owner.depth, depth);
+        debug_assert!(owner.ty.is_none());
+        debug_assert_eq!(owner.size, ty.size());
+        debug_assert_eq!(owner.align, ty.align());
+        owner.ty = Some(ty);
+    }
+
+    /// Destroys the suffix after `depth` and restores its preceding byte origin.
+    ///
+    /// Remaining destruction resumes if one destructor panics.
+    ///
+    /// - Precondition: `(byte_origin, depth)` identifies a live prefix checkpoint.
+    /// - Complexity: O(n) plus destructor costs for n removed slots and padding scans.
+    pub(crate) fn unwind_to(&mut self, byte_origin: usize, depth: usize) {
+        debug_assert!(depth <= self.depth());
+        debug_assert!(byte_origin <= self.len());
+        let mut guard = UnwindGuard {
+            stack: self,
+            byte_origin,
+            depth,
+            armed: true,
+        };
+        while guard.stack.depth() > depth {
+            guard.stack.drop_top();
+        }
+        guard.stack.buffer.truncate(byte_origin);
+        guard.armed = false;
+    }
+
+    /// Runs a callback, restoring a live prefix checkpoint on error or panic.
+    ///
+    /// - Precondition: `(byte_origin, depth)` identifies a live prefix that the
+    ///   callback preserves.
+    /// - Postcondition: Success retains all callback changes.
+    /// - Complexity: Callback costs, plus suffix destruction on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns the callback's error after destroying its suffix.
+    pub(crate) fn with_unwind<R>(
+        &mut self,
+        byte_origin: usize,
+        depth: usize,
+        callback: impl FnOnce(&mut RawStack) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
+        debug_assert!(depth <= self.depth());
+        debug_assert!(byte_origin <= self.len());
+        let mut guard = UnwindGuard {
+            stack: self,
+            byte_origin,
+            depth,
+            armed: true,
+        };
+        let result = callback(guard.stack);
+        if result.is_ok() {
+            guard.armed = false;
+        }
+        result
+    }
+
+    /// Pops and then destroys a typed owner with its statically known padding.
+    fn destroy_typed<T, const PADDING: bool>(&mut self) {
+        drop(unsafe { self.pop::<T>(PADDING) });
+    }
+
+    /// Removes raw ownership and bytes before invoking any erased destructor.
+    fn destroy_raw(&mut self) {
+        let owner = self.raw_owners.pop().expect("raw owner exists");
+        debug_assert_eq!(owner.depth, self.depth());
+        self.owners.pop();
+        let offset = align_index(owner.align, owner.before);
+        let pointer = unsafe { self.buffer.as_mut_ptr().add(offset).cast::<u8>() };
+        self.buffer.truncate(owner.before);
+        if let Some(ty) = owner.ty {
+            unsafe { crate::owned_value::drop_raw(&ty, pointer) };
         }
     }
 
@@ -35,8 +196,9 @@ impl RawStack {
 
     /// Pushes a value of type `T` onto the stack.
     ///
-    /// The value is stored as raw bytes in the internal buffer. The pushed value must be
-    /// later popped using the correct type.
+    /// The stack owns the value until it is popped using the correct type or destroyed.
+    /// `T: 'static` prevents owned destructors from retaining nonstatic borrows;
+    /// borrowed inputs must instead use explicitly borrowed adapters.
     ///
     /// # Type Parameters
     ///
@@ -50,15 +212,38 @@ impl RawStack {
     /// let _ = stack.push(42u32);
     /// ```
     ///
+    /// A value whose destructor borrows nonstatic data cannot enter this owning stack:
+    ///
+    /// ```compile_fail,E0597
+    /// use cel_runtime::raw_stack::RawStack;
+    ///
+    /// /// Borrows text that must remain live until destruction.
+    /// struct BorrowedDrop<'a>(&'a str);
+    /// impl Drop for BorrowedDrop<'_> {
+    ///     /// Reads the borrowed text during destruction.
+    ///     fn drop(&mut self) {
+    ///         assert!(!self.0.is_empty());
+    ///     }
+    /// }
+    ///
+    /// let mut stack = RawStack::with_base_alignment(align_of::<BorrowedDrop<'static>>());
+    /// {
+    ///     let text = String::from("borrowed");
+    ///     stack.push(BorrowedDrop(&text));
+    /// }
+    /// drop(stack);
+    /// ```
+    ///
     /// # Complexity
     ///
     /// The function has an amortized O(1) time complexity.
-    pub fn push<T>(&mut self, value: T) -> bool {
+    pub fn push<T: 'static>(&mut self, value: T) -> bool {
         let len = self.buffer.len();
         let aligned_index = align_index(align_of::<T>(), len);
         let new_len = aligned_index + size_of::<T>();
 
-        self.buffer.reserve(new_len - len);
+        self.owners.reserve(1);
+        self.buffer.reserve((new_len - len).max(1));
         unsafe {
             self.buffer.set_len(new_len);
             if aligned_index - len > 0 {
@@ -72,7 +257,13 @@ impl RawStack {
                 value,
             );
         }
-        aligned_index - len > 0
+        let padding = aligned_index - len > 0;
+        self.owners.push(if padding {
+            Self::destroy_typed::<T, true>
+        } else {
+            Self::destroy_typed::<T, false>
+        });
+        padding
     }
 
     /// Pushes `size` raw bytes from `src`, aligned to `align`, using the same
@@ -85,6 +276,9 @@ impl RawStack {
     /// bytes' values.
     ///
     /// - Precondition: `align` is a power of two.
+    /// - Postcondition: A raw-byte slot is registered; its bytes are not destroyed
+    ///   as a typed value unless upgraded with `own_top`.
+    /// - Complexity: Amortized O(size) time and space.
     ///
     /// # Safety
     /// `src` must be valid for reads of `size` bytes, and must not overlap the
@@ -100,7 +294,9 @@ impl RawStack {
         let aligned_index = align_index(align, len);
         let new_len = aligned_index + size;
 
-        self.buffer.reserve(new_len - len);
+        self.owners.reserve(1);
+        self.raw_owners.reserve(1);
+        self.buffer.reserve((new_len - len).max(1));
         unsafe {
             self.buffer.set_len(new_len);
             if aligned_index - len > 0 {
@@ -109,6 +305,14 @@ impl RawStack {
             }
             std::ptr::copy_nonoverlapping(src, self.buffer.as_mut_ptr().add(aligned_index), size);
         }
+        self.owners.push(Self::destroy_raw);
+        self.raw_owners.push(RawOwner {
+            depth: self.depth(),
+            before: len,
+            align,
+            size,
+            ty: None,
+        });
         aligned_index - len > 0
     }
 
@@ -119,10 +323,14 @@ impl RawStack {
     /// - Precondition: `align` is a power of two.
     /// - Postcondition: `write` is called exactly once, before this method
     ///   returns, with a pointer to `size` freshly-reserved bytes.
+    /// - Postcondition: Normal return registers a raw-byte slot; a panicking
+    ///   initializer registers no slot, leaving byte restoration to its caller.
+    /// - Complexity: Amortized O(size) plus initializer costs.
     ///
     /// # Safety
     /// `write` must fully initialize all `size` bytes at the pointer it's
-    /// given before returning.
+    /// given before returning, except interior padding. If it panics, the caller
+    /// must guard partially initialized resources.
     pub unsafe fn reserve_and_write(
         &mut self,
         align: usize,
@@ -134,7 +342,9 @@ impl RawStack {
         let aligned_index = align_index(align, len);
         let new_len = aligned_index + size;
 
-        self.buffer.reserve(new_len - len);
+        self.owners.reserve(1);
+        self.raw_owners.reserve(1);
+        self.buffer.reserve((new_len - len).max(1));
         unsafe {
             self.buffer.set_len(new_len);
             if aligned_index - len > 0 {
@@ -143,6 +353,14 @@ impl RawStack {
             }
             write(self.buffer.as_mut_ptr().add(aligned_index).cast::<u8>());
         }
+        self.owners.push(Self::destroy_raw);
+        self.raw_owners.push(RawOwner {
+            depth: self.depth(),
+            before: len,
+            align,
+            size,
+            ty: None,
+        });
         aligned_index - len > 0
     }
 
@@ -170,7 +388,8 @@ impl RawStack {
     ///
     /// # Safety
     /// `offset` must point to a live, valid value; `run_drop` must correctly
-    /// run that value's destructor given a pointer to its start.
+    /// run that value's destructor given a pointer to its start. Its ownership
+    /// entry must already have been removed with `release_top`.
     pub unsafe fn drop_at(&mut self, offset: usize, run_drop: impl FnOnce(*mut u8)) {
         unsafe { run_drop(self.buffer.as_mut_ptr().add(offset).cast::<u8>()) };
     }
@@ -181,7 +400,9 @@ impl RawStack {
     /// # Safety
     /// `offset` must point to a live, valid, properly-aligned value for the type the
     /// caller will reinterpret it as; `read` must not retain the pointer beyond the
-    /// call.
+    /// call. This byte operation does not transfer ownership; a caller moving out
+    /// a value must explicitly release its ownership entry before destruction or
+    /// stack cleanup can occur.
     pub unsafe fn read_at<R>(&self, offset: usize, read: impl FnOnce(*const u8) -> R) -> R {
         unsafe { read(self.buffer.as_ptr().add(offset).cast::<u8>()) }
     }
@@ -191,7 +412,9 @@ impl RawStack {
     /// [`pop`](Self::pop) does).
     ///
     /// # Safety
-    /// No live (undropped) value may exist at or above `new_len`.
+    /// No live (undropped) value may exist at or above `new_len`; the caller must
+    /// explicitly release all removed ownership entries first. This byte operation
+    /// does not infer ownership transfer, including for zero-sized values.
     pub unsafe fn truncate_to(&mut self, new_len: usize, padding: bool) {
         debug_assert!(new_len <= self.buffer.len());
         let padding_count = if padding {
@@ -207,13 +430,12 @@ impl RawStack {
         self.buffer.truncate(new_len - padding_count);
     }
 
-    /// Drops a value of `size` bytes at the top of the stack in place, then
-    /// removes it (and any padding that preceded it).
+    /// Removes the top owner's bytes and metadata, then destroys its value in place.
     ///
     /// # Safety
     /// The top `size` bytes (plus padding if `padding` is true) must be a
     /// live, valid value; `run_drop` must correctly run its destructor given a
-    /// pointer to its start.
+    /// pointer to its start. The value must have a registered top ownership entry.
     pub unsafe fn drop_sized(
         &mut self,
         size: usize,
@@ -222,9 +444,11 @@ impl RawStack {
     ) {
         debug_assert!(size <= self.buffer.len());
         let p = self.buffer.len() - size;
+        let pointer = unsafe { self.buffer.as_mut_ptr().add(p).cast::<u8>() };
+        self.release_top(1);
         unsafe {
-            self.drop_at(p, run_drop);
             self.truncate_to(p, padding);
+            run_drop(pointer);
         }
     }
 
@@ -251,6 +475,9 @@ impl RawStack {
     /// element's destination start is guaranteed to be at or after every
     /// earlier element's source end, which is what makes processing in reverse
     /// index order below safe against clobbering not-yet-read source bytes.
+    /// The caller must release ownership entries for every moved value before
+    /// repacking, then register the resulting representation separately. This
+    /// byte operation never infers ownership transfer.
     pub unsafe fn repack(
         &mut self,
         ambient_start: usize,
@@ -298,7 +525,8 @@ impl RawStack {
     /// # Safety
     ///
     /// The type `T` must be the same type as the value on the top of the stack.
-    /// Incorrect usage can lead to undefined behavior.
+    /// `padding` must match its push result, and the value must have a registered
+    /// ownership entry. Incorrect usage can lead to undefined behavior.
     ///
     /// # Type Parameters
     ///
@@ -327,6 +555,7 @@ impl RawStack {
             0
         };
         self.buffer.truncate(p - padding_count);
+        self.release_top(1);
         result
     }
 
@@ -337,9 +566,7 @@ impl RawStack {
     /// The type `T` must be the same type as the value on the top of the stack.
     /// Incorrect usage can lead to undefined behavior.
     ///
-    /// # Note
-    ///
-    /// This cannot use `drop_in_place` because the type may not be aligned.
+    /// Removes ownership and bytes before invoking the value's destructor.
     pub unsafe fn drop<T>(&mut self, padding: bool) {
         unsafe { self.pop::<T>(padding) };
     }
@@ -349,7 +576,320 @@ impl RawStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::cmp::max;
+    use std::rc::Rc;
+
+    /// Records destruction order and optionally panics after recording its identifier.
+    struct Tracked {
+        id: usize,
+        drops: Rc<RefCell<Vec<usize>>>,
+        panic: bool,
+    }
+
+    impl Drop for Tracked {
+        /// Records this owner's destruction before optionally panicking.
+        fn drop(&mut self) {
+            self.drops.borrow_mut().push(self.id);
+            assert!(!self.panic, "destructor panic");
+        }
+    }
+
+    /// Pushes a tracked owner onto the stack.
+    fn track(
+        stack: &mut RawStack,
+        drops: &Rc<RefCell<Vec<usize>>>,
+        id: usize,
+        panic: bool,
+    ) -> bool {
+        stack.push(Tracked {
+            id,
+            drops: drops.clone(),
+            panic,
+        })
+    }
+
+    #[test]
+    /// Destroys live typed owners in reverse order across mixed alignments.
+    fn live_owners_drop_in_reverse_order() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        {
+            let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+            track(&mut stack, &drops, 1, false);
+            stack.push(1u8);
+            track(&mut stack, &drops, 2, false);
+        }
+        assert_eq!(*drops.borrow(), [2, 1]);
+    }
+
+    #[test]
+    /// Transfers a popped owner's destruction obligation to its caller.
+    fn popped_owner_is_not_dropped_twice() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        let padding = track(&mut stack, &drops, 1, false);
+        let value: Tracked = unsafe { stack.pop(padding) };
+        drop(stack);
+        assert!(drops.borrow().is_empty());
+        drop(value);
+        assert_eq!(*drops.borrow(), [1]);
+    }
+
+    #[test]
+    /// Destroys the top owner and restores its preceding byte boundary, including ZSTs.
+    fn drop_top_preserves_prefix_and_padding() {
+        ZST_DROPS.with(|count| count.set(0));
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        stack.push(42u8);
+        track(&mut stack, &drops, 1, false);
+        stack.push(ZeroSized);
+        let before_zero = stack.len();
+        stack.drop_top();
+        assert_eq!(stack.len(), before_zero);
+        assert_eq!(stack.depth(), 2);
+        ZST_DROPS.with(|count| assert_eq!(count.get(), 1));
+        stack.drop_top();
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack.depth(), 1);
+        assert_eq!(*drops.borrow(), [1]);
+        let prefix: u8 = unsafe { stack.pop(false) };
+        assert_eq!(prefix, 42);
+        drop(stack);
+        assert_eq!(*drops.borrow(), [1]);
+    }
+
+    #[test]
+    /// Removes a top owner's obligation before its destructor panics.
+    fn drop_top_panic_does_not_repeat_destruction() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        track(&mut stack, &drops, 1, false);
+        let origin = stack.len();
+        track(&mut stack, &drops, 2, true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stack.drop_top();
+        }));
+        assert!(result.is_err());
+        assert_eq!(stack.len(), origin);
+        assert_eq!(stack.depth(), 1);
+        assert_eq!(*drops.borrow(), [2]);
+        drop(stack);
+        assert_eq!(*drops.borrow(), [2, 1]);
+    }
+
+    thread_local! {
+        static ZST_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Counts destruction of a value that occupies no stack bytes.
+    struct ZeroSized;
+
+    impl Drop for ZeroSized {
+        /// Increments the thread-local destruction count.
+        fn drop(&mut self) {
+            ZST_DROPS.with(|count| count.set(count.get() + 1));
+        }
+    }
+
+    #[test]
+    /// Distinguishes zero-sized owners by depth and preserves the caller's prefix.
+    fn scoped_unwind_preserves_zero_sized_prefix() {
+        ZST_DROPS.with(|count| count.set(0));
+        let mut stack = RawStack::with_base_alignment(align_of::<usize>());
+        stack.push(42usize);
+        stack.push(ZeroSized);
+        let origin = stack.len();
+        let depth = stack.depth();
+        let result: anyhow::Result<()> = stack.with_unwind(origin, depth, |stack| {
+            stack.push(ZeroSized);
+            stack.push(ZeroSized);
+            anyhow::bail!("callback failed")
+        });
+        assert!(result.is_err());
+        assert_eq!(stack.len(), origin);
+        assert_eq!(stack.depth(), depth);
+        ZST_DROPS.with(|count| assert_eq!(count.get(), 2));
+        drop(stack);
+        ZST_DROPS.with(|count| assert_eq!(count.get(), 3));
+    }
+
+    #[test]
+    /// Cleans a panicking callback's suffix without destroying the caller's owner.
+    fn callback_panic_cleans_suffix() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        track(&mut stack, &drops, 1, false);
+        let origin = stack.len();
+        let depth = stack.depth();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: anyhow::Result<()> = stack.with_unwind(origin, depth, |stack| {
+                track(stack, &drops, 2, false);
+                panic!("callback panic")
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(*drops.borrow(), [2]);
+        assert_eq!(stack.depth(), depth);
+        assert_eq!(stack.len(), origin);
+        drop(stack);
+        assert_eq!(*drops.borrow(), [2, 1]);
+    }
+
+    #[test]
+    /// Resumes remaining destruction after one destructor panics.
+    fn destructor_panic_resumes_cleanup() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+            track(&mut stack, &drops, 1, false);
+            track(&mut stack, &drops, 2, true);
+            track(&mut stack, &drops, 3, false);
+        }));
+        assert!(result.is_err());
+        assert_eq!(*drops.borrow(), [3, 2, 1]);
+    }
+
+    #[test]
+    /// Upgrades copied raw storage into an erased destruction obligation.
+    fn raw_bytes_become_erased_owner() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let value = std::mem::ManuallyDrop::new(Tracked {
+            id: 1,
+            drops: drops.clone(),
+            panic: false,
+        });
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        unsafe {
+            stack.push_raw(
+                align_of::<Tracked>(),
+                size_of::<Tracked>(),
+                (&*value as *const Tracked).cast(),
+            );
+        }
+        stack.own_top(crate::value_type::ValueType::leaf::<Tracked>());
+        drop(stack);
+        assert_eq!(*drops.borrow(), [1]);
+    }
+
+    #[test]
+    /// Destroys an erased top owner without retaining its layout at the call site.
+    fn drop_top_destroys_erased_owner_and_padding() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        stack.push(42u8);
+        unsafe {
+            stack.reserve_and_write(align_of::<Tracked>(), size_of::<Tracked>(), |pointer| {
+                pointer.cast::<Tracked>().write(Tracked {
+                    id: 1,
+                    drops: drops.clone(),
+                    panic: false,
+                });
+            });
+        }
+        stack.own_top(ValueType::leaf::<Tracked>());
+        stack.drop_top();
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack.depth(), 1);
+        assert_eq!(*drops.borrow(), [1]);
+        drop(stack);
+        assert_eq!(*drops.borrow(), [1]);
+    }
+
+    #[test]
+    /// Retains successful callback pushes until normal stack destruction.
+    fn successful_scope_keeps_owners() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        let value = stack
+            .with_unwind(0, 0, |stack| {
+                track(stack, &drops, 1, false);
+                Ok(42)
+            })
+            .unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(stack.depth(), 1);
+        assert!(drops.borrow().is_empty());
+        drop(stack);
+        assert_eq!(*drops.borrow(), [1]);
+    }
+
+    #[test]
+    /// Removes erased side metadata when transferring the top value to typed code.
+    fn typed_pop_transfers_erased_owner() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        let padding = unsafe {
+            stack.reserve_and_write(align_of::<Tracked>(), size_of::<Tracked>(), |pointer| {
+                pointer.cast::<Tracked>().write(Tracked {
+                    id: 1,
+                    drops: drops.clone(),
+                    panic: false,
+                });
+            })
+        };
+        stack.own_top(ValueType::leaf::<Tracked>());
+        let value: Tracked = unsafe { stack.pop(padding) };
+        assert_eq!(stack.depth(), 0);
+        track(&mut stack, &drops, 2, false);
+        drop(stack);
+        assert_eq!(*drops.borrow(), [2]);
+        drop(value);
+        assert_eq!(*drops.borrow(), [2, 1]);
+    }
+
+    #[test]
+    /// Leaves no valid owner registered when raw initialization panics.
+    fn initializer_panic_registers_no_owner() {
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            stack.reserve_and_write(align_of::<Tracked>(), size_of::<Tracked>(), |_| {
+                panic!("uninitialized")
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(stack.depth(), 0);
+        stack.unwind_to(0, 0);
+        assert_eq!(stack.len(), 0);
+    }
+
+    #[test]
+    /// Releases zero-sized ownership without destroying values or changing bytes.
+    fn release_top_preserves_bytes_and_releases_zero_sized_owner() {
+        ZST_DROPS.with(|count| count.set(0));
+        let mut stack = RawStack::with_base_alignment(align_of::<usize>());
+        stack.push(42usize);
+        stack.push(ZeroSized);
+        let origin = stack.len();
+        stack.release_top(1);
+        assert_eq!(stack.len(), origin);
+        assert_eq!(stack.depth(), 1);
+        let value: usize = unsafe { stack.pop(false) };
+        assert_eq!(value, 42);
+        drop(stack);
+        ZST_DROPS.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    #[test]
+    /// Restores the caller's prefix after a suffix destructor panics.
+    fn scoped_destructor_panic_restores_prefix() {
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let mut stack = RawStack::with_base_alignment(align_of::<Tracked>());
+        track(&mut stack, &drops, 1, false);
+        let origin = stack.len();
+        let depth = stack.depth();
+        track(&mut stack, &drops, 2, false);
+        track(&mut stack, &drops, 3, true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            stack.unwind_to(origin, depth);
+        }));
+        assert!(result.is_err());
+        assert_eq!(*drops.borrow(), [3, 2]);
+        assert_eq!(stack.len(), origin);
+        assert_eq!(stack.depth(), depth);
+        drop(stack);
+        assert_eq!(*drops.borrow(), [3, 2, 1]);
+    }
 
     #[test]
     fn push_pop_u32() {
@@ -508,6 +1048,7 @@ mod tests {
         let mut stack = RawStack::with_base_alignment(align_of::<DropCounter>());
         let _ = stack.push(DropCounter(count.clone()));
         let len_before = stack.len();
+        stack.release_top(1);
         unsafe {
             stack.drop_at(0, |ptr| std::ptr::drop_in_place(ptr.cast::<DropCounter>()));
         }
@@ -521,6 +1062,7 @@ mod tests {
         let _ = stack.push(1u8);
         let padding = stack.push(2.5f64); // padding == true: 7 bytes inserted before the f64
         let len_with_value = stack.len();
+        stack.release_top(1);
         unsafe { stack.truncate_to(len_with_value - size_of::<f64>(), padding) };
         assert_eq!(stack.len(), 1); // back to just the u8
     }
@@ -569,6 +1111,7 @@ mod tests {
         let total_size = 12usize;
         let dest_base = 0usize; // ambient_start (0) is already 4-aligned
 
+        stack.release_top(3);
         let padding = unsafe {
             stack.repack(
                 ambient_start,
@@ -619,6 +1162,7 @@ mod tests {
         let total_size = 8usize;
         let dest_base = 4usize; // align_index(4, ambient_start=1) == 4, so this shifts right
 
+        stack.release_top(2);
         let padding = unsafe {
             stack.repack(
                 ambient_start,

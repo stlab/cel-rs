@@ -5,8 +5,7 @@
 
 use anyhow::Result;
 use cel_parser::{OpLookup, OperationSignature, ResolvedLeafType};
-use cel_runtime::ArrayElementType;
-use std::sync::Arc;
+use cel_runtime::ValueType;
 
 /// Marker pushed for a bare `min` lookup; consumed by the paired `"()"` call.
 #[derive(Clone)]
@@ -45,11 +44,8 @@ struct FractFn;
 struct RoundTiesEvenFn;
 
 /// Returns a numeric leaf's complete concrete descriptor.
-fn numeric_type<T: 'static>() -> ResolvedLeafType {
-    ResolvedLeafType::new(
-        std::any::type_name::<T>(),
-        ArrayElementType::leaf::<T>().expect("numeric types are non-array leaves"),
-    )
+fn numeric_type<T: 'static>() -> cel_parser::ResolvedType {
+    ResolvedLeafType::new(std::any::type_name::<T>(), ValueType::leaf::<T>()).into()
 }
 
 /// Registers existing numeric contracts as composable direct operation signatures.
@@ -80,17 +76,17 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             lookup.register_operation(OperationSignature {
                 name: "min", operands: vec![numeric_type::<$t>(); 2],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op2(|a: $t, b: $t| a.min(b))),
+                emit: Box::new(|segment, _| segment.op2(|a: $t, b: $t| a.min(b))),
             })?;
             lookup.register_operation(OperationSignature {
                 name: "max", operands: vec![numeric_type::<$t>(); 2],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op2(|a: $t, b: $t| a.max(b))),
+                emit: Box::new(|segment, _| segment.op2(|a: $t, b: $t| a.max(b))),
             })?;
             lookup.register_operation(OperationSignature {
                 name: "clamp", operands: vec![numeric_type::<$t>(); 3],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op3r(|x: $t, lo: $t, hi: $t| {
+                emit: Box::new(|segment, _| segment.op3r(|x: $t, lo: $t, hi: $t| {
                     if lo <= hi { Ok(x.clamp(lo, hi)) }
                     else { Err(anyhow::anyhow!("invalid clamp bounds")) }
                 })),
@@ -106,7 +102,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             lookup.register_operation(OperationSignature {
                 name: stringify!($method), operands: vec![numeric_type::<$t>()],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op1(|x: $t| x.$method())),
+                emit: Box::new(|segment, _| segment.op1(|x: $t| x.$method())),
             })?;
         )+ };
     }
@@ -115,7 +111,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             lookup.register_operation(OperationSignature {
                 name: "abs", operands: vec![numeric_type::<$t>()],
                 result: numeric_type::<$t>(),
-                emit: Arc::new(|segment, _| segment.op1r(|x: $t| {
+                emit: Box::new(|segment, _| segment.op1r(|x: $t| {
                     x.checked_abs().ok_or_else(|| anyhow::anyhow!("arithmetic overflow"))
                 })),
             })?;
@@ -145,8 +141,7 @@ mod tests {
     #[test]
     fn independent_min_overload_composes_with_standard_library() -> Result<()> {
         use cel_parser::{OperationSignature, ResolvedLeafType};
-        use cel_runtime::ArrayElementType;
-        use std::sync::Arc;
+        use cel_runtime::ValueType;
 
         /// Names the host's independent overload installer.
         #[derive(Clone)]
@@ -163,12 +158,9 @@ mod tests {
             lookup.register_function("min", HostMin)?;
             lookup.register_operation(OperationSignature {
                 name: "min",
-                operands: vec![ResolvedLeafType::new(
-                    "Corner",
-                    ArrayElementType::leaf::<Corner>().unwrap(),
-                )],
-                result: ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap()),
-                emit: Arc::new(|segment, _| segment.op1(|corner: Corner| corner.0)),
+                operands: vec![ResolvedLeafType::new("Corner", ValueType::leaf::<Corner>()).into()],
+                result: ResolvedLeafType::new("f64", ValueType::leaf::<f64>()).into(),
+                emit: Box::new(|segment, _| segment.op1(|corner: Corner| corner.0)),
             })?;
             if !reverse {
                 install(&mut lookup);

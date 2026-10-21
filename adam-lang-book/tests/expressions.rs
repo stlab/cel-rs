@@ -22,16 +22,15 @@ fn no_standard_library() {
 fn registered_record_and_member_example() {
     use adam_lang::{AdamParser, TypeRegistry};
     use cel_parser::{OpLookup, OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
-    use cel_runtime::ArrayElementType;
-    use std::sync::Arc;
+    use cel_runtime::ValueType;
 
     /// A host-defined type with a named field.
     #[derive(Clone, Debug, Default, PartialEq)]
     struct Sample {
         value: f64,
     }
-    let sample = ResolvedLeafType::new("Sample", ArrayElementType::leaf::<Sample>().unwrap());
-    let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+    let sample = ResolvedLeafType::new("Sample", ValueType::leaf::<Sample>());
+    let scalar = ResolvedLeafType::new("f64", ValueType::leaf::<f64>());
     let mut registry = TypeRegistry::new();
     registry.register::<Sample>("Sample");
     let mut lookup = OpLookup::new();
@@ -40,17 +39,17 @@ fn registered_record_and_member_example() {
             ty: sample.clone(),
             fields: vec![RecordField {
                 name: "value",
-                ty: scalar.clone(),
+                ty: scalar.clone().into(),
             }],
-            emit: Arc::new(|s, _, _, _| s.op1(|value: f64| Sample { value })),
+            emit: Box::new(|s, _, _, _| s.op1(|value: f64| Sample { value })),
         })
         .unwrap();
     lookup
         .register_operation(OperationSignature {
             name: "value",
-            operands: vec![sample],
-            result: scalar,
-            emit: Arc::new(|s, _| s.op1(|sample: Sample| sample.value)),
+            operands: vec![sample.into()],
+            result: scalar.into(),
+            emit: Box::new(|s, _| s.op1(|sample: Sample| sample.value)),
         })
         .unwrap();
     let source = "sheet samples {

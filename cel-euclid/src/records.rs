@@ -6,19 +6,18 @@
 use crate::{Angle, Box2D, Point2D, Rect, Size2D, Transform2D, Vector2D, leaf};
 use anyhow::Result;
 use cel_parser::{OpLookup, RecordField, RecordSchema};
-use cel_runtime::{CNil, CStackList};
-use std::sync::Arc;
+use cel_runtime::{Cons, IntoRustTuple, Leaf, Nil};
 
-/// Holds two scalars in their evaluated source order (last value is the head).
-type Pair = CStackList<f64, CStackList<f64, CNil<()>>>;
+/// Holds two scalars in their evaluated source order.
+type Pair = Cons<Leaf<f64>, Cons<Leaf<f64>, Nil>>;
 /// Holds six scalars in their evaluated source order.
-type Six = CStackList<f64, CStackList<f64, CStackList<f64, CStackList<f64, Pair>>>>;
+type Six = Cons<Leaf<f64>, Cons<Leaf<f64>, Cons<Leaf<f64>, Cons<Leaf<f64>, Pair>>>>;
 /// Holds source-order origin then size without erasing their distinct types.
-type OriginSize = CStackList<Size2D, CStackList<Point2D, CNil<()>>>;
+type OriginSize = Cons<Leaf<Point2D>, Cons<Leaf<Size2D>, Nil>>;
 /// Holds source-order size then origin without erasing their distinct types.
-type SizeOrigin = CStackList<Point2D, CStackList<Size2D, CNil<()>>>;
+type SizeOrigin = Cons<Leaf<Size2D>, Cons<Leaf<Point2D>, Nil>>;
 /// Holds two source-order points.
-type Points = CStackList<Point2D, CStackList<Point2D, CNil<()>>>;
+type Points = Cons<Leaf<Point2D>, Cons<Leaf<Point2D>, Nil>>;
 
 /// Maps evaluated source positions to canonical schema positions.
 ///
@@ -52,16 +51,16 @@ fn scalar_pair<T: 'static>(
             .into_iter()
             .map(|name| RecordField {
                 name,
-                ty: leaf::<f64>("f64"),
+                ty: leaf::<f64>("f64").into(),
             })
             .collect(),
-        emit: Arc::new(move |s, mapping, ambient, _| {
+        emit: Box::new(move |s, mapping, ambient, _| {
             let mapping: [usize; 2] = mapping
                 .try_into()
                 .expect("validated two-field scalar schema");
-            s.make_tuple(2, ambient);
-            s.pop_tuple_as::<Pair>()?;
-            s.op1(move |CStackList(CStackList(_, a), b): Pair| {
+            s.make_tuple(2, ambient)?;
+            s.op1_repr::<Pair, Leaf<T>, _>(move |value| {
+                let (a, b) = value.into_rust_tuple();
                 let [a, b] = ordered([a, b], mapping);
                 build(a, b)
             })
@@ -84,22 +83,26 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
         fields: vec![
             RecordField {
                 name: "origin",
-                ty: leaf::<Point2D>("Point2D"),
+                ty: leaf::<Point2D>("Point2D").into(),
             },
             RecordField {
                 name: "size",
-                ty: leaf::<Size2D>("Size2D"),
+                ty: leaf::<Size2D>("Size2D").into(),
             },
         ],
-        emit: Arc::new(|s, mapping, ambient, _| {
+        emit: Box::new(|s, mapping, ambient, _| {
             debug_assert!(matches!(mapping, [0, 1] | [1, 0]));
-            s.make_tuple(2, ambient);
+            s.make_tuple(2, ambient)?;
             if mapping == [0, 1] {
-                s.pop_tuple_as::<OriginSize>()?;
-                s.op1(|CStackList(CStackList(_, origin), size): OriginSize| Rect::new(origin, size))
+                s.op1_repr::<OriginSize, Leaf<Rect>, _>(|value| {
+                    let (origin, size) = value.into_rust_tuple();
+                    Rect::new(origin, size)
+                })
             } else {
-                s.pop_tuple_as::<SizeOrigin>()?;
-                s.op1(|CStackList(CStackList(_, size), origin): SizeOrigin| Rect::new(origin, size))
+                s.op1_repr::<SizeOrigin, Leaf<Rect>, _>(|value| {
+                    let (size, origin) = value.into_rust_tuple();
+                    Rect::new(origin, size)
+                })
             }
         }),
     })?;
@@ -108,19 +111,19 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
         fields: vec![
             RecordField {
                 name: "min",
-                ty: leaf::<Point2D>("Point2D"),
+                ty: leaf::<Point2D>("Point2D").into(),
             },
             RecordField {
                 name: "max",
-                ty: leaf::<Point2D>("Point2D"),
+                ty: leaf::<Point2D>("Point2D").into(),
             },
         ],
-        emit: Arc::new(|s, mapping, ambient, _| {
+        emit: Box::new(|s, mapping, ambient, _| {
             debug_assert!(matches!(mapping, [0, 1] | [1, 0]));
             let reversed = mapping == [1, 0];
-            s.make_tuple(2, ambient);
-            s.pop_tuple_as::<Points>()?;
-            s.op1(move |CStackList(CStackList(_, a), b): Points| {
+            s.make_tuple(2, ambient)?;
+            s.op1_repr::<Points, Leaf<Box2D>, _>(move |value| {
+                let (a, b) = value.into_rust_tuple();
                 if reversed {
                     Box2D::new(b, a)
                 } else {
@@ -133,12 +136,14 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
         ty: leaf::<Angle>("Angle"),
         fields: vec![RecordField {
             name: "radians",
-            ty: leaf::<f64>("f64"),
+            ty: leaf::<f64>("f64").into(),
         }],
-        emit: Arc::new(|s, _, ambient, _| {
-            s.make_tuple(1, ambient);
-            s.pop_tuple_as::<CStackList<f64, CNil<()>>>()?;
-            s.op1(|CStackList(_, radians): CStackList<f64, CNil<()>>| Angle::radians(radians))
+        emit: Box::new(|s, _, ambient, _| {
+            s.make_tuple(1, ambient)?;
+            s.op1_repr::<Cons<Leaf<f64>, Nil>, Leaf<Angle>, _>(|value| {
+                let (radians,) = value.into_rust_tuple();
+                Angle::radians(radians)
+            })
         }),
     })?;
     lookup.register_record(RecordSchema {
@@ -147,24 +152,19 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             .into_iter()
             .map(|name| RecordField {
                 name,
-                ty: leaf::<f64>("f64"),
+                ty: leaf::<f64>("f64").into(),
             })
             .collect(),
-        emit: Arc::new(|s, mapping, ambient, _| {
+        emit: Box::new(|s, mapping, ambient, _| {
             let mapping: [usize; 6] = mapping
                 .try_into()
                 .expect("validated six-field matrix schema");
-            s.make_tuple(6, ambient);
-            s.pop_tuple_as::<Six>()?;
-            s.op1(
-                move |CStackList(
-                    CStackList(CStackList(CStackList(CStackList(CStackList(_, a), b), c), d), e),
-                    f,
-                ): Six| {
-                    let [a, b, c, d, e, f] = ordered([a, b, c, d, e, f], mapping);
-                    Transform2D::new(a, b, c, d, e, f)
-                },
-            )
+            s.make_tuple(6, ambient)?;
+            s.op1_repr::<Six, Leaf<Transform2D>, _>(move |value| {
+                let (a, b, c, d, e, f) = value.into_rust_tuple();
+                let [a, b, c, d, e, f] = ordered([a, b, c, d, e, f], mapping);
+                Transform2D::new(a, b, c, d, e, f)
+            })
         }),
     })?;
     Ok(())

@@ -89,5 +89,7 @@ Every place an `expression` is required must produce a value one of Adam's regis
 types recognizes, at the end of parsing: a bare CEL statement with no trailing value, or an
 expression whose result type isn't registered with the
 [`TypeRegistry`](../adam_lang/type_registry/struct.TypeRegistry.html) in use, is a parse error naming the
-construct it came from: `expression produced no value`, or `cannot infer a type for this
-expression; register a type name for it or add an explicit ": type_expr" annotation`.
+construct it came from: `expression produced no value`, or
+``cannot infer a type: unregistered type `T` ``.
+Register the result's leaf types with the `TypeRegistry`; a type annotation alone
+does not register an unknown host type.

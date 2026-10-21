@@ -6,7 +6,6 @@
 use crate::{Angle, Box2D, Point2D, Rect, Size2D, Transform2D, Vector2D, leaf};
 use anyhow::{Result, ensure};
 use cel_parser::{OpLookup, OperationSignature};
-use std::sync::Arc;
 
 /// Declares one distinct thread-safe callable marker per identifier.
 macro_rules! callables {
@@ -53,9 +52,9 @@ pub(crate) fn unary<A: 'static, R: 'static>(
 ) -> Result<()> {
     lookup.register_operation(OperationSignature {
         name,
-        operands: vec![leaf::<A>(std::any::type_name::<A>())],
-        result: leaf::<R>(std::any::type_name::<R>()),
-        emit: Arc::new(move |s, _| s.op1(op)),
+        operands: vec![leaf::<A>(std::any::type_name::<A>()).into()],
+        result: leaf::<R>(std::any::type_name::<R>()).into(),
+        emit: Box::new(move |s, _| s.op1(op)),
     })
 }
 
@@ -73,11 +72,11 @@ pub(crate) fn binary<A: 'static, B: 'static, R: 'static>(
     lookup.register_operation(OperationSignature {
         name,
         operands: vec![
-            leaf::<A>(std::any::type_name::<A>()),
-            leaf::<B>(std::any::type_name::<B>()),
+            leaf::<A>(std::any::type_name::<A>()).into(),
+            leaf::<B>(std::any::type_name::<B>()).into(),
         ],
-        result: leaf::<R>(std::any::type_name::<R>()),
-        emit: Arc::new(move |s, _| s.op2(op)),
+        result: leaf::<R>(std::any::type_name::<R>()).into(),
+        emit: Box::new(move |s, _| s.op2(op)),
     })
 }
 
@@ -95,12 +94,12 @@ fn ternary<A: 'static, B: 'static, C: 'static, R: 'static>(
     lookup.register_operation(OperationSignature {
         name,
         operands: vec![
-            leaf::<A>(std::any::type_name::<A>()),
-            leaf::<B>(std::any::type_name::<B>()),
-            leaf::<C>(std::any::type_name::<C>()),
+            leaf::<A>(std::any::type_name::<A>()).into(),
+            leaf::<B>(std::any::type_name::<B>()).into(),
+            leaf::<C>(std::any::type_name::<C>()).into(),
         ],
-        result: leaf::<R>(std::any::type_name::<R>()),
-        emit: Arc::new(move |s, _| s.op3(op)),
+        result: leaf::<R>(std::any::type_name::<R>()).into(),
+        emit: Box::new(move |s, _| s.op3(op)),
     })
 }
 
@@ -208,9 +207,9 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
     })?;
     lookup.register_operation(OperationSignature {
         name: "normalize",
-        operands: vec![leaf::<Vector2D>("Vector2D")],
-        result: leaf::<Vector2D>("Vector2D"),
-        emit: Arc::new(|s, _| s.op1r(normalize)),
+        operands: vec![leaf::<Vector2D>("Vector2D").into()],
+        result: leaf::<Vector2D>("Vector2D").into(),
+        emit: Box::new(|s, _| s.op1r(normalize)),
     })?;
     Ok(())
 }

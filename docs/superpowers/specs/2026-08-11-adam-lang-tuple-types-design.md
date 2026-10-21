@@ -1,5 +1,10 @@
 # adam-lang tuple types
 
+> **Historical status (2026-10-19):** Recursive tuple/array/callable types now
+> share complete canonical descriptors. The older wrapper/marker APIs below
+> have been removed; see the [current handoff](../2026-10-19-composable-containers-handoff.md).
+> The original proposal remains unchanged below.
+
 ## Problem
 
 adam-lang cannot declare a cell whose type is a CEL tuple, either explicitly

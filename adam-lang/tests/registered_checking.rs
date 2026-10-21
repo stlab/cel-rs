@@ -1,10 +1,8 @@
 //! Contract tests for registry-backed expression checking in every sheet context.
 
-use std::sync::Arc;
-
 use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
 use cel_parser::{OpLookup, OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 
 /// A host-defined record with no core-language special treatment.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -20,7 +18,7 @@ struct OtherPoint {
 
 /// Returns a concrete registered leaf.
 fn leaf<T: 'static>(name: &'static str) -> ResolvedLeafType {
-    ResolvedLeafType::new(name, ArrayElementType::leaf::<T>().unwrap())
+    ResolvedLeafType::new(name, ValueType::leaf::<T>())
 }
 
 /// Installs real constructors and accessors and their corresponding type annotations.
@@ -34,17 +32,17 @@ fn environment() -> (TypeRegistry, OpLookup) {
             ty: leaf::<TestPoint>("TestPoint"),
             fields: vec![RecordField {
                 name: "x",
-                ty: leaf::<f64>("f64"),
+                ty: leaf::<f64>("f64").into(),
             }],
-            emit: Arc::new(|s, _, _, _| s.op1(|x: f64| TestPoint { x })),
+            emit: Box::new(|s, _, _, _| s.op1(|x: f64| TestPoint { x })),
         })
         .unwrap();
     lookup
         .register_operation(OperationSignature {
             name: "x",
-            operands: vec![leaf::<TestPoint>("TestPoint")],
-            result: leaf::<f64>("f64"),
-            emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.x)),
+            operands: vec![leaf::<TestPoint>("TestPoint").into()],
+            result: leaf::<f64>("f64").into(),
+            emit: Box::new(|s, _| s.op1(|p: TestPoint| p.x)),
         })
         .unwrap();
     (registry, lookup)
@@ -120,4 +118,34 @@ fn registered_member_resolution_ignores_same_named_values() {
         )
         .is_empty()
     );
+}
+
+/// Recursive cell annotations and dependencies retain exact leaf and tuple identities.
+#[test]
+fn compound_annotations_are_checked_in_every_sheet_context() {
+    for source in [
+        "sheet s { cell xs: [(TestPoint, [f64])] = [(TestPoint { x: 1.0 }, [2.0])]; out ys: [(TestPoint, [f64])] := xs; }",
+        "sheet s { source xs: [(TestPoint, [f64])]; cell ys: [(TestPoint, [f64])]; relationship { ys := xs; } }",
+        "sheet s { cell xs: [(TestPoint, [f64])] filter _; }",
+        "sheet s { cell f: Fn((i32,), [TestPoint]) = |n: i32| [TestPoint { x: 1.0 }]; }",
+    ] {
+        assert!(
+            diagnostics(source).is_empty(),
+            "{source}: {:?}",
+            diagnostics(source)
+        );
+    }
+    for source in [
+        "sheet s { cell xs: [(TestPoint, [f64])]; out ys: [(OtherPoint, [f64])] := xs; }",
+        "sheet s { cell xs: [(TestPoint, [f64])]; cell ys: [(TestPoint, [i32])]; relationship { ys := xs; } }",
+        "sheet s { cell xs: [(TestPoint, [f64])] filter [(OtherPoint { x: 1.0 }, [2.0])]; }",
+        "sheet s { cell f: Fn((i32,), [OtherPoint]) = |n: i32| [TestPoint { x: 1.0 }]; }",
+    ] {
+        let errors = diagnostics(source);
+        assert!(!errors.is_empty(), "{source}");
+        assert!(
+            errors.iter().all(|error| error.span().start().column > 0),
+            "{errors:?}"
+        );
+    }
 }

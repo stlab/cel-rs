@@ -120,6 +120,9 @@ CEL also builds compound values from ordinary expressions:
 - `|| expr` and `|x: T| expr` are closure values.
 - These forms can nest inside calls, tuples, arrays, conditionals, and one
   another wherever the grammar permits.
+- Array homogeneity compares complete recursive shapes, including every tuple
+  field and callable parameter/result. `[]: [(i32, [f64])]` and
+  `[]: [Fn((i32,), [i32])]` need no registration of those aggregate shapes.
 
 ```text
 (1,)
@@ -128,6 +131,16 @@ CEL also builds compound values from ordinary expressions:
 [0, 1]: [i32]
 []: [i32]
 |x: i32| x + 1
+```
+
+Source `()` and the empty tuple type are one canonical type, witnessed by `Nil`
+and represented by `CNil<()>`. Bridge ordinary Rust `()` with the zero-element
+`IntoCStackList` / `IntoRustTuple` conversion; it is not a separate source leaf
+that merely shares a zero-sized layout. An explicitly registered opaque host
+`Leaf<()>` remains a distinct host identity.
+
+```rust
+{{#include ../tests/composable_containers.rs:source-unit}}
 ```
 
 ## Host-registered records

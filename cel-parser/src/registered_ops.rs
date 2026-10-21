@@ -5,39 +5,43 @@
 //!
 //! ```
 //! use cel_parser::{OpLookup, OperationSignature, ResolvedLeafType};
-//! use cel_runtime::ArrayElementType;
-//! use std::sync::Arc;
+//! use cel_runtime::ValueType;
 //! #[derive(Clone)]
 //! struct Identity;
 //! let mut lookup = OpLookup::new();
 //! lookup.register_function("identity", Identity).unwrap();
-//! let ty = ResolvedLeafType::new("u32", ArrayElementType::leaf::<u32>().unwrap());
+//! let ty = ResolvedLeafType::new("u32", ValueType::leaf::<u32>());
 //! lookup.register_operation(OperationSignature {
-//!     name: "identity", operands: vec![ty.clone()], result: ty,
-//!     emit: Arc::new(|segment, _| segment.op1(|value: u32| value)),
+//!     name: "identity", operands: vec![ty.clone().into()], result: ty.into(),
+//!     emit: Box::new(|segment, _| segment.op1(|value: u32| value)),
 //! }).unwrap();
 //! assert_eq!(lookup.operation_signatures("identity").count(), 1);
 //! ```
 
-use std::{any::TypeId, sync::Arc};
+use std::any::TypeId;
 
 use anyhow::{Result, ensure};
-use cel_runtime::{DynSegment, ValueKind, ValueType};
+use cel_runtime::{DynSegment, ValueType};
 
-use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, SourceSpan};
+use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, ResolvedType, SourceSpan};
 
 /// Emits an operation after the complete operand signature has matched.
 ///
 /// - Precondition: the stack ends with the declared operand descriptors.
 /// - Postcondition: success replaces those operands with the declared result.
 ///
-/// Emitters validate fallible setup before changing the segment.
-pub type OperationEmitter = Arc<dyn Fn(&mut DynSegment, SourceSpan) -> Result<()> + Send + Sync>;
+/// Emitters validate fallible setup before changing the segment. The lookup uniquely owns
+/// each emitter and invokes it only while compiling; segments own the emitted operations.
+/// Boxing a zero-sized, captureless closure does not allocate.
+pub type OperationEmitter = Box<dyn Fn(&mut DynSegment, SourceSpan) -> Result<()> + Send + Sync>;
 
 /// Consumes source-order fields using source-position to schema-position indices,
 /// the ambient stack byte offset, and the expression span.
+///
+/// The lookup uniquely owns this compile-time callback. Boxing a zero-sized,
+/// captureless closure does not allocate.
 pub type RecordEmitter =
-    Arc<dyn Fn(&mut DynSegment, &[usize], usize, SourceSpan) -> Result<()> + Send + Sync>;
+    Box<dyn Fn(&mut DynSegment, &[usize], usize, SourceSpan) -> Result<()> + Send + Sync>;
 
 /// Describes one named operation with complete concrete operand and result identities.
 ///
@@ -46,9 +50,9 @@ pub struct OperationSignature {
     /// The shared operation name.
     pub name: &'static str,
     /// Operands in source order, including the receiver for member lookup.
-    pub operands: Vec<ResolvedLeafType>,
+    pub operands: Vec<ResolvedType>,
     /// The single result's complete type.
-    pub result: ResolvedLeafType,
+    pub result: ResolvedType,
     /// The implementation used by both direct lookup and ordinary calls.
     pub emit: OperationEmitter,
 }
@@ -58,7 +62,7 @@ pub struct RecordField {
     /// The source field name.
     pub name: &'static str,
     /// The field's complete concrete type.
-    pub ty: ResolvedLeafType,
+    pub ty: ResolvedType,
 }
 
 /// Describes a named record's required fields and construction implementation.
@@ -74,7 +78,7 @@ pub struct RecordSchema {
 /// Stores the first marker selected for a function name.
 pub(crate) struct RegisteredFunction {
     pub(crate) name: &'static str,
-    pub(crate) marker_type: TypeId,
+    pub(crate) marker: ResolvedLeafType,
     pub(crate) emit: OperationEmitter,
 }
 
@@ -89,24 +93,46 @@ pub(crate) struct RegisteredOps {
 
 /// Compares concrete recursive identities without treating diagnostic names as identity.
 ///
-/// - Complexity: O(d) in descriptor nesting depth.
-fn same_type(left: &ResolvedLeafType, right: &ResolvedLeafType) -> bool {
-    left.element_type() == right.element_type()
+/// - Complexity: O(n) in recursive descriptor nodes.
+fn same_type(left: &ResolvedType, right: &ResolvedType) -> bool {
+    match (left.complete_value_type(), right.complete_value_type()) {
+        (Ok(left), Ok(right)) => left.same_shape(&right),
+        _ => false,
+    }
 }
 
 /// Matches the complete runtime descriptor, never just an erased array marker.
 ///
-/// - Complexity: O(d) in descriptor nesting depth.
-fn matches_type(expected: &ResolvedLeafType, actual: &ValueType) -> bool {
-    expected.type_id() == actual.type_id()
-        && match actual.kind() {
-            ValueKind::Leaf => expected.element_type().nested().is_none(),
-            ValueKind::Array(element) => expected.element_type().nested() == Some(element),
-            ValueKind::Tuple(_) => false,
-        }
+/// - Complexity: O(n) in recursive descriptor nodes.
+fn matches_type(expected: &ResolvedType, actual: &ValueType) -> bool {
+    expected
+        .complete_value_type()
+        .is_ok_and(|expected| expected.same_shape(actual))
 }
 
 impl OpLookup {
+    /// Returns the concrete marker emitted by a bare registered function name.
+    ///
+    /// - Complexity: O(f) for f registered functions.
+    pub(crate) fn registered_function_type(&self, name: &str) -> Option<&ResolvedLeafType> {
+        self.registered
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .map(|function| &function.marker)
+    }
+
+    /// Returns the callable name selected by executable dispatch for a concrete marker.
+    ///
+    /// - Complexity: O(f) for f registered functions.
+    pub(crate) fn registered_function_name(&self, marker: TypeId) -> Option<&'static str> {
+        self.registered
+            .functions
+            .iter()
+            .find(|function| function.marker.type_id() == marker)
+            .map(|function| function.name)
+    }
+
     /// Validates required named fields and emits one record from their original stack order.
     ///
     /// Field descriptors must match exactly, including recursive array identities. Validation
@@ -122,13 +148,12 @@ impl OpLookup {
     /// # Examples
     /// ```
     /// use cel_parser::{CELParser, OpLookup, RecordSchema, ResolvedLeafType};
-    /// use cel_runtime::ArrayElementType;
-    /// use std::sync::Arc;
+    /// use cel_runtime::ValueType;
     /// let mut lookup = OpLookup::new();
     /// lookup.register_record(RecordSchema {
-    ///     ty: ResolvedLeafType::new("Empty", ArrayElementType::leaf::<()>().unwrap()),
+    ///     ty: ResolvedLeafType::new("Empty", ValueType::leaf::<()>()),
     ///     fields: vec![],
-    ///     emit: Arc::new(|s, _, _, _| { s.just(()); Ok(()) }),
+    ///     emit: Box::new(|s, _, _, _| { s.just(()); Ok(()) }),
     /// }).unwrap();
     /// CELParser::new(lookup).parse_str("Empty {}").unwrap().call0::<()>().unwrap();
     /// ```
@@ -193,7 +218,7 @@ impl OpLookup {
                 return Err(ParseError::new_range(
                     format!(
                         "field `{field}`: type mismatch: expected `{}`",
-                        expected.type_name()
+                        expected.display_name()
                     ),
                     span.start,
                     span.end,
@@ -206,19 +231,33 @@ impl OpLookup {
             ambient_start,
             SourceSpan::from_proc_macro2_range(start, end),
         )
-        .map_err(|err| error(err.to_string()))
+        .map_err(|err| error(err.to_string()))?;
+        segment
+            .annotate_top(
+                schema
+                    .ty
+                    .complete_value_type()
+                    .map_err(|err| error(err.to_string()))?
+                    .clone(),
+            )
+            .map_err(|err| error(err.to_string()))
     }
 
     /// Registers one persistent named operation without replacing existing overloads.
     ///
     /// # Errors
-    /// Returns an error for duplicate operand identities, including return-type-only overloads.
+    /// Returns an error for unavailable complete factories or unrepresentable layouts, and
+    /// duplicate operand identities, including return-type-only overloads.
     ///
     /// - Complexity: O(s * a * d) for s signatures, a operands and descriptor depth d.
     ///
     /// # Examples
     /// See the [registration tutorial](crate::registered_ops).
     pub fn register_operation(&mut self, signature: OperationSignature) -> Result<()> {
+        for operand in &signature.operands {
+            operand.complete_value_type()?;
+        }
+        signature.result.complete_value_type()?;
         ensure!(
             !self.operation_signatures(signature.name).any(|existing| {
                 existing.operands.len() == signature.operands.len()
@@ -270,8 +309,8 @@ impl OpLookup {
         {
             self.registered.functions.push(RegisteredFunction {
                 name,
-                marker_type,
-                emit: Arc::new(move |segment, _| {
+                marker: ResolvedLeafType::new(name, ValueType::cloneable_leaf::<M>()),
+                emit: Box::new(move |segment, _| {
                     segment.just(marker.clone());
                     Ok(())
                 }),
@@ -283,24 +322,28 @@ impl OpLookup {
     /// Registers a persistent record schema keyed by its source type name.
     ///
     /// # Errors
-    /// Returns an error for a duplicate schema name or duplicate field names.
+    /// Returns an error for unavailable complete factories or unrepresentable layouts, a
+    /// duplicate schema name, or duplicate field names.
     ///
     /// - Complexity: O(r + f²) for r schemas and f fields.
     ///
     /// # Examples
     /// ```
     /// use cel_parser::{OpLookup, RecordSchema, ResolvedLeafType};
-    /// use cel_runtime::ArrayElementType;
-    /// use std::sync::Arc;
+    /// use cel_runtime::ValueType;
     /// let mut lookup = OpLookup::new();
     /// lookup.register_record(RecordSchema {
-    ///     ty: ResolvedLeafType::new("Unit", ArrayElementType::leaf::<()>().unwrap()),
+    ///     ty: ResolvedLeafType::new("Unit", ValueType::leaf::<()>()),
     ///     fields: vec![],
-    ///     emit: Arc::new(|segment, _, _, _| { segment.just(()); Ok(()) }),
+    ///     emit: Box::new(|segment, _, _, _| { segment.just(()); Ok(()) }),
     /// }).unwrap();
     /// assert!(lookup.record_schema("Unit").is_some());
     /// ```
     pub fn register_record(&mut self, schema: RecordSchema) -> Result<()> {
+        schema.ty.complete_value_type()?;
+        for field in &schema.fields {
+            field.ty.complete_value_type()?;
+        }
         ensure!(
             self.record_schema(schema.ty.type_name()).is_none(),
             "duplicate record schema `{}`",
@@ -373,6 +416,7 @@ impl OpLookup {
                     .all(|(expected, actual)| matches_type(expected, &actual.value_type))
             {
                 (signature.emit)(segment, span)?;
+                segment.annotate_top(signature.result.complete_value_type()?.clone())?;
                 return Ok(true);
             }
         }
@@ -409,12 +453,12 @@ impl OpLookup {
                 .registered
                 .functions
                 .iter()
-                .find(|f| f.marker_type == marker_type)
+                .find(|f| f.marker.type_id() == marker_type)
             {
                 let ambient_start = segment.stack_offset_before_top(arity)?;
                 if self.lookup_direct_operation(function.name, segment, arity - 1, span)? {
-                    segment.make_tuple(2, ambient_start);
-                    segment.tuple_index(1);
+                    segment.make_tuple(2, ambient_start)?;
+                    segment.tuple_index(1)?;
                     return Ok(true);
                 }
                 return Ok(false);

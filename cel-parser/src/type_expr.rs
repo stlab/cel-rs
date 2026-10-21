@@ -6,9 +6,8 @@
 
 use std::any::TypeId;
 use std::borrow::Cow;
-use std::sync::Arc;
 
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 
 use crate::{ExprSpan, ParseError, Result, op_table};
 
@@ -22,6 +21,9 @@ use crate::{ExprSpan, ParseError, Result, op_table};
 /// parameterized (generic) type applying zero or more type arguments (`RangeInclusive(f64)`,
 /// `RangeFull()`); an identifier immediately followed by `(` has no other meaning in type
 /// position, so this is unambiguous with adjacent tuple-grouping syntax.
+/// `Fn((A, B), R)` reserves structural callable syntax: the first argument must be a tuple
+/// of parameter types and the second is the result. `Fn((), R)` has no parameters;
+/// `Fn((A,), R)` has one. This syntax is resolved before host generic-leaf lookup.
 #[derive(Clone, Debug)]
 pub enum TypeExpr {
     /// A single type name, optionally applying type arguments, resolved later through a
@@ -65,7 +67,8 @@ impl TypeExpr {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if some named leaf is not recognized by `resolver`.
+    /// Returns `Err` if some named leaf is not recognized by `resolver`, or `Fn` lacks
+    /// exactly two arguments with a tuple of parameter types first.
     ///
     /// - Complexity: O(n) in the number of nodes in this type tree.
     pub fn resolve(&self, resolver: &dyn TypeResolver) -> Result<ResolvedType> {
@@ -75,6 +78,26 @@ impl TypeExpr {
                     .iter()
                     .map(|arg| arg.resolve(resolver))
                     .collect::<Result<Vec<_>>>()?;
+                if name == "Fn" {
+                    let mut resolved_args = resolved_args.into_iter();
+                    return match (
+                        resolved_args.next(),
+                        resolved_args.next(),
+                        resolved_args.next(),
+                    ) {
+                        (Some(ResolvedType::Tuple { elements }), Some(result), None) => {
+                            Ok(ResolvedType::Callable {
+                                parameters: elements,
+                                result: Box::new(result),
+                            })
+                        }
+                        _ => Err(ParseError::new_range(
+                            "Fn requires a parameter tuple and a result type",
+                            span.start,
+                            span.end,
+                        )),
+                    };
+                }
                 resolver
                     .resolve_named_type(name, &resolved_args)
                     .map_or_else(
@@ -146,7 +169,7 @@ impl TypeResolver for BuiltinTypeResolver {
         }?;
         Some(ResolvedLeafType::new(
             builtin.type_name,
-            (builtin.element_type)(),
+            (builtin.value_type)(),
         ))
     }
 }
@@ -158,9 +181,17 @@ impl TypeResolver for BuiltinTypeResolver {
 /// A host embedding `cel-parser` with its own [`TypeResolver`] (one that also knows
 /// host-specific custom types) can delegate any name it doesn't itself recognize to this
 /// resolver, so built-in types stay visible inside host-embedded CEL expressions.
+///
+/// The returned resolver is uniquely owned and zero-sized; its box does not allocate.
+///
+/// # Examples
+/// ```
+/// let resolver = cel_parser::builtin_type_resolver();
+/// assert!(resolver.resolve_named_type("u32", &[]).is_some());
+/// ```
 #[must_use]
-pub fn builtin_type_resolver() -> Arc<dyn TypeResolver> {
-    Arc::new(BuiltinTypeResolver)
+pub fn builtin_type_resolver() -> Box<dyn TypeResolver> {
+    Box::new(BuiltinTypeResolver)
 }
 
 /// Resolves `name`/`args` against `cel-parser`'s own built-in type resolver, without allocating
@@ -168,7 +199,7 @@ pub fn builtin_type_resolver() -> Arc<dyn TypeResolver> {
 ///
 /// Equivalent to `builtin_type_resolver().resolve_named_type(name, args)`, but for a host that
 /// only needs a one-off built-in fallback lookup (rather than a `TypeResolver` trait object to
-/// pass around), this avoids constructing a new `Arc` on every call.
+/// pass around), this avoids constructing a trait object.
 #[must_use]
 pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
     BuiltinTypeResolver.resolve_named_type(name, args)
@@ -176,34 +207,142 @@ pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<R
 
 /// One resolved scalar leaf type.
 ///
-/// This pairs a human-readable type name with the runtime element descriptor needed to build or
-/// validate a `DynamicArray` whose elements have this leaf type.
-/// Hosts use [`ArrayElementType::cloneable`] when this leaf may also appear in a closure
+/// This pairs a human-readable type name with complete canonical leaf metadata.
+/// Hosts use [`ValueType::cloneable_leaf`] when this leaf may also appear in a closure
 /// annotation; the same descriptor then supplies its checked argument-cloning adapter.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Concrete element factories retain complete metadata. Use
+/// [`Self::with_complete_value_type`] to enrich its optional capabilities;
+/// metadata cannot be recovered from a `TypeId`.
+/// Equality compares registered identity, not optional capability availability.
+#[derive(Clone, Debug)]
 pub struct ResolvedLeafType {
     type_id: TypeId,
     type_name: Cow<'static, str>,
-    element_type: ArrayElementType,
+    complete: ValueType,
 }
 
+impl PartialEq for ResolvedLeafType {
+    /// Compares registered leaf identities independently of optional capabilities.
+    ///
+    /// - Complexity: O(l) for name length l.
+    fn eq(&self, other: &Self) -> bool {
+        self.type_id == other.type_id
+            && self.type_name == other.type_name
+            && self.complete.same_shape(&other.complete)
+    }
+}
+
+impl Eq for ResolvedLeafType {}
+
 impl ResolvedLeafType {
+    /// Registers an opaque concrete host leaf without optional capabilities.
+    ///
+    /// Foreign types require no trait implementation or wrapper.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an erased whole-value owner, which is not a concrete CEL leaf.
+    ///
+    /// - Complexity: O(l) time and space for a source-facing name of length l.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_parser::ResolvedLeafType;
+    /// let leaf = ResolvedLeafType::leaf::<std::path::PathBuf>("Path").unwrap();
+    /// assert!(leaf.complete_value_type().is_ok());
+    /// ```
+    pub fn leaf<T: 'static>(type_name: impl Into<Cow<'static, str>>) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            TypeId::of::<T>() != TypeId::of::<cel_runtime::OwnedValue>(),
+            "whole-value owners require an explicit representation witness"
+        );
+        Ok(Self::new(type_name, ValueType::leaf::<T>()))
+    }
+
     /// Creates one resolved leaf from a user-facing type name and runtime element descriptor.
     ///
     /// The descriptor adopts `type_name`, so a runtime mismatch diagnostic against this leaf
     /// reports the name the source annotation (or the host's registry) uses rather than
-    /// [`ArrayElementType::leaf`]'s Rust type path.
+    /// [`ValueType::leaf`]'s Rust type path.
     ///
     /// - Postcondition: the returned leaf's [`type_id`](Self::type_id) matches `element_type`,
     ///   and its [`element_type`](Self::element_type) reports `type_name`.
+    /// - Precondition: `element_type` describes a concrete opaque leaf.
+    /// - Complexity: O(l) for name length l.
+    ///
+    /// # Examples
+    /// ```
+    /// let leaf = cel_parser::ResolvedLeafType::new("Integer", cel_runtime::ValueType::leaf::<i32>());
+    /// assert_eq!(leaf.type_name(), "Integer");
+    /// ```
     #[must_use]
-    pub fn new(type_name: impl Into<Cow<'static, str>>, element_type: ArrayElementType) -> Self {
+    pub fn new(type_name: impl Into<Cow<'static, str>>, element_type: ValueType) -> Self {
         let type_name = type_name.into();
+        debug_assert!(matches!(
+            element_type.kind(),
+            cel_runtime::ValueKind::Leaf(_)
+        ));
         Self {
             type_id: element_type.type_id(),
-            element_type: element_type.with_type_name(type_name.clone()),
+            complete: element_type.with_type_name(type_name.clone()),
             type_name,
         }
+    }
+
+    /// Attaches a complete leaf descriptor built while its concrete type was known.
+    ///
+    /// Optional capabilities are retained unchanged and independently; attaching
+    /// metadata emits no interpreter instructions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either descriptor is structural or concrete identity
+    /// or layout differs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_parser::ResolvedLeafType;
+    /// use cel_runtime::value_type::ValueType;
+    /// let leaf = ResolvedLeafType::leaf::<String>("Text").unwrap()
+    ///     .with_complete_value_type(ValueType::cloneable_leaf::<String>()).unwrap();
+    /// assert!(leaf.complete_value_type().is_ok());
+    /// ```
+    pub fn with_complete_value_type(
+        mut self,
+        complete: cel_runtime::value_type::ValueType,
+    ) -> anyhow::Result<Self> {
+        complete.validate_opaque_leaf(self.type_id)?;
+        anyhow::ensure!(
+            complete.layout().size() == self.complete.size()
+                && complete.layout().align() == self.complete.align(),
+            "complete leaf layout mismatch"
+        );
+        self.complete = complete.with_type_name(self.type_name.clone());
+        Ok(self)
+    }
+
+    /// Borrows complete registration-time metadata without inventing erased adapters.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an erased whole-value owner, which cannot be a registered leaf.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_parser::ResolvedLeafType;
+    /// assert!(ResolvedLeafType::leaf::<()>("HostUnit").unwrap()
+    ///     .complete_value_type().is_ok());
+    /// ```
+    pub fn complete_value_type(&self) -> anyhow::Result<&cel_runtime::value_type::ValueType> {
+        anyhow::ensure!(
+            self.type_id != TypeId::of::<cel_runtime::OwnedValue>(),
+            "whole-value owners require an explicit representation witness"
+        );
+        Ok(&self.complete)
     }
 
     /// Returns this leaf type's concrete Rust [`TypeId`].
@@ -218,10 +357,10 @@ impl ResolvedLeafType {
         &self.type_name
     }
 
-    /// Returns the runtime array element descriptor for this leaf.
+    /// Returns complete canonical metadata for this leaf.
     #[must_use]
-    pub fn element_type(&self) -> &ArrayElementType {
-        &self.element_type
+    pub fn element_type(&self) -> &ValueType {
+        &self.complete
     }
 }
 
@@ -240,9 +379,83 @@ pub enum ResolvedType {
         /// The resolved tuple element types, in source order.
         elements: Vec<ResolvedType>,
     },
+    /// A callable's source-ordered parameters and single result.
+    Callable {
+        /// The complete parameter types.
+        parameters: Vec<ResolvedType>,
+        /// The complete result type.
+        result: Box<ResolvedType>,
+    },
+}
+
+impl From<ResolvedLeafType> for ResolvedType {
+    /// Promotes a registered leaf without changing its identity.
+    fn from(leaf: ResolvedLeafType) -> Self {
+        Self::Scalar(leaf)
+    }
 }
 
 impl ResolvedType {
+    /// Consumes a complete source type and returns its canonical runtime descriptor.
+    ///
+    /// # Errors
+    /// Returns an error for unavailable leaf factories or unrepresentable tuple layouts.
+    ///
+    /// - Complexity: O(n) in recursive type nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::ResolvedType;
+    /// assert!(ResolvedType::Tuple { elements: vec![] }.into_value_type().is_ok());
+    /// ```
+    pub fn into_value_type(self) -> anyhow::Result<cel_runtime::ValueType> {
+        self.complete_value_type()
+    }
+
+    /// Builds canonical recursive metadata for interpreter storage.
+    ///
+    /// Empty tuples describe source unit, not an opaque host `()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing leaf factories or an unrepresentable tuple layout.
+    ///
+    /// - Complexity: O(n) time and output space for n recursive type nodes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_parser::ResolvedType;
+    /// use cel_runtime::value_type::{Nil, ValueRepr};
+    /// assert!(ResolvedType::Tuple { elements: vec![] }
+    ///     .complete_value_type().unwrap().same_shape(&Nil::value_type()));
+    /// ```
+    pub fn complete_value_type(&self) -> anyhow::Result<cel_runtime::value_type::ValueType> {
+        use cel_runtime::value_type::{AssociatedType, ValueType};
+        match self {
+            Self::Scalar(leaf) => Ok(leaf.complete_value_type()?.clone()),
+            Self::Array { element } => Ok(ValueType::array(element.complete_value_type()?)),
+            Self::Tuple { elements } => ValueType::tuple(
+                elements
+                    .iter()
+                    .map(|element| {
+                        Ok(AssociatedType {
+                            offset: 0,
+                            value_type: element.complete_value_type()?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            ),
+            Self::Callable { parameters, result } => Ok(ValueType::callable(
+                parameters
+                    .iter()
+                    .map(Self::complete_value_type)
+                    .collect::<anyhow::Result<_>>()?,
+                result.complete_value_type()?,
+            )),
+        }
+    }
+
     /// Returns a human-readable name for this resolved type.
     ///
     /// - Complexity: O(n) in the number of nodes in this type tree.
@@ -253,35 +466,45 @@ impl ResolvedType {
             ResolvedType::Array { element } => format!("[{}]", element.display_name()),
             ResolvedType::Tuple { elements } => {
                 let parts: Vec<String> = elements.iter().map(Self::display_name).collect();
-                format!("({})", parts.join(", "))
+                format!(
+                    "({}{})",
+                    parts.join(", "),
+                    if parts.len() == 1 { "," } else { "" }
+                )
             }
-        }
-    }
-
-    fn into_array_element_type(self, span: ExprSpan) -> Result<ArrayElementType> {
-        match self {
-            ResolvedType::Scalar(leaf) => Ok(leaf.element_type),
-            ResolvedType::Array { element } => {
-                Ok(ArrayElementType::array_of(element.into_array_element_type(span)?))
-            }
-            ResolvedType::Tuple { .. } => Err(ParseError::new_range(
-                "tuple-valued array elements are not supported; see https://github.com/stlab/cel-rs/issues/213"
-                    .to_string(),
-                span.start,
-                span.end,
-            )),
+            Self::Callable { parameters, result } => format!(
+                "Fn(({}{}), {})",
+                parameters
+                    .iter()
+                    .map(Self::display_name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if parameters.len() == 1 { "," } else { "" },
+                result.display_name()
+            ),
         }
     }
 }
 
 /// The resolved descriptor for one complete array type annotation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ResolvedArrayType {
-    element_type: ArrayElementType,
+    element_type: cel_runtime::ValueType,
+}
+
+impl PartialEq for ResolvedArrayType {
+    /// Compares recursive identities independently of optional capabilities.
+    ///
+    /// - Complexity: O(n) in descriptor nodes.
+    fn eq(&self, other: &Self) -> bool {
+        self.element_type.same_shape(&other.element_type)
+    }
 }
 
 impl ResolvedArrayType {
     /// Creates a resolved array type from its already-resolved element descriptor.
+    ///
+    /// - Precondition: `element_type` retains a concrete canonical factory.
     ///
     /// - Postcondition: [`element_type`](Self::element_type) returns `element_type` unchanged, so
     ///   the result describes an array whose elements have exactly that type.
@@ -290,13 +513,13 @@ impl ResolvedArrayType {
     ///
     /// ```rust
     /// use cel_parser::ResolvedArrayType;
-    /// use cel_runtime::ArrayElementType;
+    /// use cel_runtime::ValueType;
     ///
-    /// let array = ResolvedArrayType::from_element_type(ArrayElementType::leaf::<i32>().unwrap());
+    /// let array = ResolvedArrayType::from_element_type(ValueType::leaf::<i32>());
     /// assert_eq!(array.element_type().type_name(), "i32");
     /// ```
     #[must_use]
-    pub fn from_element_type(element_type: ArrayElementType) -> Self {
+    pub fn from_element_type(element_type: ValueType) -> Self {
         Self { element_type }
     }
 
@@ -304,12 +527,13 @@ impl ResolvedArrayType {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if `resolved` is not an array type or if its element type is a tuple, which
-    /// remains unsupported for runtime CEL arrays (issue #213).
+    /// Returns `Err` if `resolved` is not an array type or its layout is unrepresentable.
     pub fn from_resolved_type(resolved: ResolvedType, span: ExprSpan) -> Result<Self> {
         match resolved {
             ResolvedType::Array { element } => Ok(Self {
-                element_type: element.into_array_element_type(span)?,
+                element_type: element.into_value_type().map_err(|error| {
+                    ParseError::new_range(error.to_string(), span.start, span.end)
+                })?,
             }),
             other => Err(ParseError::new_range(
                 format!(
@@ -324,13 +548,13 @@ impl ResolvedArrayType {
 
     /// Returns the recursive element descriptor this array annotation resolves to.
     #[must_use]
-    pub fn element_type(&self) -> &ArrayElementType {
+    pub fn element_type(&self) -> &cel_runtime::ValueType {
         &self.element_type
     }
 
     /// Returns the recursive element descriptor, consuming `self`.
     #[must_use]
-    pub fn into_element_type(self) -> ArrayElementType {
+    pub fn into_element_type(self) -> cel_runtime::ValueType {
         self.element_type
     }
 }
@@ -340,7 +564,7 @@ mod tests {
     use std::any::TypeId;
     use std::str::FromStr;
 
-    use cel_runtime::ArrayElementType;
+    use cel_runtime::ValueType;
     use proc_macro2::TokenStream;
 
     use crate::{CELParser, OpLookup};
@@ -349,6 +573,173 @@ mod tests {
 
     #[derive(Clone)]
     struct RegistryType;
+
+    /// Registers foreign leaves without orphan impls or mandatory capabilities.
+    #[test]
+    fn complete_factory_foreign_leaf_preserves_optional_capabilities() {
+        use cel_runtime::{
+            owned_value::OwnedValue,
+            value_type::{Leaf, ValueType},
+        };
+        let leaf = ResolvedLeafType::leaf::<std::path::PathBuf>("Path").unwrap();
+        let descriptor = leaf.complete_value_type().unwrap().clone();
+        let owner = OwnedValue::new::<Leaf<std::path::PathBuf>>("path".into())
+            .with_value_type(descriptor)
+            .unwrap();
+        assert!(owner.try_clone().is_err());
+        assert!(owner.try_eq(&owner).is_err());
+        assert!(owner.try_debug().is_err());
+        let descriptor = ValueType::leaf::<std::path::PathBuf>()
+            .with_equality::<Leaf<std::path::PathBuf>>()
+            .unwrap();
+        let leaf = leaf.with_complete_value_type(descriptor).unwrap();
+        let owner = owner
+            .with_value_type(leaf.complete_value_type().unwrap().clone())
+            .unwrap();
+        assert!(owner.try_eq(&owner).unwrap());
+        assert!(owner.try_clone().is_err());
+        assert!(owner.try_debug().is_err());
+        assert!(
+            leaf.with_complete_value_type(ValueType::leaf::<String>())
+                .is_err()
+        );
+        for (descriptor, cloneable, comparable, debuggable) in [
+            (
+                ValueType::cloneable_leaf::<std::path::PathBuf>(),
+                true,
+                false,
+                false,
+            ),
+            (
+                ValueType::leaf::<std::path::PathBuf>()
+                    .with_debug::<Leaf<std::path::PathBuf>>()
+                    .unwrap(),
+                false,
+                false,
+                true,
+            ),
+        ] {
+            let leaf = ResolvedLeafType::leaf::<std::path::PathBuf>("Path")
+                .unwrap()
+                .with_complete_value_type(descriptor)
+                .unwrap();
+            let owner = OwnedValue::new::<Leaf<std::path::PathBuf>>("path".into())
+                .with_value_type(leaf.complete_value_type().unwrap().clone())
+                .unwrap();
+            assert_eq!(owner.try_clone().is_ok(), cloneable);
+            assert_eq!(owner.try_eq(&owner).is_ok(), comparable);
+            assert_eq!(owner.try_debug().is_ok(), debuggable);
+        }
+        assert!(ResolvedLeafType::leaf::<cel_runtime::OwnedValue>("Owner").is_err());
+        assert!(
+            ResolvedLeafType::leaf::<i32>("Integer")
+                .unwrap()
+                .with_complete_value_type(ValueType::tuple(vec![]).unwrap())
+                .is_err()
+        );
+        assert!(
+            ResolvedLeafType::leaf::<i32>("Integer")
+                .unwrap()
+                .with_complete_value_type(ValueType::leaf::<u32>())
+                .is_err()
+        );
+    }
+
+    /// Stores and moves leaves that implement none of the optional capability traits.
+    #[test]
+    fn complete_factory_does_not_require_capability_traits() {
+        use cel_runtime::{owned_value::OwnedValue, value_type::Leaf};
+        /// Owns one move-only payload without clone, equality, or formatting.
+        struct MoveOnly(String);
+        let leaf = ResolvedLeafType::leaf::<MoveOnly>("MoveOnly").unwrap();
+        let owner = OwnedValue::new::<Leaf<MoveOnly>>(MoveOnly(String::from("owned")))
+            .with_value_type(leaf.complete_value_type().unwrap().clone())
+            .unwrap();
+        assert!(owner.try_clone().is_err());
+        assert!(owner.try_eq(&owner).is_err());
+        assert!(owner.try_debug().is_err());
+        assert_eq!(owner.try_into_typed::<Leaf<MoveOnly>>().unwrap().0, "owned");
+    }
+
+    /// Composes complete array-of-tuple metadata with nested arrays.
+    #[test]
+    fn complete_factory_resolved_recursive_shapes_retain_fields() {
+        use cel_runtime::value_type::{ArrayOf, Cons, Leaf, Nil, ValueRepr};
+        let resolved = ResolvedType::Array {
+            element: Box::new(ResolvedType::Tuple {
+                elements: vec![
+                    ResolvedType::Scalar(ResolvedLeafType::leaf::<i32>("Integer").unwrap()),
+                    ResolvedType::Array {
+                        element: Box::new(ResolvedType::Scalar(
+                            ResolvedLeafType::leaf::<String>("Text").unwrap(),
+                        )),
+                    },
+                ],
+            }),
+        };
+        assert!(
+            resolved
+                .complete_value_type()
+                .unwrap()
+                .same_shape(
+                    &ArrayOf::<Cons<Leaf<i32>, Cons<ArrayOf<Leaf<String>>, Nil>>>::value_type()
+                )
+        );
+        let unresolved = ResolvedType::Array {
+            element: Box::new(ResolvedType::Scalar(ResolvedLeafType::new(
+                "Erased",
+                ValueType::leaf::<i32>(),
+            ))),
+        };
+        assert!(unresolved.complete_value_type().is_ok());
+    }
+
+    /// Keeps source unit distinct from an explicitly registered opaque host unit.
+    #[test]
+    fn complete_factory_resolved_source_unit_is_not_host_unit() {
+        use cel_runtime::value_type::{Nil, ValueRepr};
+        let host = ResolvedLeafType::leaf::<()>("HostUnit").unwrap();
+        let source = ResolvedType::Tuple { elements: vec![] };
+        let complete = source.complete_value_type().unwrap();
+        assert!(complete.same_shape(&Nil::value_type()));
+        assert!(!complete.same_shape(host.complete_value_type().unwrap()));
+        assert!(
+            ResolvedLeafType::new("old", ValueType::leaf::<i32>())
+                .complete_value_type()
+                .is_ok()
+        );
+    }
+
+    /// Built-ins retain cloning, equality, and formatting in complete metadata.
+    #[test]
+    fn complete_factory_builtin_capabilities_are_available() {
+        use cel_runtime::{owned_value::OwnedValue, value_type::Leaf};
+        let leaf = super::resolve_builtin_named_type("i32", &[]).unwrap();
+        let owner = OwnedValue::new::<Leaf<i32>>(7)
+            .with_value_type(leaf.complete_value_type().unwrap().clone())
+            .unwrap();
+        assert_eq!(
+            owner
+                .try_clone()
+                .unwrap()
+                .try_into_typed::<Leaf<i32>>()
+                .unwrap(),
+            7
+        );
+        assert!(owner.try_eq(&owner).unwrap());
+        assert_eq!(owner.try_debug().unwrap(), "7");
+        for (name, args) in [
+            ("RangeFull", vec![]),
+            ("RangeInclusive", vec![ResolvedType::Scalar(leaf)]),
+        ] {
+            assert!(
+                super::resolve_builtin_named_type(name, &args)
+                    .unwrap()
+                    .complete_value_type()
+                    .is_ok()
+            );
+        }
+    }
 
     #[test]
     fn parse_named_type_expr_preserves_its_name_and_span() {
@@ -493,10 +884,7 @@ mod tests {
     fn resolve_type_expr_uses_a_custom_registry_resolver_recursively() {
         let resolver = [(
             "RegistryType",
-            ResolvedLeafType::new(
-                "RegistryType",
-                ArrayElementType::leaf::<RegistryType>().unwrap(),
-            ),
+            ResolvedLeafType::new("RegistryType", ValueType::leaf::<RegistryType>()),
         )];
         let mut parser = CELParser::with_type_resolver(OpLookup::new(), resolver);
         let expr = parser.parse_type_expr_str("[[RegistryType]]").unwrap();
@@ -529,12 +917,9 @@ mod tests {
                 match (name, args) {
                     ("Wrapper", [ResolvedType::Scalar(inner)]) => Some(ResolvedLeafType::new(
                         format!("Wrapper({})", inner.type_name()),
-                        ArrayElementType::leaf::<i32>().unwrap(),
+                        ValueType::leaf::<i32>(),
                     )),
-                    ("i32", []) => Some(ResolvedLeafType::new(
-                        "i32",
-                        ArrayElementType::leaf::<i32>().unwrap(),
-                    )),
+                    ("i32", []) => Some(ResolvedLeafType::new("i32", ValueType::leaf::<i32>())),
                     _ => None,
                 }
             }
@@ -800,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_builtin_named_type_matches_the_arc_wrapped_resolver() {
+    fn resolve_builtin_named_type_matches_the_boxed_resolver() {
         let scalar = crate::resolve_builtin_named_type("i32", &[]).unwrap();
         assert_eq!(scalar.type_name(), "i32");
 

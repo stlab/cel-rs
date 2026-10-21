@@ -13,7 +13,6 @@ use crate::{
 };
 use anyhow::{Result, anyhow, ensure};
 use cel_parser::{OpLookup, OperationSignature};
-use std::sync::Arc;
 
 /// Declares independent callable identities and registers their names.
 macro_rules! callables {
@@ -259,23 +258,26 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
     lookup.register_operation(OperationSignature {
         name: "identity_transform",
         operands: vec![],
-        result: leaf::<Transform2D>("Transform2D"),
-        emit: Arc::new(|segment, _| {
+        result: leaf::<Transform2D>("Transform2D").into(),
+        emit: Box::new(|segment, _| {
             segment.op0(Transform2D::identity);
             Ok(())
         }),
     })?;
     lookup.register_operation(OperationSignature {
         name: "inverse",
-        operands: vec![leaf::<Transform2D>("Transform2D")],
-        result: leaf::<Transform2D>("Transform2D"),
-        emit: Arc::new(|segment, _| segment.op1r(inverse)),
+        operands: vec![leaf::<Transform2D>("Transform2D").into()],
+        result: leaf::<Transform2D>("Transform2D").into(),
+        emit: Box::new(|segment, _| segment.op1r(inverse)),
     })?;
     lookup.register_operation(OperationSignature {
         name: "outer_transformed_rect",
-        operands: vec![leaf::<Transform2D>("Transform2D"), leaf::<Rect>("Rect")],
-        result: leaf::<Rect>("Rect"),
-        emit: Arc::new(|segment, _| segment.op2r(outer_transformed_rect)),
+        operands: vec![
+            leaf::<Transform2D>("Transform2D").into(),
+            leaf::<Rect>("Rect").into(),
+        ],
+        result: leaf::<Rect>("Rect").into(),
+        emit: Box::new(|segment, _| segment.op2r(outer_transformed_rect)),
     })?;
     Ok(())
 }

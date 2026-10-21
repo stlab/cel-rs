@@ -33,7 +33,7 @@
 //! ```
 
 use std::any::{Any, TypeId};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::ValueType;
@@ -46,9 +46,93 @@ pub(crate) struct ClosureSignature {
     pub(crate) result: ValueType,
 }
 
+impl ClosureSignature {
+    /// Converts known recursive metadata without changing canonical storage.
+    ///
+    /// # Errors
+    /// Returns an error for missing or mismatched leaf factories, unknown nested
+    /// callable signatures, or an unrepresentable canonical tuple layout.
+    /// - Complexity: O(n) traversal time and output space for n signature nodes,
+    ///   excluding leaf factory costs.
+    fn complete(
+        &self,
+        leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+    ) -> anyhow::Result<crate::value_type::ValueType> {
+        let parameters = self
+            .parameters
+            .iter()
+            .map(|parameter| enrich_value_type(parameter, leaf))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(crate::value_type::ValueType::callable(
+            parameters,
+            enrich_value_type(&self.result, leaf)?,
+        ))
+    }
+}
+
+/// Resolves one concrete registered leaf through a previously monomorphized factory.
+///
+/// # Errors
+/// Returns an error if the factory is missing, structural, or describes another
+/// concrete type or layout. A closure marker without a signature is rejected.
+fn complete_leaf(
+    id: TypeId,
+    size: usize,
+    align: usize,
+    leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+) -> anyhow::Result<crate::value_type::ValueType> {
+    anyhow::ensure!(
+        id != TypeId::of::<DynClosure>(),
+        "closure signature metadata is unavailable"
+    );
+    let complete =
+        leaf(id).ok_or_else(|| anyhow::anyhow!("complete leaf factory is unavailable"))?;
+    complete.validate_opaque_leaf(id)?;
+    anyhow::ensure!(
+        complete.layout().size() == size && complete.layout().align() == align,
+        "complete leaf factory layout mismatch"
+    );
+    Ok(complete)
+}
+
+/// Enriches canonical signature leaves through explicitly supplied factories.
+///
+/// # Errors
+/// Returns an error for unavailable signatures/factories or invalid tuple layout.
+/// - Complexity: O(n) time and output space for n recursive descriptor nodes.
+fn enrich_value_type(
+    value: &ValueType,
+    leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+) -> anyhow::Result<crate::value_type::ValueType> {
+    use crate::value_type::{AssociatedType, ValueType as Complete};
+    match value.kind() {
+        crate::ValueKind::Tuple(fields) => Complete::tuple(
+            fields
+                .iter()
+                .map(|field| {
+                    Ok(AssociatedType {
+                        offset: 0,
+                        value_type: enrich_value_type(&field.value_type, leaf)?,
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        ),
+        crate::ValueKind::Array(element) => Ok(Complete::array(enrich_value_type(element, leaf)?)),
+        crate::ValueKind::Callable { parameters, result } => Ok(Complete::callable(
+            parameters
+                .iter()
+                .map(|parameter| enrich_value_type(parameter, leaf))
+                .collect::<anyhow::Result<_>>()?,
+            enrich_value_type(result, leaf)?,
+        )),
+        crate::ValueKind::Leaf(id) => complete_leaf(*id, value.size(), value.align(), leaf),
+    }
+}
+
 /// Compares complete known signatures without relying on the erased closure marker.
 ///
 /// - Complexity: O(number of recursive type nodes).
+#[cfg(test)]
 pub(crate) fn same_signature(
     left: Option<&ClosureSignature>,
     right: Option<&ClosureSignature>,
@@ -72,11 +156,65 @@ pub(crate) fn same_signature(
 /// the result so the caller (which only knows `R` dynamically, as a `TypeId`) doesn't need to.
 pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>;
 
+/// Invokes an exact construction-bound payload and initializes output on success only.
+///
+/// Both frame pointers and the payload must match the dispatcher's concrete types.
+pub(crate) type FrameDispatch = unsafe fn(*mut (), *const u8, *mut u8) -> anyhow::Result<()>;
+
+/// Owns either a compiler-facing body or a private type-bound frame dispatcher.
+enum ClosureBody {
+    Interpreted(DynSegment),
+    Framed {
+        payload: Box<dyn Any>,
+        dispatch: FrameDispatch,
+    },
+}
+
+impl ClosureBody {
+    /// Returns the compiler-facing body, rejecting immutable typed facade bodies.
+    ///
+    /// # Errors
+    /// Rejects framed native and prepared bodies.
+    fn segment(&mut self) -> anyhow::Result<&mut DynSegment> {
+        match self {
+            Self::Interpreted(body) => Ok(body),
+            Self::Framed { .. } => anyhow::bail!("typed callable has no mutable compiler body"),
+        }
+    }
+}
+
+/// Binds a canonical contiguous argument frame and a raw interpreted result once.
+struct FramePlan {
+    offsets: Vec<usize>,
+    result: crate::container_execution::ResultPlan,
+}
+
+/// Shares one body and counts live trusted-binding leases across all carrier aliases.
 struct ClosureData {
     param_types: Vec<TypeId>,
     return_type: TypeId,
-    body: RefCell<DynSegment>,
+    body: RefCell<ClosureBody>,
+    frame: Option<FramePlan>,
     signature: Option<std::sync::Arc<ClosureSignature>>,
+    trusted_bindings: Cell<usize>,
+}
+
+/// Prevents arbitrary mutable body dispatch until this independent lease is dropped.
+///
+/// Holds the shared carrier alive; moving the lease preserves the freeze, and
+/// dropping it releases exactly one binding even during unwinding. Carrier clones
+/// share the counter but neither acquire nor release leases themselves.
+pub(crate) struct TrustedBindingLease {
+    closure: DynClosure,
+}
+
+impl Drop for TrustedBindingLease {
+    /// Decrements the lease count without borrowing the body, before releasing the carrier.
+    fn drop(&mut self) {
+        let bindings = &self.closure.0.trusted_bindings;
+        debug_assert!(bindings.get() > 0);
+        bindings.set(bindings.get() - 1);
+    }
 }
 
 /// `Debug` implementation that formats the closure's signature but deliberately omits `body` from the output
@@ -100,13 +238,123 @@ impl std::fmt::Debug for ClosureData {
 /// (matching `adam_rs::Filter`/`Method`'s `Fn`, not `FnMut`, storage), while `DynSegment`'s own
 /// call methods need `&mut self`.
 #[derive(Clone, Debug)]
-pub struct DynClosure(Rc<ClosureData>);
+pub struct DynClosure(Rc<ClosureData>, Option<Rc<TrustedBindingLease>>);
+
+impl std::fmt::Debug for TrustedBindingLease {
+    /// Formats the lease without recursively traversing its retained carrier.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TrustedBindingLease")
+    }
+}
 
 impl DynClosure {
+    /// Shares a construction-bound frame dispatcher without exposing its payload.
+    ///
+    /// A prepared payload owns its immutable body and all nested trusted leases.
+    ///
+    /// # Safety
+    /// `dispatch` must match `payload` and the facade's exact Rust signature.
+    /// On success it must initialize exactly one result; on error or unwind it
+    /// must leave output uninitialized. If supplied, metadata must describe that
+    /// exact signature.
+    /// - Complexity: O(p) parameter metadata storage for p declared parameters.
+    pub(crate) unsafe fn from_frame_body(
+        payload: Box<dyn Any>,
+        dispatch: FrameDispatch,
+        signature: Option<ClosureSignature>,
+    ) -> Self {
+        let param_types = signature
+            .as_ref()
+            .map(|s| s.parameters.iter().map(ValueType::type_id).collect())
+            .unwrap_or_default();
+        let return_type = signature
+            .as_ref()
+            .map(|s| s.result.type_id())
+            .unwrap_or(TypeId::of::<()>());
+        Self(
+            Rc::new(ClosureData {
+                param_types,
+                return_type,
+                body: RefCell::new(ClosureBody::Framed { payload, dispatch }),
+                frame: None,
+                signature: signature.map(std::sync::Arc::new),
+                trusted_bindings: Cell::new(0),
+            }),
+            None,
+        )
+    }
+
+    /// Dispatches a complete preparation-validated contiguous borrowed argument frame.
+    ///
+    /// # Safety
+    /// Both frame pointers must match this exact carrier's validated signature.
+    /// Output is aligned uninitialized result storage. A compiler-facing interpreted body
+    /// must be protected by a trusted lease for the duration of the call.
+    /// # Errors
+    /// Returns reentrant entry or original body errors without initializing output.
+    /// - Complexity: Body-dependent; interpreted bodies set up O(a) pointers.
+    pub(crate) unsafe fn call_frame_trusted(
+        &self,
+        args: *const u8,
+        result: *mut u8,
+    ) -> anyhow::Result<()> {
+        let mut body = self
+            .0
+            .body
+            .try_borrow_mut()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        match &mut *body {
+            ClosureBody::Framed { payload, dispatch } => {
+                // Erasing an Any pointer preserves the boxed concrete data
+                // address; construction binds its monomorphized dispatcher.
+                let pointer = std::ptr::from_mut(payload.as_mut()).cast::<()>();
+                unsafe { dispatch(pointer, args, result) }
+            }
+            ClosureBody::Interpreted(body) => {
+                let frame = self.0.frame.as_ref().expect("validated canonical body");
+                let arguments: Vec<_> = frame
+                    .offsets
+                    .iter()
+                    .map(|offset| unsafe { args.add(*offset) })
+                    .collect();
+                let mut stack = unsafe { body.execute_raw(&arguments)? };
+                let mut output = unsafe { frame.result.take(&mut stack) };
+                unsafe { output.move_into(result) };
+                Ok(())
+            }
+        }
+    }
+
+    /// Returns the complete canonical callable descriptor after validating its current body.
+    ///
+    /// # Errors
+    /// Rejects untyped closures, executing bodies, or bodies changed incompatibly
+    /// through an unfrozen mutable dispatcher.
+    /// - Complexity: O(n) complete comparisons for n signature/body descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut body = cel_runtime::DynSegment::new::<()>(); body.just(7i32);
+    /// let closure = cel_runtime::DynClosure::typed(vec![], body).unwrap();
+    /// assert!(matches!(closure.value_type().unwrap().kind(), cel_runtime::ValueKind::Callable { .. }));
+    /// ```
+    pub fn value_type(&self) -> anyhow::Result<ValueType> {
+        self.validate_body_signature()?;
+        let signature = self
+            .0
+            .signature
+            .as_ref()
+            .expect("validated typed signature");
+        Ok(ValueType::callable(
+            signature.parameters.clone(),
+            signature.result.clone(),
+        ))
+    }
+
     /// Wraps `body` as a closure value declaring `param_types` (in order) and `return_type`.
     ///
     /// - Precondition: `body` was compiled expecting exactly `param_types.len()` positional
-    ///   arguments (via `push_arg`/`push_arg_as_dynamic_sequence_tuple`), in that order, and
+    ///   arguments (via `push_arg`/`push_argument`), in that order, and
     ///   produces exactly one result of `return_type`.
     ///
     /// # Examples
@@ -129,12 +377,17 @@ impl DynClosure {
     /// ```
     #[must_use]
     pub fn new(param_types: Vec<TypeId>, return_type: TypeId, body: DynSegment) -> Self {
-        DynClosure(Rc::new(ClosureData {
-            param_types,
-            return_type,
-            body: RefCell::new(body),
-            signature: None,
-        }))
+        DynClosure(
+            Rc::new(ClosureData {
+                param_types,
+                return_type,
+                body: RefCell::new(ClosureBody::Interpreted(body)),
+                frame: None,
+                signature: None,
+                trusted_bindings: Cell::new(0),
+            }),
+            None,
+        )
     }
 
     /// Wraps a checked CEL body while retaining its full callable shape.
@@ -156,6 +409,84 @@ impl DynClosure {
     /// assert_eq!(closure.call::<i32>(&[]).unwrap(), 42);
     /// ```
     pub fn typed(parameters: Vec<ValueType>, body: DynSegment) -> anyhow::Result<Self> {
+        let result = Self::validate_body(&parameters, &body)?;
+        let tuple = ValueType::tuple(
+            parameters
+                .iter()
+                .map(|value_type| crate::AssociatedType {
+                    offset: 0,
+                    value_type: value_type.clone(),
+                })
+                .collect(),
+        )?;
+        let frame = FramePlan {
+            offsets: tuple
+                .tuple_elements()
+                .unwrap()
+                .iter()
+                .map(|f| f.offset)
+                .collect(),
+            result: crate::container_execution::ResultPlan::new(0, result.clone())?,
+        };
+        let param_types = parameters.iter().map(ValueType::type_id).collect();
+        Ok(Self(
+            Rc::new(ClosureData {
+                param_types,
+                return_type: result.type_id(),
+                signature: Some(std::sync::Arc::new(ClosureSignature { parameters, result })),
+                body: RefCell::new(ClosureBody::Interpreted(body)),
+                frame: Some(frame),
+                trusted_bindings: Cell::new(0),
+            }),
+            None,
+        ))
+    }
+
+    /// Returns a carrier whose clones retain a trusted freeze for their own lifetime.
+    ///
+    /// # Errors
+    /// Rejects an executing body or an unrepresentable additional lease.
+    pub(crate) fn bind_canonical(mut self) -> anyhow::Result<Self> {
+        if self.1.is_none() {
+            self.1 = Some(Rc::new(self.freeze_trusted_binding()?));
+        }
+        Ok(self)
+    }
+
+    /// Freezes arbitrary mutable body access across all aliases until the returned lease drops.
+    ///
+    /// This does not validate the signature; preparation must do so before binding.
+    /// Existing nonmutating execution paths remain available while leased.
+    ///
+    /// # Errors
+    /// Rejects a mutably borrowed body (including an active mutable dispatcher)
+    /// or an unrepresentable additional lease count without changing the counter.
+    pub(crate) fn freeze_trusted_binding(&self) -> anyhow::Result<TrustedBindingLease> {
+        let _body = self
+            .0
+            .body
+            .try_borrow()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        let count = self
+            .0
+            .trusted_bindings
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("too many trusted bindings"))?;
+        let lease = TrustedBindingLease {
+            closure: self.clone(),
+        };
+        self.0.trusted_bindings.set(count);
+        Ok(lease)
+    }
+
+    /// Validates independent execution and declared argument reads, returning the actual result.
+    ///
+    /// # Errors
+    /// Rejects non-single results, dependent bodies, undeclared or mismatched reads,
+    /// and tuple reads without clone adapters.
+    /// - Complexity: O(recursive nodes in body argument reads and result).
+    fn validate_body(parameters: &[ValueType], body: &DynSegment) -> anyhow::Result<ValueType> {
         anyhow::ensure!(
             body.stack_ids.len() == 1,
             "closure body must produce exactly one value"
@@ -168,32 +499,84 @@ impl DynClosure {
                     .is_some_and(|expected| expected.same_shape(read_type)),
                 "closure body argument {index} differs from its declared signature"
             );
-            if read_type.tuple_elements().is_some() {
-                read_type.validate_clone()?;
-            }
+            read_type.validate_clone()?;
         }
-        let result = body.peek_stack_infos(1)[0].value_type.clone();
-        let param_types = parameters
-            .iter()
-            .map(|p| {
-                if p.tuple_elements().is_some() {
-                    TypeId::of::<crate::DynamicSequence>()
-                } else {
-                    p.type_id()
-                }
-            })
-            .collect();
-        Ok(Self(Rc::new(ClosureData {
-            param_types,
-            return_type: result.type_id(),
-            signature: Some(std::sync::Arc::new(ClosureSignature { parameters, result })),
-            body: RefCell::new(body),
-        })))
+        Ok(body.peek_stack_infos(1)[0].value_type.clone())
+    }
+
+    /// Checks the current mutable body against its retained typed signature during preparation.
+    ///
+    /// An external mutable dispatcher may have replaced the body without updating its metadata.
+    ///
+    /// # Errors
+    /// Rejects unavailable signatures, an executing body, invalid independent bodies
+    /// or argument reads, and a result differing from the retained signature.
+    /// - Complexity: O(recursive nodes in body argument reads and result).
+    pub(crate) fn validate_body_signature(&self) -> anyhow::Result<()> {
+        let signature = self
+            .0
+            .signature
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("closure signature metadata is unavailable"))?;
+        let body = self
+            .0
+            .body
+            .try_borrow()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        let ClosureBody::Interpreted(body) = &*body else {
+            return Ok(());
+        };
+        let result = Self::validate_body(&signature.parameters, body)?;
+        anyhow::ensure!(
+            signature.result.same_shape(&result),
+            "closure body result differs from its declared signature"
+        );
+        Ok(())
     }
 
     /// Returns the metadata retained for a typed CEL closure.
     pub(crate) fn signature(&self) -> Option<std::sync::Arc<ClosureSignature>> {
         self.0.signature.clone()
+    }
+
+    /// Enriches a complete canonical signature with explicitly supplied leaf factories.
+    ///
+    /// `leaf` looks up descriptors built while each concrete Rust type was
+    /// known; a `TypeId` never synthesizes a Rust monomorphization.
+    /// Factory capabilities remain independent of identity. This changes metadata
+    /// only; [`Self::value_type`] needs no factories for the existing complete signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an untyped closure (including [`Self::new`]), an
+    /// unknown nested callable signature, a missing or mismatched concrete leaf
+    /// factory, or an unrepresentable canonical tuple layout.
+    ///
+    /// - Complexity: O(n) traversal time and output space for n signature nodes,
+    ///   excluding leaf factory costs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_runtime::{DynClosure, DynSegment, value_type::{ValueKind, ValueType}};
+    /// use std::any::TypeId;
+    /// let mut body = DynSegment::new::<()>();
+    /// body.just(42i32);
+    /// let closure = DynClosure::typed(vec![], body).unwrap();
+    /// let complete = closure.complete_value_type(|id| {
+    ///     (id == TypeId::of::<i32>()).then(ValueType::cloneable_leaf::<i32>)
+    /// }).unwrap();
+    /// assert!(matches!(complete.kind(), ValueKind::Callable { .. }));
+    /// ```
+    pub fn complete_value_type(
+        &self,
+        mut leaf: impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
+    ) -> anyhow::Result<crate::value_type::ValueType> {
+        self.0
+            .signature
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("closure signature metadata is unavailable"))?
+            .complete(&mut leaf)
     }
 
     /// Evaluates a previously checked borrowed raw argument frame into an independent stack.
@@ -205,6 +588,7 @@ impl DynClosure {
     /// # Errors
     /// Returns signature mismatch, reentrant body borrow, or body evaluation errors.
     /// - Complexity: body-dependent.
+    #[cfg(test)]
     pub(crate) unsafe fn call_raw(
         &self,
         expected: &ClosureSignature,
@@ -220,7 +604,40 @@ impl DynClosure {
             .body
             .try_borrow_mut()
             .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
-        unsafe { body.execute_raw(arguments) }
+        unsafe { body.segment()?.execute_raw(arguments) }
+    }
+
+    /// Executes this carrier with a construction-validated, representation-matched frame.
+    ///
+    /// This path deliberately omits the external signature check. The prepared
+    /// invocation owns a clone of this exact carrier, preventing substitution.
+    ///
+    /// # Safety
+    ///
+    /// Preparation must validate the actual body's independent origin, argument reads,
+    /// and result against this closure's full signature and its canonical physical
+    /// frame. Every pointer must remain a live matching borrowed value
+    /// until execution returns; operations must not retain argument pointers.
+    /// A trusted-binding lease must protect the validated body from modification
+    /// throughout preparation and execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns reentrant body borrow or body evaluation errors.
+    /// - Complexity: Body-dependent time and independent evaluation stack storage.
+    #[cfg(test)]
+    pub(crate) unsafe fn call_raw_trusted(
+        &self,
+        arguments: &[*const u8],
+    ) -> anyhow::Result<crate::raw_stack::RawStack> {
+        debug_assert_eq!(arguments.len(), self.0.param_types.len());
+        debug_assert!(self.0.signature.is_some());
+        let mut body = self
+            .0
+            .body
+            .try_borrow_mut()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        unsafe { body.segment()?.execute_raw(arguments) }
     }
 
     /// Returns this closure's declared parameter types, in order.
@@ -305,8 +722,12 @@ impl DynClosure {
     /// ```
     pub fn call<R: 'static>(&self, args: &[&dyn Any]) -> anyhow::Result<R> {
         debug_assert_eq!(args.len(), self.0.param_types.len());
-        debug_assert_eq!(TypeId::of::<R>(), self.0.return_type);
-        self.0.body.borrow_mut().call_dyn::<R>(args)
+        self.0
+            .body
+            .try_borrow_mut()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?
+            .segment()?
+            .call_dyn::<R>(args)
     }
 
     /// Invokes the closure's body with `args`, like [`call`](Self::call), for a caller that only
@@ -319,6 +740,12 @@ impl DynClosure {
     /// - Precondition: `call_dyn_fn` is a dispatcher for `self.return_type()` (i.e. it calls
     ///   `DynSegment::call_dyn::<R>` for the same concrete `R` that `TypeId` names).
     /// - Complexity: whatever the body's own evaluation complexity is.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without invoking `call_dyn_fn` while any trusted binding
+    /// leases this shared body, including through another clone. Mutable dispatch
+    /// resumes after the last lease drops. Otherwise propagates dispatcher errors.
     ///
     /// # Examples
     ///
@@ -352,7 +779,16 @@ impl DynClosure {
         call_dyn_fn: CallDynFn,
     ) -> anyhow::Result<Box<dyn Any>> {
         debug_assert_eq!(args.len(), self.0.param_types.len());
-        call_dyn_fn(&mut self.0.body.borrow_mut(), args)
+        anyhow::ensure!(
+            self.0.trusted_bindings.get() == 0,
+            "closure body is frozen by a trusted binding"
+        );
+        let mut body = self
+            .0
+            .body
+            .try_borrow_mut()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        call_dyn_fn(body.segment()?, args)
     }
 }
 
@@ -360,6 +796,125 @@ impl DynClosure {
 mod tests {
     use super::*;
     use crate::dyn_segment::DynSegment;
+
+    /// Clones and drops the existing shared carrier without erasing its signature.
+    #[test]
+    fn complete_factory_callable_owns_shared_carrier() {
+        use crate::value_type::ValueType as Complete;
+        use std::mem::{ManuallyDrop, MaybeUninit};
+        let mut body = DynSegment::new::<()>();
+        body.just(42i32);
+        let closure = DynClosure::typed(vec![], body).unwrap();
+        let weak = Rc::downgrade(&closure.0);
+        let descriptor = Complete::callable(vec![], Complete::leaf::<i32>());
+        assert_eq!(descriptor.layout(), std::alloc::Layout::new::<DynClosure>());
+        assert!(descriptor.can_clone());
+        assert!(descriptor.can_debug());
+        assert!(!descriptor.can_compare());
+        let mut source = ManuallyDrop::new(closure);
+        let source_ptr = (&mut *source as *mut DynClosure).cast::<u8>();
+        let mut destination = MaybeUninit::<DynClosure>::uninit();
+        // SAFETY: Both locations have the statically known carrier layout and
+        // the descriptor describes this closure's signature.
+        unsafe {
+            crate::owned_value::clone_raw(&descriptor, source_ptr, destination.as_mut_ptr().cast());
+            crate::owned_value::drop_raw(&descriptor, source_ptr);
+            assert!(weak.upgrade().is_some());
+            assert_eq!(destination.assume_init_ref().call::<i32>(&[]).unwrap(), 42);
+            crate::owned_value::drop_raw(&descriptor, destination.as_mut_ptr().cast());
+        }
+        assert!(weak.upgrade().is_none());
+    }
+
+    /// Keeps tuple and array identities in migrated signatures.
+    #[test]
+    fn complete_factory_preserves_structural_callable_signatures() {
+        use crate::value_type::{ValueKind, ValueType as Complete};
+        let mut body = DynSegment::new::<()>();
+        body.just(1i32);
+        body.make_tuple(1, 0).unwrap();
+        let parameter = ValueType::array(ValueType::cloneable_leaf::<i32>());
+        let closure = DynClosure::typed(vec![parameter], body).unwrap();
+        let descriptor = closure
+            .complete_value_type(|id| {
+                (id == TypeId::of::<i32>()).then(Complete::cloneable_leaf::<i32>)
+            })
+            .unwrap();
+        let ValueKind::Callable { parameters, result } = descriptor.kind() else {
+            panic!("expected complete callable metadata");
+        };
+        assert!(parameters[0].same_shape(&Complete::array(Complete::leaf::<i32>())));
+        assert!(!parameters[0].same_shape(&Complete::array(Complete::leaf::<u32>())));
+        assert!(matches!(result.kind(), ValueKind::Tuple(fields) if fields.len() == 1));
+        assert!(!result.same_shape(&Complete::leaf::<i32>()));
+        assert!(!descriptor.same_shape(&Complete::callable(
+            vec![Complete::array(Complete::leaf::<u32>())],
+            (**result).clone()
+        )));
+        assert!(!descriptor.same_shape(&Complete::callable(
+            parameters.clone(),
+            Complete::leaf::<i32>()
+        )));
+    }
+
+    /// Retains known nested callable results and distinguishes canonical source unit.
+    #[test]
+    fn complete_factory_preserves_nested_callable_and_unit() {
+        use crate::value_type::{Nil, ValueKind, ValueRepr, ValueType as Complete};
+        let mut inner_body = DynSegment::new::<()>();
+        inner_body.make_tuple(0, 0).unwrap();
+        let inner = DynClosure::typed(vec![ValueType::leaf::<()>()], inner_body).unwrap();
+        let mut body = DynSegment::new::<()>();
+        body.push_closure(inner).unwrap();
+        let outer = DynClosure::typed(vec![], body).unwrap();
+        let complete = outer
+            .complete_value_type(|id| (id == TypeId::of::<()>()).then(Complete::leaf::<()>))
+            .unwrap();
+        let ValueKind::Callable { result, .. } = complete.kind() else {
+            panic!("expected callable");
+        };
+        let ValueKind::Callable { parameters, result } = result.kind() else {
+            panic!("expected nested callable");
+        };
+        assert!(parameters[0].same_shape(&Complete::leaf::<()>()));
+        assert!(!parameters[0].same_shape(&Nil::value_type()));
+        assert!(result.same_shape(&Nil::value_type()));
+        assert!(!result.same_shape(&Complete::leaf::<()>()));
+    }
+
+    /// Rejects unavailable signatures and missing or incorrectly keyed leaf factories.
+    #[test]
+    fn complete_factory_rejects_unknown_callable_metadata() {
+        use crate::value_type::ValueType as Complete;
+        assert!(
+            adder_closure()
+                .complete_value_type(|_| Some(Complete::leaf::<i32>()))
+                .is_err()
+        );
+        let mut body = DynSegment::new::<()>();
+        body.just(1i32);
+        let closure = DynClosure::typed(vec![], body).unwrap();
+        assert!(closure.complete_value_type(|_| None).is_err());
+        assert!(
+            closure
+                .complete_value_type(|_| Some(Complete::leaf::<u32>()))
+                .is_err()
+        );
+        assert!(
+            closure
+                .complete_value_type(|_| Some(Complete::array(Complete::leaf::<i32>())))
+                .is_err()
+        );
+
+        let mut body = DynSegment::new::<()>();
+        body.just(adder_closure());
+        let closure = DynClosure::typed(vec![], body).unwrap();
+        assert!(
+            closure
+                .complete_value_type(|_| Some(Complete::leaf::<DynClosure>()))
+                .is_err()
+        );
+    }
 
     fn adder_closure() -> DynClosure {
         let mut body = DynSegment::new::<()>();
@@ -447,7 +1002,7 @@ mod tests {
         parent.just(7u64);
         parent.just(true);
         let mut fragment = parent.new_fragment();
-        fragment.push_closure(closure);
+        fragment.push_closure(closure).unwrap();
         fragment.invoke_closure(0).unwrap();
 
         assert!(DynClosure::typed(vec![], fragment).is_err());
@@ -463,13 +1018,13 @@ mod tests {
         parent.just(());
         parent.just(true);
         let mut fragment = parent.new_fragment();
-        fragment.push_closure(closure);
+        fragment.push_closure(closure).unwrap();
         fragment.invoke_closure(0).unwrap();
 
         let closure = DynClosure::typed(vec![], fragment).unwrap();
         assert_eq!(closure.call::<i32>(&[]).unwrap(), 42);
         let mut caller = DynSegment::new::<()>();
-        caller.push_closure(closure);
+        caller.push_closure(closure).unwrap();
         caller.invoke_closure(0).unwrap();
         assert_eq!(caller.call0::<i32>().unwrap(), 42);
     }
@@ -537,7 +1092,7 @@ mod tests {
         body.push_arg::<i32>(0);
         let closure = DynClosure::typed(vec![ValueType::leaf::<i32>()], body).unwrap();
         let mut caller = DynSegment::new::<()>();
-        caller.push_closure(closure);
+        caller.push_closure(closure).unwrap();
         caller.just(false);
         assert!(caller.invoke_closure(1).is_err());
         assert_eq!(caller.peek_stack_infos(2).len(), 2);
@@ -552,7 +1107,9 @@ mod tests {
         let mut body = DynSegment::new::<()>();
         body.just(1i32);
         let mut caller = DynSegment::new::<(i32,)>();
-        caller.push_closure(DynClosure::typed(vec![], body).unwrap());
+        caller
+            .push_closure(DynClosure::typed(vec![], body).unwrap())
+            .unwrap();
         assert!(caller.invoke_closure(0).is_err());
     }
 }

@@ -6,7 +6,7 @@ use cel_parser::{
     AstContext, CELParser, Expr, OpLookup, OperationSignature, Parser, ResolvedLeafType,
     SourceSpan, Ty, format_expr,
 };
-use cel_runtime::ArrayElementType;
+use cel_runtime::ValueType;
 
 /// Supplies a host-defined receiver.
 #[derive(Clone)]
@@ -18,10 +18,7 @@ struct TestVector(f64);
 
 /// Describes one concrete host leaf.
 fn leaf<T: 'static>() -> ResolvedLeafType {
-    ResolvedLeafType::new(
-        std::any::type_name::<T>(),
-        ArrayElementType::leaf::<T>().unwrap(),
-    )
+    ResolvedLeafType::new(std::any::type_name::<T>(), ValueType::leaf::<T>())
 }
 
 /// Installs host operations and values without geometry-library dependencies.
@@ -31,34 +28,38 @@ fn lookup() -> OpLookup {
         lookup
             .register_operation(OperationSignature {
                 name,
-                operands: vec![leaf::<f64>()],
-                result: leaf::<f64>(),
-                emit: Arc::new(|s, _| s.op1(|value: f64| value)),
+                operands: vec![leaf::<f64>().into()],
+                result: leaf::<f64>().into(),
+                emit: Box::new(|s, _| s.op1(|value: f64| value)),
             })
             .unwrap();
     }
     lookup
         .register_operation(OperationSignature {
             name: "x",
-            operands: vec![leaf::<TestPoint>()],
-            result: leaf::<f64>(),
-            emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.0)),
+            operands: vec![leaf::<TestPoint>().into()],
+            result: leaf::<f64>().into(),
+            emit: Box::new(|s, _| s.op1(|p: TestPoint| p.0)),
         })
         .unwrap();
     lookup
         .register_operation(OperationSignature {
             name: "shift",
-            operands: vec![leaf::<TestPoint>(), leaf::<TestVector>()],
-            result: leaf::<TestPoint>(),
-            emit: Arc::new(|s, _| s.op2(|p: TestPoint, v: TestVector| TestPoint(p.0 + v.0))),
+            operands: vec![leaf::<TestPoint>().into(), leaf::<TestVector>().into()],
+            result: leaf::<TestPoint>().into(),
+            emit: Box::new(|s, _| s.op2(|p: TestPoint, v: TestVector| TestPoint(p.0 + v.0))),
         })
         .unwrap();
     lookup
         .register_operation(OperationSignature {
             name: "combine",
-            operands: vec![leaf::<TestPoint>(), leaf::<f64>(), leaf::<f64>()],
-            result: leaf::<f64>(),
-            emit: Arc::new(|s, _| s.op3(|p: TestPoint, a: f64, b: f64| p.0 + 10.0 * a + b)),
+            operands: vec![
+                leaf::<TestPoint>().into(),
+                leaf::<f64>().into(),
+                leaf::<f64>().into(),
+            ],
+            result: leaf::<f64>().into(),
+            emit: Box::new(|s, _| s.op3(|p: TestPoint, a: f64, b: f64| p.0 + 10.0 * a + b)),
         })
         .unwrap();
     lookup.push_scope(|name, s, arity, _| {
@@ -258,13 +259,20 @@ fn closure_postfix_formatting_preserves_evaluation() {
     let mut lookup = lookup();
     lookup.push_scope(|name, s, arity, _| {
         if name == "()" && arity == 1 {
-            s.op1r(|closure: cel_runtime::DynClosure| closure.call::<i32>(&[]))?;
+            s.invoke_closure(0)?;
             return Ok(true);
         }
         if name != "arity" || arity != 1 {
             return Ok(false);
         }
-        s.op1(|closure: cel_runtime::DynClosure| closure.param_types().len())?;
+        let cel_runtime::ValueKind::Callable { parameters, .. } =
+            s.peek_stack_infos(1)[0].value_type.kind()
+        else {
+            anyhow::bail!("callable required");
+        };
+        let count = parameters.len();
+        s.drop_value()?;
+        s.just(count);
         Ok(true)
     });
     let mut parser = CELParser::new(lookup);

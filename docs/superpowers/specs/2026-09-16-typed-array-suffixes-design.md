@@ -1,5 +1,10 @@
 # Registry-backed typed array annotations
 
+> **Historical status (2026-10-19):** The annotation syntax is implemented
+> over complete recursive descriptors, including tuple/callable elements.
+> Earlier storage restrictions below are superseded; see the
+> [current handoff](../2026-10-19-composable-containers-handoff.md).
+
 ## Status
 
 Approved design for issue #212.

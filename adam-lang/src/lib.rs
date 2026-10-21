@@ -13,7 +13,9 @@
 //! cell_filter        = "filter" expression.
 //! cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
 //! source_decl        = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
-//! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
+//! type_expr          = identifier [ "(" type_expr { "," type_expr } ")" ]
+//!                    | "[" type_expr "]"
+//!                    | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" "{" { binding } "}".
 //! binding            = binding_target ":=" expression ";".
 //! binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
@@ -39,9 +41,35 @@
 //! [`# Grammar`](../cel_parser/index.html#grammar) section. That embedded CEL grammar now includes
 //! postfix array type ascriptions such as `[left, right]: [Custom]` and `[]: [[i32]]`. The
 //! ascription names the complete array type, resolves leaf names through the active
-//! [`TypeRegistry`], and reuses recursive tuple/array type syntax. Tuple-valued array elements
-//! remain explicitly unsupported, so `[]: [(i32, f64)]` still reports the existing issue #213
-//! diagnostic.
+//! [`TypeRegistry`], and reuses recursive tuple/array/callable type syntax. Persistent cells
+//! support arbitrary compositions of these shapes and registered generic leaves. Arrays
+//! default to empty, tuples default recursively, and callables require an initializer.
+//! Every stored cell requires cloning and value equality: CEL permits callable storage, but
+//! Adam rejects a callable cell without equality rather than inventing function equality.
+//! Registered concrete leaves keep [`Sheet`](adam_rs::Sheet)'s Rust read/write access;
+//! compound owners use [`ParsedSheet::read_compound`], [`ParsedSheet::write_compound`], and
+//! [`ParsedSheet::source_compound`] with canonical representation witnesses. Relationships,
+//! filters, outputs, conditionals, and requirements validate complete frames at construction
+//! and run the existing raw CEL engine without recursively checking types on propagation.
+//! The private `CellValue` owns one complete compound value, not individual erased
+//! array elements. Checked host writes reject mismatched recursive witnesses before
+//! mutation. Reads clone independent owners; source reads preserve aspirations.
+//! Formatting is a separate capability: [`prepare_compound_cell_formatter`] binds
+//! it without adding equality or clone requirements.
+//!
+//! ```
+//! use adam_lang::{AdamParser, TypeRegistry};
+//! use cel_parser::OpLookup;
+//! use cel_runtime::{Array, ArrayOf, Cons, IntoCStackList, Leaf, Nil};
+//! type Rows = ArrayOf<Cons<Leaf<i32>, Cons<Leaf<bool>, Nil>>>;
+//! let mut parsed = AdamParser::new(TypeRegistry::new(), OpLookup::new())
+//!     .parse_str("sheet s { source rows: [(i32, bool)]; out copy := rows; }").unwrap();
+//! let id = parsed.cell_names["rows"].0;
+//! parsed.write_compound::<Rows>(id, Array::from_vec(vec![(7, true).into_c_stack_list()])).unwrap();
+//! parsed.propagate().unwrap();
+//! assert_eq!(parsed.read_compound::<Rows>(parsed.output_names["copy"]).unwrap().len(), 1);
+//! assert_eq!(parsed.source_compound::<Rows>(id).unwrap().as_slice()[0].1, 7);
+//! ```
 //!
 //! A `cell_filter`'s `expression` names no explicit parameter list: `_` always refers to the
 //! candidate value being conformed (of the filtered cell's own declared type), and every other
@@ -74,7 +102,7 @@
 //! ```rust
 //! use adam_lang::{AdamParser, TypeRegistry};
 //! use cel_parser::OpLookup;
-//! use cel_runtime::DynamicArray;
+//! use cel_runtime::{ArrayOf, Leaf, ValueRepr};
 //!
 //! #[derive(Clone, Debug, PartialEq)]
 //! struct Custom(i32);
@@ -97,7 +125,17 @@
 //!         Ok(true)
 //!     }
 //!     ("()", 2) => {
-//!         segment.op2(|_callee: CountFn, values: DynamicArray| values.len() as i32)?;
+//!         let array = &segment.peek_stack_infos(1)[0].value_type;
+//!         if array.same_shape(&ArrayOf::<Leaf<i32>>::value_type()) {
+//!             segment.op2_repr::<Leaf<CountFn>, ArrayOf<Leaf<i32>>, Leaf<i32>, _>(
+//!                 |_callee, values| values.len() as i32)?;
+//!         } else if array.same_shape(&ArrayOf::<Leaf<Custom>>::value_type()) {
+//!             segment.op2_repr::<Leaf<CountFn>, ArrayOf<Leaf<Custom>>, Leaf<i32>, _>(
+//!                 |_callee, values| values.len() as i32)?;
+//!         } else {
+//!             segment.op2_repr::<Leaf<CountFn>, ArrayOf<ArrayOf<Leaf<Custom>>>, Leaf<i32>, _>(
+//!                 |_callee, values| values.len() as i32)?;
+//!         }
 //!         Ok(true)
 //!     }
 //!     _ => Ok(false),
@@ -154,6 +192,7 @@
 
 pub mod ast;
 mod ast_parser;
+mod cell_value;
 mod error_labels;
 mod fmt;
 mod parser;
@@ -166,6 +205,7 @@ mod typecheck;
 // All parse errors carry a proc_macro2::Span for source-location diagnostics.
 pub use ast_parser::AdamAstParser;
 pub use cel_parser::ParseError;
+pub use cell_value::{debug_compound_cell, prepare_compound_cell_formatter};
 pub use fmt::{FormatSourceError, format_sheet, format_source};
 pub use parser::{AdamParser, ParsedSheet};
 pub use trivia::attach_trivia;

@@ -183,8 +183,5 @@ pub fn install(lookup: &mut cel_parser::OpLookup) {
 
 /// Describes a concrete leaf without erasing its Rust identity.
 fn leaf<T: 'static>(name: &'static str) -> cel_parser::ResolvedLeafType {
-    cel_parser::ResolvedLeafType::new(
-        name,
-        cel_runtime::ArrayElementType::leaf::<T>().expect("Euclid types are non-array leaves"),
-    )
+    cel_parser::ResolvedLeafType::new(name, cel_runtime::ValueType::leaf::<T>())
 }

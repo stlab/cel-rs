@@ -33,8 +33,23 @@ for release/performance. That second path does not yet exist.
 
 **Current state:** interpreted backend (`DynSegment`/`Segment`) is the only backend.
 `cel-rs-macros` currently does compile-time validation of CEL expressions only.
-Tuples, arrays, registered records/members, and typed noncapturing closures with
-checked invocation are implemented. The optional `cel-euclid` library exposes
+Tuples, arrays, registered records/members, and signature-typed noncapturing
+callables compose recursively. CEL arrays own concrete contiguous `Array<T>`
+elements; tuples use source-ordered canonical lists (`Nil`/`Cons` witnesses),
+including unit and singleton tuples. `[[T]]` maps to `Array<Array<T>>`, whose
+allocation-preserving vector view is `Vec<Array<T>>`, not `Vec<Vec<T>>`.
+`Callable<Args, R>` / `FnOf` retain complete signatures for native and interpreted
+bodies, including typed empty callable arrays. Clone, equality, and debug
+formatting are independent capabilities, not universal storage requirements.
+`ValueType`, `ResolvedType`, and checker `Ty` carry complete recursive shapes.
+External erased ownership checks those shapes; `PreparedSegment` and
+`prepared_segment::PreparedRawSegment` validate frames once and execute the
+existing raw engine without repeating type checks. Native Rust operations share
+typed adapters with interpreted CEL; this does not implement the future macro
+backend. See the [collections tutorial](../cel-lang-book/book-src/collections.md)
+and [implementation handoff](superpowers/2026-10-19-composable-containers-handoff.md).
+
+The optional `cel-euclid` library exposes
 seven concrete `f64` / `UnknownUnit` geometry types and general affine operations,
 including checked inverse and four-corner outer bounds. Hosts explicitly opt in;
 the core languages do not depend on geometry. See
@@ -77,7 +92,12 @@ imperative event handlers.
 constraint systems as source text (`sheet { cell ...; relationship { name := expr; } }`).
 
 **Current state:** functional parser covering cells, `relationship` blocks, `out` cells, and
-conditional groups; the only `cel-parser` client so far.
+conditional groups. Persistent arrays and tuples use private canonical
+whole-value ownership; host code reads/writes them through complete
+`read_compound` / `write_compound` / `source_compound` witnesses.
+Recursive defaults and explicit clone/equality diagnostics preserve the same
+type model through relationships, filters, requirements, and outputs.
+Prepared frames avoid repeated shape validation during propagation.
 
 **Directions being explored:**
 
@@ -134,6 +154,9 @@ full rebuild, unlike desktop's live-reload-off-disk.
 **Current state:** desktop-first Dioxus app rendering the adam-rs graph (D3
 force-directed layout) with an Inspector sidebar for reading/writing cells. A live-editable
 adam-lang source panel (`SourcePanel`) with rustc-style error diagnostics has just landed.
+The Inspector formats nested arrays/tuples, empty arrays, and unit recursively
+through explicit debug capabilities. Compound edits reject without mutation;
+primitive editing remains supported.
 
 **Pivot — VSCode interop over in-app editing:** investment has shifted away from deepening
 the in-app editor toward interop with VS Code. The `adam-lang` VS Code extension (backed by
