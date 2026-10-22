@@ -1,50 +1,96 @@
-//! A `lex-lexer` is a lexer taking a lex token stream and returning a token stream of a different
-//! type. Initially this is used to convert the TokenTree from Rust's proc_macro into a higher level
-//! token stream. The goal, however, is to be able to specify with a grammar how to process a token
-//! stream.
+//! Flattens Rust token trees into CEL tokens while preserving source spans.
+//!
+//! Construct a [`LexLexer`] from a `proc_macro2::TokenStream` iterator and consume
+//! it as an iterator of [`Token`] values. Groups emit matching opening and closing
+//! delimiters, booleans become literals, and adjacent punctuation combines into
+//! the supported operators. Documentation attributes become comment tokens.
+//!
+//! ```
+//! use cel_parser::lex_lexer::{LexLexer, Token};
+//!
+//! let input: proc_macro2::TokenStream = "value && true".parse()?;
+//! let mut lexer = LexLexer::new(input.into_iter());
+//! assert!(matches!(lexer.next(), Some(Token::Identifier(id)) if id == "value"));
+//! assert!(matches!(lexer.next(), Some(Token::Punct { op, .. }) if op == "&&"));
+//! assert!(matches!(lexer.next(), Some(Token::Literal(_))));
+//! assert!(lexer.next().is_none());
+//! # Ok::<(), proc_macro2::LexError>(())
+//! ```
 //!
 //! # Error Handling
 //!
-//! This lexer does not produce errors for ordinary tokens. All input `TokenTree` items come
-//! pre-validated from `proc_macro2`, which has already verified correct Rust lexical syntax; the
-//! lexer only transforms and flattens those tokens, operations that cannot fail on valid input.
-//! The one exception is a `#`-led token sequence that doesn't match the doc-comment attribute
-//! shape (`#[doc = "..."]`/`#![doc = "..."]`) `proc_macro2` already produces for `///`/`//!`
-//! comments — general `#[...]` attribute syntax is deliberately unsupported, so any other shape
-//! becomes a `Token::Error` rather than an `unreachable!()`. Any other impossible state (like
-//! receiving a `Punct` or `Group` in `convert_token`) still uses `unreachable!()`, since those
-//! represent programming errors, not malformed or unsupported input.
+//! A `#` commits to a documentation attribute: `#[doc = "..."]` or `#![doc = "..."]`.
+//! Other attribute shapes and literals Syn cannot parse produce [`Token::Error`].
+//! Errors consume the inspected token trees; iteration may continue with the
+//! remaining input, but does not roll back a malformed attribute.
 
 use proc_macro2::{Delimiter, Ident, Spacing, Span, TokenTree};
 use syn::Lit;
 
-/// A trait for token types that provides access to span information for error reporting.
+/// Provides a token's source span for diagnostics.
 ///
-/// This trait is minimal by design - token type discrimination is done through pattern
-/// matching on enum variants, not through trait methods. This keeps the trait simple
-/// and allows different token types to have their own specific fields and methods.
+/// # Examples
+///
+/// ```
+/// use cel_parser::lex_lexer::HasSpan;
+///
+/// let input: proc_macro2::TokenStream = "name".parse()?;
+/// let token = input.into_iter().next().unwrap();
+/// assert_eq!(HasSpan::span(&token).source_text().as_deref(), Some("name"));
+/// # Ok::<(), proc_macro2::LexError>(())
+/// ```
 pub trait HasSpan {
-    /// Get the span for error reporting.
+    /// Returns the source span associated with this token.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_parser::lex_lexer::HasSpan;
+    ///
+    /// let input: proc_macro2::TokenStream = "42".parse()?;
+    /// let token = input.into_iter().next().unwrap();
+    /// assert_eq!(HasSpan::span(&token).source_text().as_deref(), Some("42"));
+    /// # Ok::<(), proc_macro2::LexError>(())
+    /// ```
     fn span(&self) -> Span;
 }
 
-/// A group iterator with its associated close delimiter information.
+/// Owns the unconsumed contents and matching close delimiter of one open group.
 struct GroupLevel {
     iter: TokenStreamIter,
     delimiter: Delimiter,
     span: Span,
 }
 
-/// A lexer that transforms a `TokenTree` stream into a flattened `Token` stream.
+/// Owns a token stream's consuming iterator.
 ///
-/// Groups are flattened into OpenDelim and CloseDelim tokens, and literals are
-/// eagerly discriminated into specific types. Flattening is lazy - group iterators
-/// are pushed onto a stack and processed one token at a time.
+/// # Examples
 ///
-/// Iterator type used for token streams (from `TokenStream::into_iter()`).
+/// ```
+/// use cel_parser::lex_lexer::TokenStreamIter;
+///
+/// let input: proc_macro2::TokenStream = "42".parse()?;
+/// let mut iter: TokenStreamIter = input.into_iter();
+/// assert!(iter.next().is_some());
+/// assert!(iter.next().is_none());
+/// # Ok::<(), proc_macro2::LexError>(())
+/// ```
 pub type TokenStreamIter = proc_macro2::token_stream::IntoIter;
 
-/// Punctuation operator (1, 2, or 3 chars) without heap allocation.
+/// Stores one to three operator characters inline.
+///
+/// Equality with a string compares the complete character sequence, not a prefix.
+///
+/// # Examples
+///
+/// ```
+/// use cel_parser::lex_lexer::PunctOp;
+///
+/// let op = PunctOp::Two(['&', '&']);
+/// assert!(op == "&&");
+/// assert!(op != "&");
+/// assert!(op != "&&&");
+/// ```
 #[derive(Clone, Debug)]
 pub enum PunctOp {
     /// Single character (e.g. `+`, `-`).
@@ -56,31 +102,48 @@ pub enum PunctOp {
 }
 
 impl PartialEq<str> for PunctOp {
+    /// Returns whether the string contains exactly this operator's characters.
     fn eq(&self, other: &str) -> bool {
-        match self {
-            PunctOp::One(c) => other.starts_with(*c) && other.len() == 1,
-            PunctOp::Two([a, b]) => {
-                let mut it = other.chars();
-                it.next() == Some(*a) && it.next() == Some(*b) && it.next().is_none()
-            }
-            PunctOp::Three([a, b, c]) => {
-                let mut it = other.chars();
-                it.next() == Some(*a)
-                    && it.next() == Some(*b)
-                    && it.next() == Some(*c)
-                    && it.next().is_none()
-            }
-        }
+        let chars: &[char] = match self {
+            PunctOp::One(c) => std::slice::from_ref(c),
+            PunctOp::Two(chars) => chars,
+            PunctOp::Three(chars) => chars,
+        };
+        chars.iter().copied().eq(other.chars())
     }
 }
 
 impl PartialEq<&str> for PunctOp {
+    /// Returns whether the borrowed string equals this operator's characters.
     fn eq(&self, other: &&str) -> bool {
         self.eq(*other)
     }
 }
 
-/// Multi-character operators are combined at this level (e.g., `&` + `&` -> `&&`).
+/// Lazily flattens token trees and combines adjacent supported punctuation.
+///
+/// Each group emits matching delimiters, including `Delimiter::None`. Operators
+/// combine only across joint punctuation within the same group. Combined tokens
+/// retain the first punctuation's span; delimiters retain their group's span.
+///
+/// - Invariant: The group stack owns open groups in nesting order; lookahead and
+///   pending close tokens precede any further tokens from their parent iterator.
+/// - Complexity: Traversal visits O(n) token trees and retains O(d) group levels
+///   for nesting depth d, excluding token payloads and upstream iterator storage.
+///
+/// # Examples
+///
+/// ```
+/// use cel_parser::lex_lexer::{LexLexer, Token};
+///
+/// let input: proc_macro2::TokenStream = "(true)".parse()?;
+/// let mut lexer = LexLexer::new(input.into_iter());
+/// assert!(matches!(lexer.next(), Some(Token::OpenDelim { .. })));
+/// assert!(matches!(lexer.next(), Some(Token::Literal(syn::Lit::Bool(b))) if b.value));
+/// assert!(matches!(lexer.next(), Some(Token::CloseDelim { .. })));
+/// assert!(lexer.next().is_none());
+/// # Ok::<(), proc_macro2::LexError>(())
+/// ```
 pub struct LexLexer {
     input: TokenStreamIter,
     /// Stack of iterators for nested groups - allows lazy flattening.
@@ -93,11 +156,16 @@ pub struct LexLexer {
 }
 
 impl LexLexer {
-    /// Creates a new lexer from a token tree iterator.
+    /// Takes ownership of an iterator without consuming any tokens.
     ///
-    /// # Arguments
+    /// # Examples
     ///
-    /// * `input` - An iterator over `TokenTree` items to be lexed into `Token`s
+    /// ```
+    /// use cel_parser::lex_lexer::LexLexer;
+    ///
+    /// let lexer = LexLexer::new(proc_macro2::TokenStream::new().into_iter());
+    /// assert_eq!(lexer.count(), 0);
+    /// ```
     pub fn new(input: TokenStreamIter) -> Self {
         Self {
             input,
@@ -107,52 +175,34 @@ impl LexLexer {
         }
     }
 
-    /// Converts a single TokenTree into a Token (except Punct and Group which are handled specially).
+    /// Parses a literal while preserving its span.
     ///
-    /// This handles Literal and Identifier tokens. Boolean identifiers (`true`, `false`) are
-    /// converted to Boolean literals. Punct tokens need special handling for combining
-    /// multi-char operators, and Groups are handled by the iterator.
-    fn convert_token(token: TokenTree) -> Token {
-        match token {
-            TokenTree::Literal(lit) => {
-                // Wrap in TokenTree and convert to TokenStream to preserve span information
-                let token_stream: proc_macro2::TokenStream = TokenTree::Literal(lit).into();
-                let syn_lit: Lit = syn::parse2(token_stream)
-                    .expect("proc_macro2 Literal should parse as syn::Lit");
-
-                // Verbatim literals should never occur when parsing proc_macro2::Literal
-                debug_assert!(
-                    !matches!(syn_lit, Lit::Verbatim(_)),
-                    "Unexpected Verbatim literal from proc_macro2::Literal"
-                );
-
-                Token::Literal(syn_lit)
-            }
-            TokenTree::Ident(ident) => {
-                let ident_str = ident.to_string();
-
-                // Check if this is a boolean literal
-                match ident_str.as_str() {
-                    "true" | "false" => {
-                        // Wrap in TokenTree and convert to TokenStream to preserve span information
-                        let token_stream: proc_macro2::TokenStream = TokenTree::Ident(ident).into();
-                        let syn_lit: Lit = syn::parse2(token_stream)
-                            .expect("boolean identifier should parse as syn::Lit::Bool");
-                        Token::Literal(syn_lit)
-                    }
-                    _ => Token::Identifier(ident),
-                }
-            }
-            TokenTree::Punct(_) | TokenTree::Group(_) => {
-                // These should be handled by the iterator
-                unreachable!(
-                    "Punct and Group tokens should be handled by the iterator, not convert_token"
-                )
-            }
+    /// Returns `Token::Error` if Syn cannot interpret the literal.
+    ///
+    /// - Complexity: O(n) time and space for a literal of n characters.
+    fn convert_literal(literal: proc_macro2::Literal) -> Token {
+        let span = literal.span();
+        match syn::parse2(TokenTree::Literal(literal).into()) {
+            Ok(literal) => Token::Literal(literal),
+            Err(error) => Token::Error {
+                message: error.to_string(),
+                span,
+            },
         }
     }
 
-    /// Check if two characters form a known multi-character operator.
+    /// Converts boolean keywords to literals and preserves every other identifier.
+    ///
+    /// - Complexity: O(n) time for an identifier of n characters.
+    fn convert_identifier(ident: Ident) -> Token {
+        if ident == "true" || ident == "false" {
+            Token::Literal(Lit::Bool(syn::LitBool::new(ident == "true", ident.span())))
+        } else {
+            Token::Identifier(ident)
+        }
+    }
+
+    /// Returns whether two characters form a supported compound operator.
     fn is_compound_operator(first: char, second: char) -> bool {
         matches!(
             (first, second),
@@ -171,40 +221,65 @@ impl LexLexer {
         )
     }
 
-    /// Check if three characters form a known triple-character operator. Currently only `..=`.
-    fn is_triple_compound_operator(first: char, second: char, third: char) -> bool {
-        matches!((first, second, third), ('.', '.', '='))
-    }
-
-    /// Get the next TokenTree from the current iterator (top of stack or main input).
-    /// Returns None and sets pending_close when an iterator is exhausted.
+    /// Returns the next lookahead, innermost group, or root token, in that order.
+    ///
+    /// On group exhaustion, returns `None` and schedules its closing delimiter
+    /// before any further parent tokens.
     fn next_token_tree(&mut self) -> Option<TokenTree> {
-        // Check if we have a pending token from lookahead
         if let Some(token) = self.pending_token.take() {
             return Some(token);
         }
 
-        // Try to get from the top of the group stack first
         if let Some(level) = self.group_stack.last_mut() {
             if let Some(tt) = level.iter.next() {
                 return Some(tt);
             }
-            // Current iterator exhausted, pop it and set pending close
             let level = self.group_stack.pop().unwrap();
             self.pending_close = Some((level.delimiter, level.span));
-            return None; // Signal that we need to emit close delimiter
+            return None;
         }
 
-        // Stack is empty, get from main input
         self.input.next()
     }
 
-    /// Parses the token sequence following a `#` as a doc-comment attribute
-    /// (`#[doc = "..."]`/`#![doc = "..."]`), the one shape `proc_macro2` produces for `///`/`//!`
-    /// comments. Committed, not speculative: once `#` is seen, this always returns a `Token`
-    /// (`DocComment` on success, `Error` on any mismatch) — it never falls back to re-emitting
-    /// `#` itself as an ordinary `Punct` token. General `#[...]` attribute syntax is not
-    /// supported; any other shape becomes a `Token::Error`.
+    /// Consumes the longest supported operator beginning with `first`.
+    ///
+    /// Preserves the first punctuation's span and retains unmatched lookahead.
+    /// Only joint punctuation within the current group can extend the operator.
+    fn combine_punctuation(&mut self, first: proc_macro2::Punct) -> Token {
+        let ch = first.as_char();
+        let mut op = PunctOp::One(ch);
+        if first.spacing() == Spacing::Joint {
+            match self.next_token_tree() {
+                Some(TokenTree::Punct(second))
+                    if Self::is_compound_operator(ch, second.as_char()) =>
+                {
+                    let next_ch = second.as_char();
+                    op = PunctOp::Two([ch, next_ch]);
+                    if [ch, next_ch] == ['.', '.'] && second.spacing() == Spacing::Joint {
+                        match self.next_token_tree() {
+                            Some(TokenTree::Punct(third)) if third.as_char() == '=' => {
+                                op = PunctOp::Three(['.', '.', '=']);
+                            }
+                            other => self.pending_token = other,
+                        }
+                    }
+                }
+                other => self.pending_token = other,
+            }
+        }
+        Token::Punct {
+            op,
+            span: first.span(),
+        }
+    }
+
+    /// `doc_attribute_tail = ["!"] "[" "doc" "=" string_literal "]".`
+    ///
+    /// Returns a documentation token or `Token::Error` for any mismatch, consuming
+    /// the inspected token trees without rolling back.
+    ///
+    /// - Complexity: O(n) time and space for an attribute containing n characters.
     fn parse_doc_comment_attribute(&mut self, hash_span: Span) -> Token {
         let next = self.next_token_tree();
         let (inner, group_token) = match next {
@@ -281,26 +356,24 @@ impl LexLexer {
     }
 }
 
-/// A parsed literal value using syn's Lit enum.
+/// Represents a parsed literal, including boolean keywords.
 ///
-/// This is a simple wrapper around syn's `Lit` type that includes boolean literals
-/// even though they appear as identifiers in proc_macro2 (converted during lexing).
+/// # Examples
+///
+/// ```
+/// use cel_parser::lex_lexer::{HasSpan, Literal};
+///
+/// let literal: Literal = syn::parse_str("true")?;
+/// assert!(matches!(literal, Literal::Bool(ref b) if b.value));
+/// let span = HasSpan::span(&literal);
+/// # Ok::<(), syn::Error>(())
+/// ```
 pub type Literal = Lit;
 
 impl HasSpan for Literal {
+    /// Returns the literal's span, including uninterpreted verbatim literals.
     fn span(&self) -> Span {
-        match self {
-            Lit::Str(lit) => lit.span(),
-            Lit::ByteStr(lit) => lit.span(),
-            Lit::CStr(lit) => lit.span(),
-            Lit::Byte(lit) => lit.span(),
-            Lit::Char(lit) => lit.span(),
-            Lit::Int(lit) => lit.span(),
-            Lit::Float(lit) => lit.span(),
-            Lit::Bool(lit) => lit.span(),
-            Lit::Verbatim(_) => unreachable!("Verbatim literals should never occur"),
-            _ => Span::call_site(),
-        }
+        syn::spanned::Spanned::span(self)
     }
 }
 
@@ -308,6 +381,17 @@ impl HasSpan for Literal {
 ///
 /// Groups are flattened into OpenDelim and CloseDelim tokens, making parsing
 /// simpler by removing nesting from the token stream.
+///
+/// # Examples
+///
+/// ```
+/// use cel_parser::lex_lexer::{LexLexer, Token};
+///
+/// let input: proc_macro2::TokenStream = "name".parse()?;
+/// let token = LexLexer::new(input.into_iter()).next().unwrap();
+/// assert!(matches!(token, Token::Identifier(id) if id == "name"));
+/// # Ok::<(), proc_macro2::LexError>(())
+/// ```
 #[derive(Debug)]
 pub enum Token {
     /// A literal value (integer, string, boolean, or float) with eager discrimination.
@@ -316,7 +400,7 @@ pub enum Token {
     /// An identifier.
     Identifier(Ident),
 
-    /// A punctuation operator (single or multi-character; no heap for 1–2 chars).
+    /// A punctuation operator storing all one to three characters inline.
     Punct {
         /// The operator (e.g., "+", "&&", "<=").
         op: PunctOp,
@@ -353,9 +437,7 @@ pub enum Token {
         span: Span,
     },
 
-    /// A `#`-led token sequence that isn't the doc-comment shape above. Flows through like any
-    /// other token and fails to match whatever a grammar production expects, surfacing as a
-    /// normal parse error at that point.
+    /// An unsupported attribute shape or a literal Syn cannot parse.
     Error {
         /// A description of what was expected instead.
         message: String,
@@ -365,6 +447,7 @@ pub enum Token {
 }
 
 impl HasSpan for Token {
+    /// Returns the token's preserved source or diagnostic span.
     fn span(&self) -> Span {
         match self {
             Token::Literal(lit) => lit.span(),
@@ -379,152 +462,52 @@ impl HasSpan for Token {
 }
 
 impl HasSpan for TokenTree {
+    /// Returns the source span of any token-tree variant.
     fn span(&self) -> Span {
-        match self {
-            TokenTree::Group(g) => g.span(),
-            TokenTree::Ident(i) => i.span(),
-            TokenTree::Punct(p) => p.span(),
-            TokenTree::Literal(l) => l.span(),
-        }
+        TokenTree::span(self)
     }
 }
 
 impl Iterator for LexLexer {
     type Item = Token;
 
+    /// Returns the next flattened token or `None` after exhausting the input.
+    ///
+    /// - Complexity: O(n) time and space for the consumed token payload; entering
+    ///   a group also retains its iterator and may grow the O(d) nesting stack.
     fn next(&mut self) -> Option<Self::Item> {
-        // Check if we have a pending close delimiter to emit
         if let Some((delimiter, span)) = self.pending_close.take() {
             return Some(Token::CloseDelim { delimiter, span });
         }
 
-        // Get next token tree from current iterator
         let token = match self.next_token_tree() {
-            Some(tt) => tt,
-            None if self.pending_close.is_some() => {
-                // An iterator was exhausted and pending_close was set
-                // Emit the close delimiter on the next call (recursive call)
-                return self.next();
-            }
+            Some(token) => token,
             None => {
-                // All iterators exhausted, no more tokens
-                return None;
+                return self
+                    .pending_close
+                    .take()
+                    .map(|(delimiter, span)| Token::CloseDelim { delimiter, span });
             }
         };
 
-        // A `#` commits to parsing a doc-comment attribute (`#[doc = "..."]`/`#![doc = "..."]`)
-        // — the only shape `proc_macro2` produces for `///`/`//!` comments. See
-        // `parse_doc_comment_attribute`'s doc comment for why there is no fallback here.
-        #[allow(clippy::collapsible_if)]
-        if let TokenTree::Punct(ref punct) = token {
-            if punct.as_char() == '#' {
-                let hash_span = punct.span();
-                return Some(self.parse_doc_comment_attribute(hash_span));
-            }
-        }
-
-        // Handle Groups by pushing their iterator onto the stack
-        if let TokenTree::Group(group) = token {
-            let delimiter = group.delimiter();
-            let span = group.span();
-
-            // Push the group's iterator and close info onto the stack
-            self.group_stack.push(GroupLevel {
-                iter: group.stream().into_iter(),
-                delimiter,
-                span,
-            });
-
-            // Return OpenDelim immediately
-            return Some(Token::OpenDelim { delimiter, span });
-        }
-
-        // Handle Punct tokens with potential combining
-        if let TokenTree::Punct(punct) = token {
-            let ch = punct.as_char();
-            let spacing = punct.spacing();
-            let span = punct.span();
-
-            // If spacing is Joint, try to combine with next punct
-            if spacing == Spacing::Joint {
-                // Get next token to see if we can combine
-                match self.next_token_tree() {
-                    Some(TokenTree::Punct(next_punct)) => {
-                        let next_ch = next_punct.as_char();
-
-                        // Check if they form a compound operator
-                        if Self::is_compound_operator(ch, next_ch) {
-                            // Try to extend to a known 3-char op (currently only ".." + "=" -> "..=").
-                            // Only attempt this if the second punct is itself immediately followed by
-                            // something (Joint spacing) — otherwise there's nothing to peek.
-                            if next_punct.spacing() == Spacing::Joint {
-                                match self.next_token_tree() {
-                                    Some(TokenTree::Punct(third_punct)) => {
-                                        let third_ch = third_punct.as_char();
-                                        if Self::is_triple_compound_operator(ch, next_ch, third_ch)
-                                        {
-                                            return Some(Token::Punct {
-                                                op: PunctOp::Three([ch, next_ch, third_ch]),
-                                                span,
-                                            });
-                                        }
-                                        self.pending_token = Some(TokenTree::Punct(third_punct));
-                                        return Some(Token::Punct {
-                                            op: PunctOp::Two([ch, next_ch]),
-                                            span,
-                                        });
-                                    }
-                                    Some(other) => {
-                                        self.pending_token = Some(other);
-                                        return Some(Token::Punct {
-                                            op: PunctOp::Two([ch, next_ch]),
-                                            span,
-                                        });
-                                    }
-                                    None => {
-                                        return Some(Token::Punct {
-                                            op: PunctOp::Two([ch, next_ch]),
-                                            span,
-                                        });
-                                    }
-                                }
-                            }
-                            return Some(Token::Punct {
-                                op: PunctOp::Two([ch, next_ch]),
-                                span,
-                            });
-                        } else {
-                            self.pending_token = Some(TokenTree::Punct(next_punct));
-                            return Some(Token::Punct {
-                                op: PunctOp::One(ch),
-                                span,
-                            });
-                        }
-                    }
-                    Some(other_token) => {
-                        self.pending_token = Some(other_token);
-                        return Some(Token::Punct {
-                            op: PunctOp::One(ch),
-                            span,
-                        });
-                    }
-                    None => {
-                        return Some(Token::Punct {
-                            op: PunctOp::One(ch),
-                            span,
-                        });
-                    }
-                }
-            } else {
-                return Some(Token::Punct {
-                    op: PunctOp::One(ch),
+        Some(match token {
+            TokenTree::Group(group) => {
+                let delimiter = group.delimiter();
+                let span = group.span();
+                self.group_stack.push(GroupLevel {
+                    iter: group.stream().into_iter(),
+                    delimiter,
                     span,
                 });
+                Token::OpenDelim { delimiter, span }
             }
-        }
-
-        // Not a group or punct, convert directly (Literal or Ident)
-        Some(Self::convert_token(token))
+            TokenTree::Punct(punct) if punct.as_char() == '#' => {
+                self.parse_doc_comment_attribute(punct.span())
+            }
+            TokenTree::Punct(punct) => self.combine_punctuation(punct),
+            TokenTree::Literal(literal) => Self::convert_literal(literal),
+            TokenTree::Ident(ident) => Self::convert_identifier(ident),
+        })
     }
 }
 
@@ -534,6 +517,342 @@ mod tests {
     use proc_macro2::TokenStream;
     use std::str::FromStr;
 
+    /// Compares complete character sequences, including non-ASCII characters.
+    #[test]
+    fn punctuation_equality_compares_characters_without_prefix_matches() {
+        let cases = [
+            (PunctOp::One('+'), "+", true),
+            (PunctOp::One('+'), "++", false),
+            (PunctOp::One('+'), "", false),
+            (PunctOp::One('\u{a7}'), "\u{a7}", true),
+            (PunctOp::Two(['&', '&']), "&&", true),
+            (PunctOp::Two(['&', '&']), "&", false),
+            (PunctOp::Two(['&', '&']), "&&&", false),
+            (PunctOp::Two(['&', '&']), "&|", false),
+            (PunctOp::Three(['.', '.', '=']), "..=", true),
+            (PunctOp::Three(['.', '.', '=']), "..", false),
+            (PunctOp::Three(['.', '.', '=']), "..==", false),
+            (PunctOp::Three(['.', '.', '=']), "...", false),
+        ];
+        // Check both supported string comparison interfaces against the same contract.
+        for (op, text, expected) in cases {
+            assert_eq!(op == *text, expected, "{op:?} versus {text:?}");
+            assert_eq!(op == text, expected, "{op:?} versus {text:?}");
+        }
+    }
+
+    /// Preserves the source span of a literal not interpreted by Syn.
+    #[test]
+    fn verbatim_literal_retains_its_span() {
+        let literal = proc_macro2::Literal::from_str("42").unwrap();
+        let literal = Lit::Verbatim(literal);
+        assert_eq!(HasSpan::span(&literal).source_text().as_deref(), Some("42"));
+    }
+
+    /// Clones punctuation values without sharing mutable character storage.
+    #[test]
+    fn punctuation_clones_are_independent_values() {
+        let cases = [
+            (PunctOp::One('+'), "+"),
+            (PunctOp::Two(['&', '&']), "&&"),
+            (PunctOp::Three(['.', '.', '=']), "..="),
+        ];
+        // Mutate each original and its copy independently through their public variants.
+        for (mut original, text) in cases {
+            let mut copied = original.clone();
+            assert!(copied == text);
+            match &mut original {
+                PunctOp::One(c) => *c = '!',
+                PunctOp::Two(chars) => chars[0] = '!',
+                PunctOp::Three(chars) => chars[0] = '!',
+            }
+            assert!(copied == text);
+            copied = PunctOp::One('?');
+            assert!(copied == "?");
+            assert!(original != "?");
+            assert!(original != text);
+        }
+    }
+
+    /// Preserves literal values and spans across every supported literal category.
+    #[test]
+    fn literal_spans_preserve_the_source() {
+        // All literal variants use the same source-span contract.
+        for source in [
+            "42",
+            "1.5",
+            "\"text\"",
+            "b\"bytes\"",
+            "c\"cstr\"",
+            "'x'",
+            "b'x'",
+            "true",
+            "false",
+        ] {
+            let mut lexer = LexLexer::new(TokenStream::from_str(source).unwrap().into_iter());
+            let Some(Token::Literal(literal)) = lexer.next() else {
+                panic!("expected literal for {source}");
+            };
+            assert_eq!(
+                HasSpan::span(&literal).source_text().as_deref(),
+                Some(source)
+            );
+            assert_eq!(
+                HasSpan::span(&Token::Literal(literal))
+                    .source_text()
+                    .as_deref(),
+                Some(source)
+            );
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Preserves token-tree spans for groups, identifiers, punctuation, and literals.
+    #[test]
+    fn token_tree_spans_cover_each_variant() {
+        // Verify delegation for every token-tree variant.
+        for source in ["(x)", "name", "+", "42"] {
+            let tree = TokenStream::from_str(source)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            assert_eq!(HasSpan::span(&tree).source_text().as_deref(), Some(source));
+        }
+    }
+
+    /// Preserves diagnostic and delimiter spans rather than substituting call-site spans.
+    #[test]
+    fn flattened_tokens_preserve_their_associated_spans() {
+        let cases: &[(&str, &[&str])] = &[
+            ("(x)", &["(x)", "x", "(x)"]),
+            ("&&", &["&"]),
+            ("#[bad]", &["[bad]"]),
+        ];
+        // Group delimiters use group spans; combined punctuation uses its first character.
+        for &(source, spans) in cases {
+            let mut lexer = LexLexer::new(TokenStream::from_str(source).unwrap().into_iter());
+            for &expected in spans {
+                let token = lexer.next().unwrap();
+                assert_eq!(
+                    HasSpan::span(&token).source_text().as_deref(),
+                    Some(expected)
+                );
+            }
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Produces no tokens for empty input, including repeated exhaustion checks.
+    #[test]
+    fn empty_input_remains_exhausted() {
+        let mut lexer = LexLexer::new(TokenStream::new().into_iter());
+        assert!(lexer.next().is_none());
+        assert!(lexer.next().is_none());
+    }
+
+    /// Combines exactly the supported adjacent operators.
+    #[test]
+    fn combines_each_supported_operator() {
+        // Each operator must consume its complete spelling, but not the following identifier.
+        for text in [
+            "&&", "||", "==", "!=", "<=", ">=", "<<", ">>", "->", "=>", ":=", "..", "..=",
+        ] {
+            let input = TokenStream::from_str(&format!("{text} tail")).unwrap();
+            let mut lexer = LexLexer::new(input.into_iter());
+            assert!(matches!(lexer.next(), Some(Token::Punct { op, .. }) if op == text));
+            assert!(matches!(lexer.next(), Some(Token::Identifier(id)) if id == "tail"));
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Preserves uncombined lookahead tokens and respects punctuation spacing.
+    #[test]
+    fn punctuation_lookahead_preserves_the_remaining_stream() {
+        let cases: &[(&str, &[&str])] = &[
+            ("& &", &["&", "&"]),
+            (".. =", &["..", "="]),
+            ("..+", &["..", "+"]),
+            ("&&=", &["&&", "="]),
+            ("+=", &["+", "="]),
+            ("...", &["..", "."]),
+        ];
+        // Compare the entire punctuation stream so no lookahead token can disappear.
+        for &(input, expected) in cases {
+            let mut lexer = LexLexer::new(TokenStream::from_str(input).unwrap().into_iter());
+            for &text in expected {
+                assert!(matches!(lexer.next(), Some(Token::Punct { op, .. }) if op == text));
+            }
+            assert!(lexer.next().is_none(), "{input}");
+        }
+    }
+
+    /// Emits every empty group's matching delimiters before resuming its parent.
+    #[test]
+    fn empty_groups_preserve_delimiter_order() {
+        let mut lexer = LexLexer::new(TokenStream::from_str("([]{}) tail").unwrap().into_iter());
+        let expected = [
+            (true, Delimiter::Parenthesis),
+            (true, Delimiter::Bracket),
+            (false, Delimiter::Bracket),
+            (true, Delimiter::Brace),
+            (false, Delimiter::Brace),
+            (false, Delimiter::Parenthesis),
+        ];
+        // Verify both delimiter kind and nesting order.
+        for (open, expected_delimiter) in expected {
+            match lexer.next() {
+                Some(Token::OpenDelim { delimiter, .. }) if open => {
+                    assert_eq!(delimiter, expected_delimiter);
+                }
+                Some(Token::CloseDelim { delimiter, .. }) if !open => {
+                    assert_eq!(delimiter, expected_delimiter);
+                }
+                other => panic!("expected delimiter, got {other:?}"),
+            }
+        }
+        assert!(matches!(lexer.next(), Some(Token::Identifier(id)) if id == "tail"));
+        assert!(lexer.next().is_none());
+    }
+
+    /// Emits a group close after punctuation lookahead or an incomplete attribute.
+    #[test]
+    fn lookahead_does_not_consume_a_group_close() {
+        // Joint punctuation is constructible even when no following token exists.
+        for punctuation in ["&", "..", "#", "#!"] {
+            let group = proc_macro2::Group::new(
+                Delimiter::Parenthesis,
+                punctuation
+                    .chars()
+                    .map(|ch| TokenTree::Punct(proc_macro2::Punct::new(ch, Spacing::Joint)))
+                    .collect(),
+            );
+            let input: TokenStream = [
+                TokenTree::Group(group),
+                TokenTree::Ident(Ident::new("tail", Span::call_site())),
+            ]
+            .into_iter()
+            .collect();
+            let mut lexer = LexLexer::new(input.into_iter());
+            assert!(matches!(lexer.next(), Some(Token::OpenDelim { .. })));
+            match lexer.next() {
+                Some(Token::Punct { op, .. }) if !punctuation.starts_with('#') => {
+                    assert!(op == punctuation);
+                }
+                Some(Token::Error { message, .. }) if punctuation.starts_with('#') => {
+                    assert!(!message.is_empty());
+                }
+                other => panic!("expected punctuation or attribute error, got {other:?}"),
+            }
+            assert!(matches!(lexer.next(), Some(Token::CloseDelim { .. })));
+            assert!(matches!(lexer.next(), Some(Token::Identifier(id)) if id == "tail"));
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Emits delimiters for invisible groups without combining across their boundaries.
+    #[test]
+    fn invisible_groups_bound_operator_combining() {
+        let contents = [
+            TokenTree::Punct(proc_macro2::Punct::new('.', Spacing::Joint)),
+            TokenTree::Punct(proc_macro2::Punct::new('.', Spacing::Joint)),
+        ]
+        .into_iter()
+        .collect();
+        let input: TokenStream = [
+            TokenTree::Group(proc_macro2::Group::new(Delimiter::None, contents)),
+            TokenTree::Punct(proc_macro2::Punct::new('=', Spacing::Alone)),
+        ]
+        .into_iter()
+        .collect();
+        let mut lexer = LexLexer::new(input.into_iter());
+        assert!(matches!(
+            lexer.next(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::None,
+                ..
+            })
+        ));
+        assert!(matches!(lexer.next(), Some(Token::Punct { op, .. }) if op == ".."));
+        assert!(matches!(
+            lexer.next(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::None,
+                ..
+            })
+        ));
+        assert!(matches!(lexer.next(), Some(Token::Punct { op, .. }) if op == "="));
+        assert!(lexer.next().is_none());
+    }
+
+    /// Reports incomplete attributes at end of input without terminating iteration early.
+    #[test]
+    fn incomplete_attributes_at_end_of_input_report_errors() {
+        // Neither form supplies the required bracket group.
+        for source in ["#", "#!"] {
+            let mut lexer = LexLexer::new(TokenStream::from_str(source).unwrap().into_iter());
+            assert!(
+                matches!(lexer.next(), Some(Token::Error { message, .. }) if !message.is_empty())
+            );
+            assert!(lexer.next().is_none());
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Decodes explicit documentation strings while preserving the inner marker.
+    #[test]
+    fn explicit_documentation_attributes_decode_string_values() {
+        let input =
+            TokenStream::from_str(r##"#[doc = "line\nnext"] #![doc = r#" raw "#]"##).unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        assert!(
+            matches!(lexer.next(), Some(Token::DocComment { text, inner: false, .. })
+                if text == "line\nnext")
+        );
+        assert!(
+            matches!(lexer.next(), Some(Token::DocComment { text, inner: true, .. })
+                if text == " raw ")
+        );
+        assert!(lexer.next().is_none());
+    }
+
+    /// Reports each malformed attribute shape without losing the next outer token.
+    #[test]
+    fn malformed_attributes_report_errors_and_resume() {
+        // Attribute contents are untrusted input, not caller preconditions.
+        for input in [
+            "#[] tail",
+            "#[doc] tail",
+            "#[doc \"x\"] tail",
+            "#[doc =] tail",
+            "#[doc = value] tail",
+            "#[doc = b\"x\"] tail",
+            "#![doc = 1] tail",
+            "#[doc = \"x\" extra] tail",
+        ] {
+            let mut lexer = LexLexer::new(TokenStream::from_str(input).unwrap().into_iter());
+            assert!(
+                matches!(lexer.next(), Some(Token::Error { message, .. }) if !message.is_empty()),
+                "{input}"
+            );
+            assert!(matches!(lexer.next(), Some(Token::Identifier(id)) if id == "tail"));
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Recognizes booleans without treating raw or longer identifiers as literals.
+    #[test]
+    fn boolean_recognition_preserves_other_identifiers() {
+        let input = TokenStream::from_str("true false r#true true_value").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        assert!(matches!(lexer.next(), Some(Token::Literal(Lit::Bool(lit))) if lit.value));
+        assert!(matches!(lexer.next(), Some(Token::Literal(Lit::Bool(lit))) if !lit.value));
+        assert!(matches!(lexer.next(), Some(Token::Identifier(id)) if id == "r#true"));
+        assert!(matches!(lexer.next(), Some(Token::Identifier(id)) if id == "true_value"));
+        assert!(lexer.next().is_none());
+    }
+
+    /// Recognizes an integer literal.
     #[test]
     fn test_literal_integer() {
         let input = TokenStream::from_str("42").unwrap();
@@ -546,6 +865,7 @@ mod tests {
         }
     }
 
+    /// Recognizes a string literal.
     #[test]
     fn test_literal_string() {
         let input = TokenStream::from_str(r#""hello""#).unwrap();
@@ -558,6 +878,7 @@ mod tests {
         }
     }
 
+    /// Recognizes both boolean keyword values.
     #[test]
     fn test_literal_boolean() {
         // Test 'true' boolean literal
@@ -585,6 +906,7 @@ mod tests {
         }
     }
 
+    /// Recognizes a floating-point literal.
     #[test]
     fn test_literal_float() {
         let input = TokenStream::from_str("3.14").unwrap();
@@ -597,6 +919,7 @@ mod tests {
         }
     }
 
+    /// Preserves an identifier's spelling.
     #[test]
     fn test_identifier() {
         let input = TokenStream::from_str("foo").unwrap();
@@ -611,6 +934,7 @@ mod tests {
         }
     }
 
+    /// Emits a single punctuation character.
     #[test]
     fn test_punct() {
         let input = TokenStream::from_str("+").unwrap();
@@ -625,6 +949,7 @@ mod tests {
         }
     }
 
+    /// Combines a logical operator between identifiers.
     #[test]
     fn test_compound_operator() {
         let input = TokenStream::from_str("a && b").unwrap();
@@ -641,6 +966,7 @@ mod tests {
         }
     }
 
+    /// Emits matching delimiters around a group's flattened contents.
     #[test]
     fn test_group_flattening() {
         let input = TokenStream::from_str("(10 + 20)").unwrap();
@@ -669,6 +995,7 @@ mod tests {
         ));
     }
 
+    /// Preserves the nesting order of groups and their contents.
     #[test]
     fn test_nested_groups() {
         let input = TokenStream::from_str("(10 + (20 * 30))").unwrap();
@@ -691,6 +1018,7 @@ mod tests {
         assert!(matches!(tokens[8], Token::CloseDelim { .. }));
     }
 
+    /// Retains an identifier's source span.
     #[test]
     fn test_span_preservation() {
         let input = TokenStream::from_str("foo").unwrap();
@@ -703,15 +1031,16 @@ mod tests {
         assert!(!span.source_text().unwrap_or_default().is_empty());
     }
 
+    /// Provides a source span through the token-tree trait implementation.
     #[test]
     fn test_haspan_trait_for_tokentree() {
         let input = TokenStream::from_str("42").unwrap();
         let tt = input.into_iter().next().unwrap();
 
-        // TokenTree implements HasSpan trait
-        let _span = HasSpan::span(&tt);
+        assert_eq!(HasSpan::span(&tt).source_text().as_deref(), Some("42"));
     }
 
+    /// Preserves the order of identifiers, punctuation, and literals.
     #[test]
     fn test_mixed_tokens() {
         let input = TokenStream::from_str("foo + 42").unwrap();
@@ -725,6 +1054,7 @@ mod tests {
         assert!(matches!(tokens[2], Token::Literal(Lit::Int(..))));
     }
 
+    /// Emits an arrow as one operator.
     #[test]
     fn arrow_is_two_char_punct() {
         let stream: TokenStream = "->".parse().unwrap();
@@ -743,6 +1073,7 @@ mod tests {
         assert!(lexer.next().is_none(), "expected no more tokens");
     }
 
+    /// Emits a fat arrow as one operator.
     #[test]
     fn fat_arrow_is_two_char_punct() {
         let stream: TokenStream = "=>".parse().unwrap();
@@ -761,6 +1092,7 @@ mod tests {
         assert!(lexer.next().is_none(), "expected no more tokens");
     }
 
+    /// Preserves outer documentation text and its outer marker.
     #[test]
     fn recognizes_an_outer_doc_comment() {
         let input = TokenStream::from_str("/// the total").unwrap();
@@ -776,6 +1108,7 @@ mod tests {
         assert!(lexer.next().is_none());
     }
 
+    /// Preserves inner documentation text and its inner marker.
     #[test]
     fn recognizes_an_inner_doc_comment() {
         let input = TokenStream::from_str("//! module docs").unwrap();
@@ -790,6 +1123,7 @@ mod tests {
         }
     }
 
+    /// Resumes ordinary tokenization after documentation.
     #[test]
     fn doc_comment_run_is_followed_by_the_next_real_token() {
         let input = TokenStream::from_str("/// x\ncell").unwrap();
@@ -801,6 +1135,7 @@ mod tests {
         }
     }
 
+    /// Rejects a non-documentation attribute.
     #[test]
     fn a_non_doc_attribute_is_a_lex_error() {
         let input = TokenStream::from_str("#[foo]").unwrap();
@@ -812,6 +1147,7 @@ mod tests {
         );
     }
 
+    /// Rejects a numeric documentation value.
     #[test]
     fn a_non_string_doc_value_is_a_lex_error() {
         let input = TokenStream::from_str("#[doc = 5]").unwrap();
@@ -823,6 +1159,7 @@ mod tests {
         );
     }
 
+    /// Rejects an attribute marker followed by an identifier instead of a group.
     #[test]
     fn a_bare_hash_with_no_group_is_a_lex_error() {
         let input = TokenStream::from_str("# foo").unwrap();
@@ -834,6 +1171,7 @@ mod tests {
         );
     }
 
+    /// Rejects an attribute group with parentheses instead of brackets.
     #[test]
     fn a_hash_led_group_with_the_wrong_delimiter_is_a_lex_error() {
         let input = TokenStream::from_str("#(foo)").unwrap();
@@ -845,6 +1183,7 @@ mod tests {
         );
     }
 
+    /// Rejects trailing tokens in a documentation attribute.
     #[test]
     fn extra_tokens_after_the_doc_string_are_a_lex_error() {
         let input = TokenStream::from_str("#[doc = \"x\", extra]").unwrap();
@@ -856,6 +1195,7 @@ mod tests {
         );
     }
 
+    /// Retains a documentation comment's source span.
     #[test]
     fn doc_comment_token_has_a_span() {
         let input = TokenStream::from_str("/// x").unwrap();
@@ -865,6 +1205,7 @@ mod tests {
         assert!(!span.source_text().unwrap_or_default().is_empty());
     }
 
+    /// Emits the assignment operator as one token.
     #[test]
     fn walrus_operator_lexes_as_one_compound_token() {
         let stream: TokenStream = ":=".parse().unwrap();
@@ -877,14 +1218,18 @@ mod tests {
         assert!(lexer.next().is_none());
     }
 
+    /// Preserves an identifier following a lone colon.
     #[test]
     fn colon_followed_by_non_equals_stays_two_separate_tokens() {
         let stream: TokenStream = ": x".parse().unwrap();
         let mut lexer = LexLexer::new(stream.into_iter());
         let first = lexer.next().expect("colon token");
         assert!(matches!(first, Token::Punct { ref op, .. } if op == ":"));
+        assert!(matches!(lexer.next(), Some(Token::Identifier(id)) if id == "x"));
+        assert!(lexer.next().is_none());
     }
 
+    /// Keeps the endpoints of a range as integer literals.
     #[test]
     fn digit_followed_by_double_dot_does_not_lex_as_a_float_literal() {
         let input = TokenStream::from_str("5..10").unwrap();
@@ -895,12 +1240,13 @@ mod tests {
             }
             other => panic!("expected an integer literal, got {other:?}"),
         }
-        // The next two tokens must each be a lone `.` Punct at this pre-combining stage —
-        // asserted directly on proc_macro2's TokenStream, before any of this file's own
-        // combining logic runs, so this test fails for the right reason if the assumption
-        // about proc_macro2's tokenization is wrong, not because of code we haven't written yet.
+        assert!(matches!(lexer.next(), Some(Token::Punct { op, .. }) if op == ".."));
+        assert!(matches!(lexer.next(), Some(Token::Literal(Lit::Int(lit)))
+                if lit.base10_parse::<i32>().unwrap() == 10));
+        assert!(lexer.next().is_none());
     }
 
+    /// Emits an exclusive range operator as one token.
     #[test]
     fn double_dot_combines_into_two_char_punct() {
         let stream: TokenStream = "..".parse().unwrap();
@@ -919,6 +1265,7 @@ mod tests {
         assert!(lexer.next().is_none(), "expected no more tokens");
     }
 
+    /// Emits an inclusive range operator as one token.
     #[test]
     fn double_dot_equals_combines_into_three_char_punct() {
         let stream: TokenStream = "..=".parse().unwrap();
@@ -937,6 +1284,7 @@ mod tests {
         assert!(lexer.next().is_none(), "expected no more tokens");
     }
 
+    /// Preserves the literal after an exclusive range operator.
     #[test]
     fn double_dot_not_followed_by_equals_stays_two_char_and_does_not_consume_the_next_token() {
         let stream: TokenStream = "..5".parse().unwrap();
@@ -960,6 +1308,7 @@ mod tests {
         }
     }
 
+    /// Preserves an integer field index after a single dot.
     #[test]
     fn single_dot_before_a_digit_is_unaffected_by_range_combining() {
         // Regression guard: tuple field access (`x.0`) must still lex as a lone `.` Punct
@@ -977,5 +1326,8 @@ mod tests {
             ),
             "expected PunctOp::One('.'), got {first:?}"
         );
+        assert!(matches!(lexer.next(), Some(Token::Literal(Lit::Int(lit)))
+                if lit.base10_parse::<i32>().unwrap() == 0));
+        assert!(lexer.next().is_none());
     }
 }
