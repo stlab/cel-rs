@@ -22,7 +22,22 @@ use std::path::Path;
 use adam_lang::FormatSourceError;
 use annotate_snippets::Renderer;
 
-/// Error returned by [`format_file`].
+/// Describes an I/O failure or retains the source and diagnostic for refused formatting.
+///
+/// [`format_file`] stores the original source in [`Self::Format`] without changing the file.
+///
+/// # Examples
+///
+/// ```
+/// use adam_fmt::{FormatFileError, render_error};
+/// use std::{io, path::Path};
+///
+/// let error = FormatFileError::Io(io::Error::other("unavailable"));
+/// assert_eq!(
+///     render_error(Path::new("sheet.adm2"), &error),
+///     "adam-fmt: sheet.adm2: unavailable\n"
+/// );
+/// ```
 #[derive(Debug)]
 pub enum FormatFileError {
     /// `path` could not be read, or (only after formatting succeeds and differs) written back.
@@ -42,12 +57,27 @@ pub enum FormatFileError {
 /// - Postcondition: on `Ok(true)`, `path`'s contents are replaced with
 ///   [`adam_lang::format_source`]'s output. On `Ok(false)`, `path` is left untouched because it
 ///   already matched that output exactly (no write performed).
+/// - Complexity: for n input bytes and m output bytes, reads and compares O(n + m)
+///   bytes and writes O(m) bytes when changed. Uses O(n + m) space, in addition to
+///   [`adam_lang::format_source`]'s time and space.
 ///
 /// # Errors
 ///
 /// Returns [`FormatFileError::Io`] if `path` can't be read, or (only after formatting succeeds
 /// and differs from the original) can't be written back. Returns [`FormatFileError::Format`] if
 /// `path`'s contents can't be safely formatted (see [`adam_lang::format_source`]'s `# Errors`).
+/// A read or format error leaves the file untouched; a write error may leave a partial write.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::Path;
+///
+/// let path = Path::new("sheet.adm2");
+/// let changed = adam_fmt::format_file(path)?;
+/// assert!(!adam_fmt::format_file(path)?);
+/// # Ok::<(), adam_fmt::FormatFileError>(())
+/// ```
 pub fn format_file(path: &Path) -> Result<bool, FormatFileError> {
     let source = std::fs::read_to_string(path).map_err(FormatFileError::Io)?;
     match adam_lang::format_source(&source) {
@@ -63,8 +93,22 @@ pub fn format_file(path: &Path) -> Result<bool, FormatFileError> {
 /// Renders `error` as a human-readable diagnostic naming `path`, using `rustc`-style source
 /// snippets for a [`FormatFileError::Format`].
 ///
-/// - Postcondition: the returned string ends with `\n` and is ready to print directly (via
-///   `eprint!`, not `eprintln!`).
+/// I/O diagnostics end with `\n`. Format diagnostics preserve the source renderer's
+/// styling and line endings. Print the returned string directly with `eprint!`.
+///
+/// - Complexity: copies O(p) path bytes and returns O(r) rendered bytes. Additional
+///   time and space follow the source diagnostic renderer for each format error.
+///
+/// # Examples
+///
+/// ```
+/// use adam_fmt::{FormatFileError, render_error};
+/// use std::{io, path::Path};
+///
+/// let error = FormatFileError::Io(io::Error::other("cannot read"));
+/// let diagnostic = render_error(Path::new("sheet.adm2"), &error);
+/// assert_eq!(diagnostic, "adam-fmt: sheet.adm2: cannot read\n");
+/// ```
 #[must_use]
 pub fn render_error(path: &Path, error: &FormatFileError) -> String {
     match error {
@@ -89,24 +133,11 @@ pub fn render_error(path: &Path, error: &FormatFileError) -> String {
 mod tests {
     use super::*;
 
-    /// Creates a fresh, empty temp directory under `std::env::temp_dir()` for one test, named
-    /// after `test_name` plus the current time for uniqueness across concurrent test threads.
-    fn temp_dir(test_name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "adam-fmt-test-{test_name}-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
+    /// Replaces unformatted source with canonical output and reports a change.
     #[test]
     fn format_file_rewrites_an_unformatted_file_and_reports_a_change() {
-        let dir = temp_dir("rewrites");
-        let path = dir.join("sheet.adm2");
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = dir.path().join("sheet.adm2");
         std::fs::write(&path, "sheet   s{cell x:i32=1;}").unwrap();
 
         assert!(matches!(format_file(&path), Ok(true)));
@@ -114,51 +145,71 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "sheet s {\n    cell x: i32 = 1;\n}\n"
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Reports no change for canonical source and preserves its contents and modification time.
     #[test]
     fn format_file_leaves_an_already_formatted_file_untouched() {
-        let dir = temp_dir("already-formatted");
-        let path = dir.join("sheet.adm2");
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = dir.path().join("sheet.adm2");
         let formatted = "sheet s {\n    cell x: i32 = 1;\n}\n";
         std::fs::write(&path, formatted).unwrap();
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
 
         assert!(matches!(format_file(&path), Ok(false)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), formatted);
-
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
     }
 
+    /// Reports an I/O error for a missing path without creating the file.
     #[test]
     fn format_file_errors_on_a_missing_path() {
-        let dir = temp_dir("missing");
-        let path = dir.join("does-not-exist.adm2");
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = dir.path().join("does-not-exist.adm2");
 
         assert!(matches!(format_file(&path), Err(FormatFileError::Io(_))));
-
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!path.exists());
     }
 
+    /// Retains unparsable source in the error and leaves the file untouched.
     #[test]
     fn format_file_errors_on_unparsable_source_without_writing() {
-        let dir = temp_dir("unparsable");
-        let path = dir.join("sheet.adm2");
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = dir.path().join("sheet.adm2");
         std::fs::write(&path, "not a sheet at all").unwrap();
 
         assert!(matches!(
             format_file(&path),
-            Err(FormatFileError::Format { .. })
+            Err(FormatFileError::Format { source, .. }) if source == "not a sheet at all"
         ));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "not a sheet at all"
         );
-
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Rejects non-UTF-8 input as an I/O error without changing its bytes.
+    #[test]
+    fn format_file_errors_on_non_utf8_source_without_writing() {
+        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = dir.path().join("sheet.adm2");
+        std::fs::write(&path, [0xff]).unwrap();
+
+        assert!(matches!(format_file(&path), Err(FormatFileError::Io(_))));
+        assert_eq!(std::fs::read(&path).unwrap(), [0xff]);
+    }
+
+    /// Names the path and I/O failure and terminates the diagnostic with a newline.
     #[test]
     fn render_error_reports_the_path_for_an_io_error() {
         let error = FormatFileError::Io(io::Error::other("boom"));
@@ -168,6 +219,7 @@ mod tests {
         assert!(rendered.ends_with('\n'));
     }
 
+    /// Names the path and shows the rejected source in a parse diagnostic.
     #[test]
     fn render_error_reports_a_source_snippet_for_a_format_error() {
         let source = "not a sheet at all".to_string();
@@ -177,8 +229,10 @@ mod tests {
             &FormatFileError::Format { source, error },
         );
         assert!(rendered.contains("sheet.adm2"));
+        assert!(rendered.contains("not a sheet at all"));
     }
 
+    /// Includes each recovered diagnostic with its path and source.
     #[test]
     fn render_error_reports_a_source_snippet_for_each_recovered_error() {
         // Exercises FormatSourceError::Recovered specifically (as opposed to ::Parse, covered
@@ -192,5 +246,6 @@ mod tests {
             &FormatFileError::Format { source, error },
         );
         assert!(rendered.contains("sheet.adm2"));
+        assert!(rendered.contains("cell x unknown_syntax"));
     }
 }

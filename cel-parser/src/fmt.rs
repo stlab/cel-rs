@@ -1,7 +1,8 @@
 //! Pretty-prints a [`crate::Expr`] tree back to CEL source text: precedence-aware
 //! parenthesization (added only where required, not exhaustively), single-space-around-operator
-//! normalization, and no line-wrapping (every expression is emitted on one line regardless of
-//! length — see the design doc's "Line wrapping" decision). Literal leaves are re-emitted via
+//! normalization, and a 100-column layout target. Short expressions stay inline; longer lists,
+//! records and closure bodies nest by four spaces, with leading binary continuation operators.
+//! Unbreakable tokens and comments may exceed the target. Literal leaves are re-emitted via
 //! [`proc_macro2::Span::source_text`] rather than synthesized from [`crate::Literal`], so exact
 //! original notation (`1920.0` vs `1920.0f64`, a byte literal's spelling) round-trips.
 //!
@@ -14,6 +15,147 @@ use crate::ast::{Expr, LogicalOp};
 use crate::trivia::{
     Comment, GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap, take_block_comment,
 };
+
+/// An immutable Wadler document; construction never lays out a child expression.
+type Doc = pretty::RcDoc<'static, ()>;
+
+/// Preserves a lexical token's internal newlines and indentation independently of layout nesting.
+///
+/// - Complexity: O(n) in the token's text length.
+fn verbatim_doc(text: String) -> Doc {
+    let mut lines = text.split('\n');
+    let first = Doc::text(lines.next().unwrap_or_default().to_owned());
+    lines.fold(first, |doc, line| {
+        let line = Doc::text(line.to_owned());
+        doc.append(Doc::nesting(move |indent| {
+            let offset = isize::try_from(indent)
+                .expect("document indentation fits isize")
+                .checked_neg()
+                .expect("nonnegative indentation can be negated");
+            Doc::hardline().append(line.clone()).nest(offset)
+        }))
+    })
+}
+
+/// Lifts recovered trivia into a document with mandatory line-comment boundaries.
+///
+/// - Complexity: O(n) in the recovered text length.
+fn trivia_doc(text: String) -> Doc {
+    trivia_doc_at(text, 4)
+}
+
+/// Lifts recovered trivia with continuation nesting supplied by its grammar owner.
+///
+/// - Complexity: O(n) in the recovered text length.
+fn trivia_doc_at(text: String, continuation: isize) -> Doc {
+    let mut lines = text.split('\n');
+    let first = Doc::text(lines.next().unwrap_or_default().to_owned());
+    lines.fold(first, |doc, line| {
+        doc.append(
+            Doc::hardline()
+                .append(Doc::text(
+                    line.strip_prefix("    ").unwrap_or(line).to_owned(),
+                ))
+                .nest(continuation),
+        )
+    })
+}
+
+/// Builds a gap document, with a soft boundary before binary operators or after commas.
+///
+/// - Complexity: O(n) in the gap's text length.
+fn gap_doc(pieces: &[GapPiece], spacing: Spacing) -> Doc {
+    if pieces
+        .iter()
+        .any(|piece| matches!(piece, GapPiece::Comment(_)))
+        && let Some(index) = pieces
+            .iter()
+            .position(|piece| matches!(piece, GapPiece::Punct(_)))
+        && matches!(spacing, Spacing::Around | Spacing::CommaAfter)
+    {
+        let GapPiece::Punct(token) = pieces[index] else {
+            unreachable!()
+        };
+        let before = emit_gap(&pieces[..index], Spacing::None, 0);
+        let after = emit_gap(&pieces[index + 1..], Spacing::None, 0);
+        let after_empty = after.is_empty();
+        let before_line = matches!(
+            pieces.get(index.wrapping_sub(1)),
+            Some(GapPiece::Comment(Comment::Line(_)))
+        );
+        let after_line = matches!(pieces.last(), Some(GapPiece::Comment(Comment::Line(_))));
+        let prefix = if before_line {
+            trivia_doc_at(before, 0)
+        } else {
+            trivia_doc_at(before.trim_end().to_owned(), 0)
+        };
+        let suffix = if after_line {
+            trivia_doc_at(after, 0)
+        } else {
+            trivia_doc_at(after.trim_end().to_owned(), 0)
+        };
+        return match spacing {
+            Spacing::Around => prefix
+                .append(if before_line {
+                    Doc::nil()
+                } else {
+                    Doc::softline()
+                })
+                .append(token)
+                .append(if after_empty {
+                    Doc::space()
+                } else {
+                    suffix.append(if after_line { Doc::nil() } else { Doc::space() })
+                }),
+            Spacing::CommaAfter => prefix.append(token).append(if after_empty {
+                Doc::line()
+            } else {
+                suffix.append(if after_line { Doc::nil() } else { Doc::line() })
+            }),
+            Spacing::None => unreachable!(),
+        };
+    }
+    if pieces
+        .iter()
+        .all(|piece| matches!(piece, GapPiece::Punct(_)))
+    {
+        Doc::concat(pieces.iter().map(|piece| {
+            let GapPiece::Punct(token) = piece else {
+                unreachable!()
+            };
+            match spacing {
+                Spacing::Around => Doc::line().append(*token).append(" "),
+                Spacing::CommaAfter => Doc::text(*token).append(Doc::line()),
+                Spacing::None => Doc::text(*token),
+            }
+        }))
+    } else {
+        trivia_doc(emit_gap(pieces, spacing, 0))
+    }
+}
+
+/// Builds an indented leading-operator continuation without nesting the left operand.
+///
+/// - Complexity: O(n) in the gap's text length.
+fn binary_doc(lhs: Doc, gap: &[GapPiece], rhs: Doc) -> Doc {
+    lhs.append(gap_doc(gap, Spacing::Around).append(rhs).nest(4))
+        .group()
+}
+
+/// Ends an opening-brace gap with a soft boundary, preserving mandatory comment boundaries.
+///
+/// `trim_start` removes spacing already supplied by the preceding closing-brace boundary.
+///
+/// - Complexity: O(n) in the recovered gap's text length.
+fn body_gap_doc(pieces: &[GapPiece], trim_start: bool) -> Doc {
+    let text = emit_gap(pieces, Spacing::Around, 0);
+    let text = if trim_start { text.trim_start() } else { &text };
+    if matches!(pieces.last(), Some(GapPiece::Comment(Comment::Line(_)))) {
+        trivia_doc_at(text.to_owned(), 0)
+    } else {
+        trivia_doc_at(text.trim_end().to_owned(), 0).append(Doc::line())
+    }
+}
 
 /// Binding-strength level, loosest first, mirroring `lib.rs`'s grammar chain from
 /// `range_expression` (via `expression = range_expression`) through `primary_expression`.
@@ -120,9 +262,16 @@ fn emit_gap(pieces: &[GapPiece], spacing: Spacing, depth: usize) -> String {
             GapPiece::Comment(Comment::Line(text)) => {
                 // A `//` comment runs to end of line, so anything after it must start on the next
                 // line; drop any trailing space this gap had accumulated before appending it.
-                let trimmed_len = out.trim_end().len();
-                out.truncate(trimmed_len);
-                out.push_str(" // ");
+                let continuation = out
+                    .rsplit_once('\n')
+                    .is_some_and(|(_, tail)| tail.trim().is_empty());
+                if continuation {
+                    out.push_str("// ");
+                } else {
+                    let trimmed_len = out.trim_end().len();
+                    out.truncate(trimmed_len);
+                    out.push_str(" // ");
+                }
                 out.push_str(text);
                 out.push('\n');
                 out.push_str(&cont);
@@ -209,14 +358,17 @@ fn format_postfix_base(
     source: &str,
     depth: usize,
     start: proc_macro2::LineColumn,
-) -> String {
+) -> Doc {
     let leading = grouping_gap(source, start, base.span().start.start(), &[]);
     if leading.is_empty() {
         format_at(base, source, depth, Level::POSTFIX)
     } else {
         let (text, _) = render(base, source, depth);
-        let prefix = emit_gap(&leading, Spacing::None, depth);
-        format!("({}{text})", prefix.trim_start())
+        let prefix = emit_gap(&leading, Spacing::None, 0);
+        Doc::text("(")
+            .append(trivia_doc(prefix.trim_start().to_owned()))
+            .append(text)
+            .append(")")
     }
 }
 
@@ -247,7 +399,7 @@ fn emit_list(
     bounds: (proc_macro2::LineColumn, proc_macro2::LineColumn),
     elements: &[Expr],
     trailing_comma: bool,
-) -> String {
+) -> Doc {
     let (open, close) = delims;
     let (open_pos, close_pos) = bounds;
     // Scans the raw gap between two already-resolved positions, mirroring `gap_between` but
@@ -270,38 +422,49 @@ fn emit_list(
     if elements.is_empty() {
         // Whole gap between the delimiters: `open`, comments, `close`.
         let pieces = scan(open_pos, close_pos, &[open, close]);
-        let whole = emit_gap(&pieces, Spacing::None, depth);
-        return glue_before_close(&glue_after_open(&whole, open), close);
+        let whole = emit_gap(&pieces, Spacing::None, 0);
+        return trivia_doc(glue_before_close(&glue_after_open(&whole, open), close));
     }
     // Opening delimiter + any comment before the first element. `emit_gap`'s comment rendering
     // always pads a leading space before a comment that opens a gap, which is right when the gap
     // follows an already-rendered operand (`x /* c */ as i32`) but wrong right after a delimiter
     // -- `glue_after_open` corrects it back to `f(/* a */ 1i32)`.
-    let pre = scan(open_pos, elements[0].span().start.start(), &[open]);
-    let mut out = glue_after_open(&emit_gap(&pre, Spacing::None, depth), open);
+    let mut pre = grouping_gap(source, open_pos, elements[0].span().start.start(), &[open]);
+    if open == "(" {
+        pre.insert(0, GapPiece::Punct("("));
+    }
+    let mut out = trivia_doc(glue_after_open(&emit_gap(&pre, Spacing::None, 0), open));
+    let mut body = Doc::line_();
     for (i, el) in elements.iter().enumerate() {
-        out.push_str(&format_at(el, source, depth, Level::OR));
+        body = body.append(format_at(el, source, depth, Level::OR));
         if i + 1 < elements.len() {
-            let pieces = gap_between(source, el.span().end, elements[i + 1].span().start, &[","]);
-            out.push_str(&emit_gap(&pieces, Spacing::CommaAfter, depth));
+            let pieces = grouping_gap(
+                source,
+                el.span().end.end(),
+                elements[i + 1].span().start.start(),
+                &[","],
+            );
+            body = body.append(gap_doc(&pieces, Spacing::CommaAfter));
         }
     }
     if trailing_comma {
-        out.push(',');
+        body = body.append(",");
     }
     // Any comment before the closing delimiter, then the delimiter; symmetric to the opening gap
     // above (`glue_before_close` drops the trailing space before `)` a comment would otherwise
     // leave: `f(1i32 /* end */)`, not `f(1i32 /* end */ )`).
-    let post = scan(
+    let mut post = grouping_gap(
+        source,
         elements[elements.len() - 1].span().end.end(),
         close_pos,
         &[close],
     );
-    out.push_str(&glue_before_close(
-        &emit_gap(&post, Spacing::None, depth),
-        close,
-    ));
-    out
+    if close == ")" {
+        post.push(GapPiece::Punct(")"));
+    }
+    out = out.append(body.nest(4));
+    let tail = glue_before_close(&emit_gap(&post, Spacing::None, 0), close);
+    out.append(Doc::line_()).append(trivia_doc(tail)).group()
 }
 
 /// Strips the one space [`emit_gap`] pads before a comment that immediately opens a gap, when
@@ -406,12 +569,14 @@ fn render_type_expr(type_expr: &crate::TypeExpr) -> String {
     }
 }
 
-/// Renders `expr` on its own, returning its text alongside its binding-strength level, so the
+/// Builds `expr`'s document alongside its binding-strength level, so the
 /// caller ([`format_at`]) can decide whether the context it's being placed in requires parens.
 ///
-/// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`); `depth` is the
-/// indent level for `//`-comment wrap continuations. Neither is used to change emission yet.
-fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
+/// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`).
+/// Children contribute documents, never independently formatted strings.
+///
+/// - Complexity: O(n) document space plus existing source-gap scan costs.
+fn render(expr: &Expr, source: &str, depth: usize) -> (Doc, Level) {
     match expr {
         Expr::Struct {
             name,
@@ -419,7 +584,8 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             fields,
             span,
         } => {
-            let mut out = name.clone();
+            let mut out = Doc::text(name.clone());
+            let mut body = Doc::nil();
             if let Some(first) = fields.first() {
                 let open = grouping_gap(
                     source,
@@ -427,17 +593,17 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                     first.name_span.start.start(),
                     &["{"],
                 );
-                out.push_str(&emit_gap(&open, Spacing::Around, depth));
+                body = body.append(body_gap_doc(&open, false));
                 for (index, field) in fields.iter().enumerate() {
-                    out.push_str(&field.name);
+                    body = body.append(Doc::text(field.name.clone()));
                     let colon = grouping_gap(
                         source,
                         field.name_span.end.end(),
                         field.value.span().start.start(),
                         &[":"],
                     );
-                    out.push_str(&emit_gap(&colon, Spacing::CommaAfter, depth));
-                    out.push_str(&format_at(&field.value, source, depth, Level::RANGE));
+                    body = body.append(trivia_doc(emit_gap(&colon, Spacing::CommaAfter, 0)));
+                    body = body.append(format_at(&field.value, source, depth, Level::RANGE));
                     if let Some(next) = fields.get(index + 1) {
                         let comma = grouping_gap(
                             source,
@@ -445,7 +611,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                             next.name_span.start.start(),
                             &[","],
                         );
-                        out.push_str(&emit_gap(&comma, Spacing::CommaAfter, depth));
+                        body = body.append(gap_doc(&comma, Spacing::CommaAfter));
                     }
                 }
                 let last = fields.last().expect("non-empty fields");
@@ -456,15 +622,21 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                     &[",", "}"],
                 );
                 tail.retain(|piece| !matches!(piece, GapPiece::Punct(",")));
-                out.push_str(emit_gap(&tail, Spacing::Around, depth).trim_end());
+                let closing = emit_gap(&tail, Spacing::Around, 0);
+                out = out
+                    .append(body.nest(4))
+                    .append(Doc::line())
+                    .append(trivia_doc(closing.trim().to_owned()))
+                    .group();
             } else {
                 let tail = grouping_gap(source, name_span.end.end(), span.end.end(), &["{", "}"]);
-                out.push(' ');
-                out.push_str(&emit_gap(&tail, Spacing::None, depth));
+                out = out
+                    .append(" ")
+                    .append(trivia_doc(emit_gap(&tail, Spacing::None, 0)));
             }
             (out, Level::PRIMARY)
         }
-        Expr::Literal { span, .. } => (render_literal(*span), Level::PRIMARY),
+        Expr::Literal { span, .. } => (verbatim_doc(render_literal(*span)), Level::PRIMARY),
         // `AstContext::apply_op` records every arity-0 operator as a plain `Expr::Ident` (see
         // its own test `apply_op_with_arity_zero_records_an_ident_node`) — `"range_full"` (`..`)
         // is the only one this grammar has, so it's intercepted here rather than in the
@@ -477,8 +649,8 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
         // variable named `range_full` shadow this operator). Narrow in practice — the other
         // five range-family operators have no such collision, since a real function call is
         // never represented as `Expr::Op`.
-        Expr::Ident { name, .. } if name == "range_full" => ("..".to_string(), Level::RANGE),
-        Expr::Ident { name, .. } => (name.clone(), Level::PRIMARY),
+        Expr::Ident { name, .. } if name == "range_full" => (Doc::text(".."), Level::RANGE),
+        Expr::Ident { name, .. } => (Doc::text(name.clone()), Level::PRIMARY),
         Expr::Logical { op, lhs, rhs, .. } => {
             let level = match op {
                 LogicalOp::Or => Level::OR,
@@ -491,13 +663,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             let lhs_s = format_at(lhs, source, depth, level);
             let rhs_s = format_at(rhs, source, depth, level.tighter());
             let pieces = gap_between(source, lhs.span().end, rhs.span().start, &[op_static]);
-            (
-                format!(
-                    "{lhs_s}{}{rhs_s}",
-                    emit_gap(&pieces, Spacing::Around, depth)
-                ),
-                level,
-            )
+            (binary_doc(lhs_s, &pieces, rhs_s), level)
         }
         Expr::Op { operands, .. } if operands.is_empty() => {
             // Defensive only: a real parse never produces an arity-0 `Expr::Op` (see the
@@ -505,7 +671,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // tree using this representation still round-trips correctly, matching this file's
             // existing convention of also handling non-parser-producible tree shapes (e.g.
             // `nested_comparison_needs_parens_on_both_sides`).
-            ("..".to_string(), Level::RANGE)
+            (Doc::text(".."), Level::RANGE)
         }
         Expr::Op {
             name,
@@ -525,7 +691,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             let text = match name.as_str() {
                 "range_from" => {
                     let pieces = gap_between(source, operands[0].span().end, span.end, &[".."]);
-                    format!("{operand_s}{}", emit_gap(&pieces, Spacing::None, depth))
+                    operand_s.append(gap_doc(&pieces, Spacing::None))
                 }
                 "range_to" => {
                     // `span.start` is the `".."` token's own span; a `gap_between` call always
@@ -534,11 +700,15 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                     // arms below, where the operator genuinely sits inside the scanned range) —
                     // it's rendered directly instead, and only a comment is scanned for.
                     let pieces = gap_between(source, span.start, operands[0].span().start, &[]);
-                    format!("..{}{operand_s}", emit_gap(&pieces, Spacing::None, depth))
+                    Doc::text("..")
+                        .append(gap_doc(&pieces, Spacing::None))
+                        .append(operand_s)
                 }
                 "range_to_inclusive" => {
                     let pieces = gap_between(source, span.start, operands[0].span().start, &[]);
-                    format!("..={}{operand_s}", emit_gap(&pieces, Spacing::None, depth))
+                    Doc::text("..=")
+                        .append(gap_doc(&pieces, Spacing::None))
+                        .append(operand_s)
                 }
                 _ => unreachable!("guarded by the outer match arm"),
             };
@@ -556,17 +726,24 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // comment is scanned for, and the operator is rendered directly.
             let pieces = gap_between(source, span.start, operands[0].span().start, &[]);
             // Preserve the existing "- -1" disambiguating space when there are no comments.
-            let default_sep = if operand_s.starts_with('-') || operand_s.starts_with('!') {
+            let default_sep = if matches!(&operands[0], Expr::Op { name, operands, .. }
+                if operands.len() == 1 && matches!(name.as_str(), "-" | "!"))
+            {
                 " "
             } else {
                 ""
             };
             let gap = if pieces.iter().any(|p| matches!(p, GapPiece::Comment(_))) {
-                emit_gap(&pieces, Spacing::None, depth)
+                emit_gap(&pieces, Spacing::None, 0)
             } else {
                 default_sep.to_string()
             };
-            (format!("{op_static}{gap}{operand_s}"), Level::UNARY)
+            (
+                Doc::text(op_static)
+                    .append(trivia_doc(gap))
+                    .append(operand_s),
+                Level::UNARY,
+            )
         }
         Expr::Op { name, operands, .. } if name == "range" || name == "range_inclusive" => {
             // Same non-chaining reasoning as the arity-1 range arm above: both endpoints render
@@ -585,7 +762,14 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 &[op_static],
             );
             (
-                format!("{lhs_s}{}{rhs_s}", emit_gap(&pieces, Spacing::None, depth)),
+                lhs_s
+                    .append(
+                        Doc::softline_()
+                            .append(gap_doc(&pieces, Spacing::None))
+                            .append(rhs_s)
+                            .nest(4),
+                    )
+                    .group(),
                 Level::RANGE,
             )
         }
@@ -609,13 +793,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 operands[1].span().start,
                 &[op_static],
             );
-            (
-                format!(
-                    "{lhs_s}{}{rhs_s}",
-                    emit_gap(&pieces, Spacing::Around, depth)
-                ),
-                level,
-            )
+            (binary_doc(lhs_s, &pieces, rhs_s), level)
         }
         Expr::Cast {
             expr,
@@ -630,19 +808,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // end through the whole cast node's end (which includes both `as` and the type name);
             // only `"as"` is expected inside it, and the type name is appended afterward.
             let pieces = gap_between(source, expr.span().end, span.end, &["as"]);
-            let gap = emit_gap(&pieces, Spacing::Around, depth);
-            // A `//` comment in this gap made `emit_gap` end it with a line wrap (`\n` + the
-            // continuation indent) rather than the usual trailing space; `type_name` must continue
-            // right there; trimming it (as the comment-free/block-comment path below does) would
-            // glue `type_name` onto the comment's own line and comment it out.
-            let has_line_comment = pieces
-                .iter()
-                .any(|p| matches!(p, GapPiece::Comment(Comment::Line(_))));
-            let text = if has_line_comment {
-                format!("{expr_s}{gap}{type_name}")
-            } else {
-                format!("{expr_s}{} {type_name}", gap.trim_end())
-            };
+            let text = binary_doc(expr_s, &pieces, Doc::text(type_name.clone()));
             (text, Level::CAST)
         }
         Expr::Apply { callee, args, span } => {
@@ -650,10 +816,10 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // Without parentheses a bare member followed by `()` becomes direct dispatch,
             // rather than an ordinary call of the member's result.
             if matches!(callee.as_ref(), Expr::Member { args: None, .. }) {
-                callee_s = format!("({callee_s})");
+                callee_s = Doc::text("(").append(callee_s).append(")");
             }
             let tail = grouping_gap(source, callee.span().end.end(), span.end.start(), &[]);
-            callee_s.push_str(&emit_gap(&tail, Spacing::None, depth));
+            callee_s = callee_s.append(gap_doc(&tail, Spacing::None));
             // The call's end span covers the complete argument group, so neither boundary
             // includes closing callee groups omitted from the AST.
             let list = emit_list(
@@ -664,7 +830,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 args,
                 false,
             );
-            (format!("{callee_s}{list}"), Level::POSTFIX)
+            (callee_s.append(list), Level::POSTFIX)
         }
         Expr::Member {
             receiver,
@@ -675,9 +841,21 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
         } => {
             let receiver_s = format_postfix_base(receiver, source, depth, span.start.start());
             let gap = member_gap(source, receiver.span().end, name_span.start);
-            let mut text = format!("{receiver_s}{}{name}", emit_gap(&gap, Spacing::None, depth));
+            let member_gap = if gap.iter().all(|piece| matches!(piece, GapPiece::Punct(_))) {
+                Doc::line_().append(".")
+            } else if gap
+                .iter()
+                .any(|piece| matches!(piece, GapPiece::Comment(Comment::Line(_))))
+            {
+                trivia_doc_at(emit_gap(&gap, Spacing::None, 0), 0)
+            } else {
+                verbatim_doc(emit_gap(&gap, Spacing::None, 0))
+            };
+            let mut text = receiver_s
+                .append(member_gap.append(Doc::text(name.clone())).nest(4))
+                .group();
             if let Some(args) = args {
-                text.push_str(&emit_list(
+                text = text.append(emit_list(
                     source,
                     depth,
                     ("(", ")"),
@@ -724,17 +902,15 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 false,
             );
             if let Some(type_annotation) = type_annotation {
-                list.push_str(": ");
-                list.push_str(&render_type_expr(type_annotation));
+                list = list
+                    .append(": ")
+                    .append(Doc::text(render_type_expr(type_annotation)));
             }
             (list, Level::PRIMARY)
         }
         Expr::TupleIndex { base, index, span } => (
-            format!(
-                "{}.{}",
-                format_postfix_base(base, source, depth, span.start.start()),
-                index
-            ),
+            format_postfix_base(base, source, depth, span.start.start())
+                .append(Doc::text(format!(".{index}"))),
             Level::POSTFIX,
         ),
         Expr::If {
@@ -751,7 +927,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // that a gap holding more than one fixed token (`"}"`, `"else"`, and — for a braced
             // else — `"{"`) still gets a single space between each token and the next, matching
             // the pre-`scan_gap` literal `" } else { "` spacing exactly in the comment-free case.
-            let cond_s = format_expr_restricted(
+            let cond_s = restricted_doc(
                 cond,
                 source,
                 depth,
@@ -765,13 +941,16 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 then_branch.span().start.start(),
                 &["{"],
             );
-            let mut text = String::new();
+            let mut text = Doc::nil();
             // Only the very first gap is `trim_start`'d: it opens the whole node's text, so any
             // leading space `Spacing::Around` would otherwise add before `"if"` must be dropped.
-            text.push_str(emit_gap(&if_gap, Spacing::Around, depth).trim_start());
-            text.push_str(&cond_s);
-            text.push_str(&emit_gap(&open_gap, Spacing::Around, depth));
-            text.push_str(&then_s);
+            text = text.append(trivia_doc(
+                emit_gap(&if_gap, Spacing::Around, 0)
+                    .trim_start()
+                    .to_owned(),
+            ));
+            text = text.append(cond_s);
+            text = text.append(body_gap_doc(&open_gap, false).append(then_s).nest(4));
             match else_branch {
                 None => {
                     // No `else`: the gap between the then-branch and the node's own end holds
@@ -780,7 +959,9 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                     // `trim_end`'d because this is the node's last piece of text: a trailing
                     // space here would otherwise survive into the caller's output (or, wrapped in
                     // parens by `format_at`, land right before the close-paren).
-                    text.push_str(emit_gap(&close_gap, Spacing::Around, depth).trim_end());
+                    text = text.append(Doc::line()).append(trivia_doc(
+                        emit_gap(&close_gap, Spacing::Around, 0).trim().to_owned(),
+                    ));
                 }
                 Some(else_branch) => {
                     let is_chain = matches!(else_branch.as_ref(), Expr::If { .. });
@@ -800,49 +981,62 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                         else_branch.span().start,
                         expected,
                     );
-                    text.push_str(&emit_gap(&else_gap, Spacing::Around, depth));
+                    text = text.append(Doc::line());
                     if is_chain {
                         // The nested `if` recurses through `render`, which lays out its own
                         // `if`/`{`/`}`/`else` gaps (including its own trailing `trim_end`), so
                         // nothing further is appended here.
                         let (else_s, _) = render(else_branch, source, depth);
-                        text.push_str(&else_s);
+                        text = text.append(body_gap_doc(&else_gap, true)).append(else_s);
                     } else {
                         let else_s = format_at(else_branch, source, depth, Level::OR);
-                        text.push_str(&else_s);
+                        text = text.append(body_gap_doc(&else_gap, true).append(else_s).nest(4));
                         let final_close_gap =
                             gap_between(source, else_branch.span().end, span.end, &["}"]);
-                        text.push_str(
-                            emit_gap(&final_close_gap, Spacing::Around, depth).trim_end(),
-                        );
+                        text = text.append(Doc::line()).append(trivia_doc(
+                            emit_gap(&final_close_gap, Spacing::Around, 0)
+                                .trim()
+                                .to_owned(),
+                        ));
                     }
                 }
             }
-            (text, Level::PRIMARY)
+            (text.group(), Level::PRIMARY)
         }
         Expr::Closure { params, body, span } => {
-            // `ClosureParam`s carry `name`/`name_span`/`type_expr`, not `Expr` nodes, and the
-            // header's `|`/`|` delimiters have no span of their own, so the header text is
-            // synthesized from `params` rather than re-scanned token-by-token. Only the gap
-            // between the header's closing `|` and the body is recovered precisely (the
-            // #201-style case, and the most common one): for a non-empty parameter list it's
-            // scanned from the last parameter's declared type's end (expecting the closing `|`);
-            // for an empty list, `span.start` already covers the merged `||` token, so the scan
-            // starts right after it with no further token expected. A comment written *inside*
-            // the parameter list, e.g. `|x: i32 /* c */, y: i32| body`, is a documented,
-            // lossless-but-not-position-perfect limitation: it isn't scanned for at all here (only
-            // the last parameter's post-type gap is), so it would need its own per-parameter gap
-            // recovery to attach at its exact source spot.
             let body_s = format_at(body, source, depth, Level::OR);
             let header = if params.is_empty() {
-                "||".to_string()
+                Doc::text("||")
             } else {
-                let params_s = params
-                    .iter()
-                    .map(|p| format!("{}: {}", p.name, render_type_expr(&p.type_expr)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("|{params_s}|")
+                let leading = gap_between(source, span.start, params[0].name_span.start, &[]);
+                let mut parameters =
+                    trivia_doc(emit_gap(&leading, Spacing::None, 0).trim_start().to_owned());
+                for (index, param) in params.iter().enumerate() {
+                    if index > 0 {
+                        let comma = gap_between(
+                            source,
+                            params[index - 1].type_expr.span().end,
+                            param.name_span.start,
+                            &[","],
+                        );
+                        parameters = parameters.append(gap_doc(&comma, Spacing::CommaAfter));
+                    }
+                    let colon = gap_between(
+                        source,
+                        param.name_span.end,
+                        param.type_expr.span().start,
+                        &[":"],
+                    );
+                    parameters = parameters
+                        .append(Doc::text(param.name.clone()))
+                        .append(trivia_doc(emit_gap(&colon, Spacing::CommaAfter, 0)))
+                        .append(Doc::text(render_type_expr(&param.type_expr)));
+                }
+                Doc::text("|")
+                    .append(Doc::line_().append(parameters).nest(4))
+                    .append(Doc::line_())
+                    .append("|")
+                    .group()
             };
             let (tail_start, expected): (proc_macro2::Span, &[&'static str]) = match params.last() {
                 Some(last) => (last.type_expr.span().end, &["|"]),
@@ -853,7 +1047,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 .into_iter()
                 .filter(|p| matches!(p, GapPiece::Comment(_)))
                 .collect();
-            let gap = emit_gap(&comments, Spacing::None, depth);
+            let gap = emit_gap(&comments, Spacing::None, 0);
             // A `//` comment among `comments` made `emit_gap` end `gap` with a line wrap (`\n` +
             // continuation indent); the body must continue right there, so `gap` is used verbatim
             // (already correctly spaced/wrapped) rather than trimmed — trimming would collapse the
@@ -862,15 +1056,18 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 .iter()
                 .any(|p| matches!(p, GapPiece::Comment(Comment::Line(_))));
             let sep = if has_line_comment {
-                gap
+                trivia_doc_at(gap, 0)
             } else if gap.trim().is_empty() {
-                " ".to_string()
+                Doc::line()
             } else {
-                format!(" {} ", gap.trim())
+                trivia_doc(format!(" {} ", gap.trim()))
             };
             // A closure's body greedily consumes expressions, including following postfixes.
             // Its primary-expression grammar position does not make it a tight-binding value.
-            (format!("{header}{sep}{body_s}"), Level::RANGE)
+            (
+                header.append(sep.append(body_s).nest(4)).group(),
+                Level::RANGE,
+            )
         }
     }
 }
@@ -987,7 +1184,7 @@ fn header_contains_record(expr: &Expr) -> bool {
 /// Ordinary delimiters and nested branch bodies retain their normal formatting.
 ///
 /// - Precondition: `source` is the parsed source, or empty for a hand-built AST.
-/// - Complexity: O(n + s) in AST nodes and source text, excluding existing gap scan costs.
+/// - Complexity: O(n) document space plus layout and existing source-gap scans.
 ///
 /// # Examples
 /// ```
@@ -1003,10 +1200,28 @@ pub fn format_expr_restricted(
     depth: usize,
     restriction: crate::ExpressionRestriction,
 ) -> String {
-    let text = format_expr(expr, source, depth);
+    render_document(
+        restricted_doc(expr, source, depth, restriction),
+        depth,
+        depth * 4,
+        100,
+        0,
+    )
+}
+
+/// Builds a brace-reserving expression without independently laying out its children.
+///
+/// - Complexity: O(n) document construction plus existing source-gap scans.
+fn restricted_doc(
+    expr: &Expr,
+    source: &str,
+    depth: usize,
+    restriction: crate::ExpressionRestriction,
+) -> Doc {
+    let text = format_at(expr, source, depth, Level::RANGE);
     if restriction == crate::ExpressionRestriction::NoStructLiteral && header_contains_record(expr)
     {
-        format!("({text})")
+        Doc::text("(").append(text).append(")")
     } else {
         text
     }
@@ -1019,7 +1234,7 @@ pub fn format_expr_restricted(
 ///
 /// - Precondition: `source` is the parsed source and `bounds` encloses `expr`, or source is empty.
 /// - Postcondition: boundary comments appear exactly once in source order.
-/// - Complexity: O(n + s) in AST nodes and source text, excluding existing gap scan costs.
+/// - Complexity: O(n) document space plus layout and existing source-gap scans.
 ///
 /// # Examples
 /// ```
@@ -1038,33 +1253,62 @@ pub fn format_expr_header(
     depth: usize,
     bounds: (proc_macro2::LineColumn, proc_macro2::LineColumn),
 ) -> String {
+    format_expr_header_with_layout(expr, source, depth, bounds, depth * 4, 100, 0)
+}
+
+/// Formats a brace-reserving header at `column`, reserving `suffix_columns` on its last line.
+///
+/// The target width includes the already-written prefix and following punctuation. Continuations
+/// nest four spaces from `depth`; unbreakable tokens and comments may exceed `width`.
+///
+/// - Precondition: `source` is the parsed source and `bounds` encloses `expr`, or source is empty.
+/// - Complexity: O(n) document space plus layout and existing source-gap scans.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, OpLookup, Parser, format_expr_header_with_layout, LineColumn};
+/// let source = "value";
+/// let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast(source).unwrap();
+/// assert_eq!(format_expr_header_with_layout(&expr, source, 1,
+///     (LineColumn { line: 1, column: 0 }, LineColumn { line: 1, column: 5 }),
+///     16, 100, 2), "value");
+/// ```
+pub fn format_expr_header_with_layout(
+    expr: &Expr,
+    source: &str,
+    depth: usize,
+    bounds: (proc_macro2::LineColumn, proc_macro2::LineColumn),
+    column: usize,
+    width: usize,
+    suffix_columns: usize,
+) -> String {
     let leading = grouping_gap(source, bounds.0, header_start(expr), &[]);
     let trailing = grouping_gap(source, header_end(expr), bounds.1, &[]);
-    let mut text = emit_gap(&leading, Spacing::None, depth)
-        .trim_start()
-        .to_string();
-    text.push_str(&format_expr_restricted(
+    let mut text = trivia_doc(emit_gap(&leading, Spacing::None, 0).trim_start().to_owned());
+    text = text.append(restricted_doc(
         expr,
         source,
         depth,
         crate::ExpressionRestriction::NoStructLiteral,
     ));
-    let tail = emit_gap(&trailing, Spacing::None, depth);
+    let tail = emit_gap(&trailing, Spacing::None, 0);
     if matches!(trailing.last(), Some(GapPiece::Comment(Comment::Line(_)))) {
-        text.push_str(&tail);
+        text = text.append(trivia_doc(tail));
     } else {
-        text.push_str(tail.trim_end());
+        text = text.append(trivia_doc(tail.trim_end().to_owned()));
     }
-    text
+    render_document(text, depth, column, width, suffix_columns)
 }
 
 /// Renders `expr`, wrapping it in parens if its own level is looser than `min_level` requires.
 ///
 /// `source` and `depth` are forwarded to [`render`] unchanged; see its doc comment.
-fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> String {
+///
+/// - Complexity: O(n) document space plus existing source-gap scan costs.
+fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> Doc {
     let (text, level) = render(expr, source, depth);
     if level < min_level {
-        format!("({text})")
+        Doc::text("(").append(text).append(")").group()
     } else {
         text
     }
@@ -1072,10 +1316,12 @@ fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> Strin
 
 /// Pretty-prints `expr` back to CEL source text — see the module doc for the printing rules.
 ///
-/// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`); `depth` is the
-/// indent level for `//`-comment wrap continuations.
+/// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`); `depth` supplies
+/// the base indentation for wrapped continuations and the assumed initial output column.
 /// Postfix bases retain leading group comments, and member-dot comments survive omitted groups.
 /// Closure bases stay grouped so following postfixes cannot move into their bodies.
+///
+/// - Complexity: O(n) document space plus layout and existing source-gap scans.
 ///
 /// # Examples
 ///
@@ -1087,13 +1333,280 @@ fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> Strin
 /// assert_eq!(format_expr(&expr, "(1i32 + 2i32) * 3i32", 0), "(1i32 + 2i32) * 3i32");
 /// ```
 pub fn format_expr(expr: &Expr, source: &str, depth: usize) -> String {
-    format_at(expr, source, depth, Level::RANGE)
+    format_expr_with_layout(expr, source, depth, depth * 4, 100, 0)
+}
+
+/// Formats an expression at the actual output `column` with a target `width`.
+///
+/// Reserves `suffix_columns` for following punctuation on the final line. Short expressions remain
+/// inline. Lists, records and closure bodies nest four spaces; binary continuations lead with their
+/// operator. Unbreakable tokens and comments may exceed the target. The result excludes the prefix,
+/// suffix and initial indentation; continuation indentation starts at `depth * 4`.
+/// When an indented continuation has more room and the first fragment cannot fit after the prefix,
+/// the expression starts on a new line indented four spaces beyond `depth`.
+///
+/// - Precondition: `source` is the expression's parsed source, or empty for a hand-built AST.
+/// - Complexity: O(n) document space plus layout and existing source-gap scans.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, OpLookup, Parser, format_expr_with_layout};
+/// let source = "first + second";
+/// let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast(source).unwrap();
+/// assert_eq!(format_expr_with_layout(&expr, source, 1, 12, 26, 1),
+///     "first\n        + second");
+/// ```
+pub fn format_expr_with_layout(
+    expr: &Expr,
+    source: &str,
+    depth: usize,
+    column: usize,
+    width: usize,
+    suffix_columns: usize,
+) -> String {
+    render_document(
+        format_at(expr, source, depth, Level::RANGE),
+        depth,
+        column,
+        width,
+        suffix_columns,
+    )
+}
+
+/// Lays out one complete expression document, accounting for both embedding boundaries.
+///
+/// - Complexity: O(n + column + suffix_columns) space; layout uses the document library's group
+///   fit traversal and never renders subtrees to measure them.
+fn render_document(
+    doc: Doc,
+    depth: usize,
+    column: usize,
+    width: usize,
+    suffix_columns: usize,
+) -> String {
+    let prefix = " ".repeat(column);
+    let suffix = " ".repeat(suffix_columns);
+    let doc = if column > depth * 4 + 4 {
+        // Group only the boundary: fitting inspects the following document in broken mode,
+        // stopping at its first existing break instead of demanding a flat whole expression.
+        Doc::hardline()
+            .append("    ")
+            .flat_alt(Doc::nil())
+            .group()
+            .append(Doc::column(move |current| {
+                if current == column {
+                    doc.clone()
+                } else {
+                    doc.clone().nest(4)
+                }
+            }))
+    } else {
+        doc
+    };
+    let document = Doc::text(prefix)
+        .append(doc.nest((depth * 4) as isize))
+        .append(Doc::text(suffix));
+    let mut out = String::new();
+    document
+        .render_fmt(width, &mut out)
+        .expect("writing to String is infallible");
+    out.truncate(out.len() - suffix_columns);
+    out.drain(..column);
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{AstContext, OpLookup, Parser};
+
+    /// Long binary expressions wrap before their operators and reparse unchanged.
+    #[test]
+    fn wraps_long_expressions_with_leading_operators() {
+        let source = std::iter::repeat_n("long_operand_name", 8)
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let text = fmt(&source);
+        assert!(text.contains("\n    + "), "{text}");
+        assert!(text.lines().all(|line| line.len() <= 100), "{text}");
+        assert_eq!(fmt(&text), text);
+    }
+
+    /// Binary ranges retain compact spelling and expose a zero-width leading-operator boundary.
+    #[test]
+    fn wraps_binary_ranges_before_their_operators() {
+        for operator in ["..", "..="] {
+            let source = format!("{}{}{}", "a".repeat(45), operator, "b".repeat(45));
+            let expr = parse(&source);
+            let text = format_expr_with_layout(&expr, &source, 1, 13, 100, 1);
+            assert_eq!(
+                text,
+                format!("{}\n        {operator}{}", "a".repeat(45), "b".repeat(45))
+            );
+            assert_eq!(
+                format_expr_with_layout(&parse(&text), &text, 1, 13, 100, 1),
+                text
+            );
+            assert_eq!(
+                fmt(&format!("left{operator}right")),
+                format!("left{operator}right")
+            );
+            let call = format!("call({source})");
+            let formatted = fmt(&call);
+            assert!(
+                formatted.lines().all(|line| line.len() <= 100),
+                "{formatted}"
+            );
+            assert_eq!(fmt(&formatted), formatted);
+        }
+    }
+
+    /// An empty closure's header can move with its body when the embedding prefix fills the line.
+    #[test]
+    fn empty_closure_can_break_before_its_header() {
+        let source = "|| predicate";
+        let expr = parse(source);
+        let text = format_expr_with_layout(&expr, source, 1, 100, 100, 1);
+        assert_eq!(text, "\n        || predicate");
+        assert_eq!(
+            format_expr_with_layout(&parse(&text), &text, 1, 100, 100, 1),
+            text
+        );
+    }
+
+    /// Nested grammar-owned lists break without introducing unsupported trailing commas.
+    #[test]
+    fn wraps_nested_calls_records_arrays_and_closures() {
+        let name = "a_long_argument_name_that_occupies_thirty_columns";
+        for source in [
+            format!("outer(inner({name}, {name}), [{name}, {name}])"),
+            format!("Record {{ first: ({name}, {name}), second: [{name}, {name}] }}"),
+            format!("map([{name}, {name}], |value: i32| value + {name} + {name})"),
+        ] {
+            let text = fmt(&source);
+            assert!(text.contains('\n'), "{text}");
+            assert!(text.lines().all(|line| line.len() <= 100), "{text}");
+            assert_eq!(fmt(&text), text);
+        }
+    }
+
+    /// Parameter lists wrap and retain comments on both sides of their separators.
+    #[test]
+    fn wraps_closure_parameters_without_losing_comments() {
+        let source = "|/* first */ a_long_parameter: i32 /* second */, another_long_parameter: i32, third_long_parameter: i32, fourth_long_parameter: i32| a_long_parameter";
+        let text = fmt(source);
+        for label in ["first", "second"] {
+            assert_eq!(text.matches(label).count(), 1, "{text}");
+        }
+        assert!(text.lines().all(|line| line.len() <= 100), "{text}");
+        assert_eq!(fmt(&text), text);
+    }
+
+    /// Block comments do not disable leading-operator break opportunities.
+    #[test]
+    fn wraps_commented_binary_gaps() {
+        let operand = "a".repeat(45);
+        let source = format!("{operand} /* keep */ + {operand} + {operand}");
+        let text = fmt(&source);
+        assert!(text.lines().all(|line| line.len() <= 100), "{text}");
+        assert_eq!(text.matches("keep").count(), 1);
+        assert_eq!(fmt(&text), text);
+    }
+
+    /// Consecutive line comments keep separate mandatory line boundaries.
+    #[test]
+    fn consecutive_line_comments_remain_separate() {
+        let text = fmt("1 + // first\n// second\n2");
+        assert_eq!(text, "1 + // first\n    // second\n    2");
+        assert_eq!(fmt(&text), text);
+    }
+
+    /// A comment after an opening brace cannot consume the first field or branch expression.
+    #[test]
+    fn brace_opening_line_comments_keep_their_mandatory_breaks() {
+        for source in [
+            "Record { // first\n value: 1 }",
+            "if condition { // first\n 1 } else { // second\n 2 }",
+        ] {
+            let text = fmt(source);
+            assert!(text.contains("// first\n"), "{text}");
+            assert_eq!(fmt(&text), text);
+        }
+    }
+
+    /// Width includes the actual prefix and suffix, not an independently reduced child budget.
+    #[test]
+    fn embedding_reserves_exact_prefix_and_suffix_columns() {
+        let source = "first + second";
+        let expr = parse(source);
+        assert_eq!(format_expr_with_layout(&expr, source, 1, 12, 27, 1), source);
+        assert_eq!(
+            format_expr_with_layout(&expr, source, 1, 12, 26, 1),
+            "first\n        + second"
+        );
+        let bounds = (
+            proc_macro2::LineColumn { line: 1, column: 0 },
+            proc_macro2::LineColumn {
+                line: 1,
+                column: source.len(),
+            },
+        );
+        assert_eq!(
+            format_expr_header_with_layout(&expr, source, 1, bounds, 12, 28, 2),
+            source
+        );
+        assert_eq!(
+            format_expr_header_with_layout(&expr, source, 1, bounds, 12, 27, 2),
+            "first\n        + second"
+        );
+    }
+
+    /// Literal-internal newlines retain their spelling rather than inheriting expression nesting.
+    #[test]
+    fn multiline_literal_spelling_is_independent_of_layout_nesting() {
+        let source = "call(r#\"first\n  second\"#, 0xffi32)";
+        let expr = parse(source);
+        let text = format_expr_with_layout(&expr, source, 2, 20, 30, 1);
+        assert!(text.contains("r#\"first\n  second\"#"), "{text}");
+        assert!(text.contains("0xffi32"));
+        assert_eq!(
+            format_expr_with_layout(&parse(&text), &text, 2, 20, 30, 1),
+            text
+        );
+    }
+
+    /// Layout retains grammar, literal spelling, and precedence across every compound surface.
+    #[test]
+    fn narrow_layout_preserves_expression_semantics_and_reaches_a_fixed_point() {
+        for source in [
+            "-(first_long_name + second_long_name) as i32",
+            "first_long_name - (second_long_name - third_long_name)",
+            "(|value: i32| value + first_long_name)(second_long_name)",
+            "(holder.long_member_name)(first_long_name, second_long_name)",
+            "first_long_name..=second_long_name",
+            "[first_long_name, second_long_name]: [i32]",
+            "(first_long_name + second_long_name,)",
+            "[(first_long_name, second_long_name), (third_long_name, fourth_long_name)]",
+            "if (Record { value: first_long_name }).value { 0xffi32 } else { 1i32 }",
+            "first_long_name /* keep\n block */ + second_long_name",
+            "call(first_long_name, // keep line\n second_long_name)",
+            "first_long_name + // first\n // second\n second_long_name",
+        ] {
+            let expr = parse(source);
+            let text = format_expr_with_layout(&expr, source, 0, 0, 40, 0);
+            let parsed = parse(&text);
+            assert_eq!(
+                format_expr_with_layout(&parsed, &text, 0, 0, 40, 0),
+                text,
+                "{source}"
+            );
+            assert_eq!(
+                format_expr_with_layout(&parsed, &text, 0, 0, 10_000, 0),
+                format_expr_with_layout(&expr, source, 0, 0, 10_000, 0),
+                "{source} -> {text}"
+            );
+        }
+    }
 
     fn parse(source: &str) -> Expr {
         Parser::<AstContext>::new(OpLookup::new())
