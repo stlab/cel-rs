@@ -84,10 +84,11 @@ pub fn format_expr(expr: &Expr) -> String
   parent position requires — e.g. `(1 + 2) * 3` re-emits its parens because `+` is looser than
   `*`'s left operand slot, but `1 + 2 * 3` does not, because the nested `*` is already tighter than
   its `+`-operator parent needs.
-- **No line-wrapping.** Every expression is emitted on one line regardless of length; the design
-  doc's 100-column target is aspirational only for this phase — real usage (`begin/assets/demo.adm2`)
-  is exclusively short one-liners, and column-aware greedy line-breaking is deferred until an
-  actual file needs it.
+- **Expression layout targets 100 columns.** The shared CEL formatter builds one Wadler document
+  per expression and lays it out once with `pretty`. Short expressions stay inline; nested calls,
+  tuples, arrays, records and closure bodies use four-space continuations. Binary operators lead
+  continuation lines. Adam supplies the actual output column and following punctuation budget.
+  Unbreakable tokens and comments may exceed the target.
 - `Expr::Tuple` reprints as `(a, b)`; a 1-tuple reprints with its trailing comma (`(a,)`), the
   syntax that distinguishes it from a grouped expression.
 - `Expr::If`/`Expr::Logical` reprint as `if cond { then } else { else }` / `a || b`, `a && b`,
@@ -225,8 +226,6 @@ golden-file-style tests are inline input/expected string-literal pairs within ea
 
 ## Explicitly deferred / out of scope
 
-- Column-aware line-wrapping (see above). Tracked as
-  [github.com/stlab/cel-rs#54](https://github.com/stlab/cel-rs/issues/54).
 - Preserving block-vs-line comment style, and comments/blank lines in the trailing gap before a
   block's closing `}` (both existing normalizations/limitations, not newly introduced; tracked as
   [#53](https://github.com/stlab/cel-rs/issues/53) and

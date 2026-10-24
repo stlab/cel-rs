@@ -10,8 +10,9 @@ sheet crop_straighten {
         size: Size2D { width: 100.0, height: 100.0 }
     } require {
         @valid_image image.is_finite() && image.width > 0.0 && image.height > 0.0
-            && image.max_x > image.min_x && image.max_y > image.min_y
-            && (Point2D { x: image.max_x, y: image.max_y }).is_finite();
+            && image.max_x > image.min_x
+            && image.max_y > image.min_y
+            && Point2D { x: image.max_x, y: image.max_y }.is_finite();
     };
     source transform: Transform2D = identity_transform();
     cell crop: Rect = Rect {
@@ -19,32 +20,72 @@ sheet crop_straighten {
         size: Size2D { width: 100.0, height: 100.0 }
     } require {
         @positive_effective_crop crop.is_finite() && crop.width > 0.0 && crop.height > 0.0
-            && crop.max_x > crop.min_x && crop.max_y > crop.min_y
-            && (Point2D { x: crop.max_x, y: crop.max_y }).is_finite();
+            && crop.max_x > crop.min_x
+            && crop.max_y > crop.min_y
+            && Point2D { x: crop.max_x, y: crop.max_y }.is_finite();
     };
     cell shrink: f64 = 1.0 require {
         @representable_shrink shrink > 0.0 && shrink <= 1.0
             && 1.0 / shrink <= 1.7976931348623157e308;
     };
-    cell precise: bool = true require { @sufficient_fit_and_presentation_precision precise; };
+    cell precise: bool = true require {
+        @sufficient_fit_and_presentation_precision precise;
+    };
     // Map the effective crop back onto the unchanged source overlay.
-    cell presentation: Transform2D = identity_transform()
-        require { @finite_presentation presentation.is_finite(); };
+    cell presentation: Transform2D = identity_transform() require {
+        @finite_presentation presentation.is_finite();
+    };
 
     relationship {
-        (crop, shrink, precise, presentation) :=
-            (|r: Rect, i: Rect, inv: Transform2D, t: Transform2D|
-                (|r: Rect, i: Rect, inv: Transform2D, t: Transform2D, a: Point2D, b: Rect|
+        (crop, shrink, precise, presentation) := (|
+            r: Rect,
+            i: Rect,
+            inv: Transform2D,
+            t: Transform2D
+        |
+            (|r: Rect, i: Rect, inv: Transform2D, t: Transform2D, a: Point2D, b: Rect|
+                (|
+                    r: Rect,
+                    inv: Transform2D,
+                    t: Transform2D,
+                    s: f64,
+                    accurate: bool
+                | // Eight epsilon inward guard, only when shrinking.
                     (|r: Rect, inv: Transform2D, t: Transform2D, s: f64, accurate: bool|
-                        // Eight epsilon inward guard, only when shrinking.
-                        (|r: Rect, inv: Transform2D, t: Transform2D, s: f64, accurate: bool|
-                            (|r: Rect, inv: Transform2D, t: Transform2D, s: f64, accurate: bool, q: Rect|
-                                (|r: Rect, inv: Transform2D, s: f64, accurate: bool, q: Rect, p: Transform2D|
-                                    // Finite coefficients alone do not guarantee a fixed
-                                    // anchor or overlay after reciprocal-scale cancellation.
-                                    (|r: Rect, s: f64, accurate: bool, q: Rect, p: Transform2D,
-                                        a: Point2D, lo: Point2D, lr: Point2D, ul: Point2D, hi: Point2D, e: f64|
-                                        (q, s, accurate
+                        (|
+                            r: Rect,
+                            inv: Transform2D,
+                            t: Transform2D,
+                            s: f64,
+                            accurate: bool,
+                            q: Rect
+                        |
+                            (|
+                                r: Rect,
+                                inv: Transform2D,
+                                s: f64,
+                                accurate: bool,
+                                q: Rect,
+                                p: Transform2D
+                            | // Finite coefficients alone do not guarantee a fixed
+                                // anchor or overlay after reciprocal-scale cancellation.
+                                (|
+                                    r: Rect,
+                                    s: f64,
+                                    accurate: bool,
+                                    q: Rect,
+                                    p: Transform2D,
+                                    a: Point2D,
+                                    lo: Point2D,
+                                    lr: Point2D,
+                                    ul: Point2D,
+                                    hi: Point2D,
+                                    e: f64
+                                |
+                                    (
+                                        q,
+                                        s,
+                                        accurate
                                             && abs(q.width / r.width - s)
                                                 <= 0.000000000000014210854715202004 * s
                                             && abs(q.height / r.height - s)
@@ -53,70 +94,119 @@ sheet crop_straighten {
                                             && abs(q.center().y - r.center().y) <= e
                                             && abs(a.x - r.center().x) <= e
                                             && abs(a.y - r.center().y) <= e
-                                            && abs(lo.x - r.min_x) <= e && abs(lo.y - r.min_y) <= e
-                                            && abs(lr.x - r.max_x) <= e && abs(lr.y - r.min_y) <= e
-                                            && abs(ul.x - r.min_x) <= e && abs(ul.y - r.max_y) <= e
-                                            && abs(hi.x - r.max_x) <= e && abs(hi.y - r.max_y) <= e,
-                                            p)
-                                    )(r, s, accurate, q, p,
-                                        p.transform_point(inv.transform_point(r.center())),
-                                        p.transform_point(inv.transform_point(q.origin)),
-                                        p.transform_point(inv.transform_point(Point2D { x: q.max_x, y: q.min_y })),
-                                        p.transform_point(inv.transform_point(Point2D { x: q.min_x, y: q.max_y })),
-                                        p.transform_point(inv.transform_point(Point2D { x: q.max_x, y: q.max_y })),
-                                        0.000000000000014210854715202004 * max(r.width, r.height))
-                                )(r, inv, s, accurate, q,
-                                    t.then(translation(Vector2D { x: -q.center().x, y: -q.center().y }))
-                                        .then(scale(1.0 / s, 1.0 / s))
-                                        .then(translation(Vector2D { x: q.center().x, y: q.center().y })))
-                            )(r, inv, t, s, accurate, if s == 1.0 { r } else { Rect {
-                                origin: r.center() - Vector2D {
-                                    x: r.width * s * 0.5,
-                                    y: r.height * s * 0.5
-                                },
-                                size: r.size * s
-                            } })
-                        )(r, inv, t, if s == 1.0 { s } else {
-                            s * (1.0 - 0.0000000000000017763568394002505)
-                        }, accurate)
-                    )(r, inv, t, min(1.0, min(
-                        min(a.x - i.min_x, i.max_x - a.x)
-                            / max(a.x - b.min_x, b.max_x - a.x),
-                        min(a.y - i.min_y, i.max_y - a.y)
-                            / max(a.y - b.min_y, b.max_y - a.y)
-                    )), (
-                        // Bound subtraction must retain the affine half-extents
-                        // within 32 epsilon; reject cancellation, not an undersized
-                        // but plausible result. This is a precision check only.
-                        abs(max(a.x - b.min_x, b.max_x - a.x)
-                            / (abs(inv.m11) * (r.width * 0.5)
-                                + abs(inv.m21) * (r.height * 0.5)) - 1.0)
+                                            && abs(lo.x - r.min_x) <= e
+                                            && abs(lo.y - r.min_y) <= e
+                                            && abs(lr.x - r.max_x) <= e
+                                            && abs(lr.y - r.min_y) <= e
+                                            && abs(ul.x - r.min_x) <= e
+                                            && abs(ul.y - r.max_y) <= e
+                                            && abs(hi.x - r.max_x) <= e
+                                            && abs(hi.y - r.max_y) <= e,
+                                        p
+                                    ))(
+                                    r,
+                                    s,
+                                    accurate,
+                                    q,
+                                    p,
+                                    p.transform_point(inv.transform_point(r.center())),
+                                    p.transform_point(inv.transform_point(q.origin)),
+                                    p.transform_point(
+                                        inv.transform_point(Point2D { x: q.max_x, y: q.min_y })
+                                    ),
+                                    p.transform_point(
+                                        inv.transform_point(Point2D { x: q.min_x, y: q.max_y })
+                                    ),
+                                    p.transform_point(
+                                        inv.transform_point(Point2D { x: q.max_x, y: q.max_y })
+                                    ),
+                                    0.000000000000014210854715202004 * max(r.width, r.height)
+                                ))(
+                                r,
+                                inv,
+                                s,
+                                accurate,
+                                q,
+                                t.then(translation(Vector2D { x: -q.center().x, y: -q.center().y }))
+                                    .then(scale(1.0 / s, 1.0 / s))
+                                    .then(
+                                    translation(Vector2D { x: q.center().x, y: q.center().y })
+                                )
+                            ))(
+                            r,
+                            inv,
+                            t,
+                            s,
+                            accurate,
+                            if s == 1.0 {
+                                r
+                            } else {
+                                Rect {
+                                    origin: r.center()
+                                        - Vector2D { x: r.width * s * 0.5, y: r.height * s * 0.5 },
+                                    size: r.size * s
+                                }
+                            }
+                        ))(
+                        r,
+                        inv,
+                        t,
+                        if s == 1.0 { s } else { s * (1.0 - 0.0000000000000017763568394002505) },
+                        accurate
+                    ))(
+                    r,
+                    inv,
+                    t,
+                    min(
+                        1.0,
+                        min(
+                            min(a.x - i.min_x, i.max_x - a.x) / max(a.x - b.min_x, b.max_x - a.x),
+                            min(a.y - i.min_y, i.max_y - a.y) / max(a.y - b.min_y, b.max_y - a.y)
+                        )
+                    ), // Bound subtraction must retain the affine half-extents
+                    // within 32 epsilon; reject cancellation, not an undersized
+                    // but plausible result. This is a precision check only.
+                    abs(
+                        max(a.x - b.min_x, b.max_x - a.x)
+                            / (abs(inv.m11) * (r.width * 0.5) + abs(inv.m21) * (r.height * 0.5))
+                            - 1.0
+                    )
+                        <= 0.000000000000007105427357601002
+                        && abs(
+                            max(a.y - b.min_y, b.max_y - a.y)
+                                / (abs(inv.m12) * (r.width * 0.5) + abs(inv.m22) * (r.height * 0.5))
+                                - 1.0
+                        )
                             <= 0.000000000000007105427357601002
-                        && abs(max(a.y - b.min_y, b.max_y - a.y)
-                            / (abs(inv.m12) * (r.width * 0.5)
-                                + abs(inv.m22) * (r.height * 0.5)) - 1.0)
-                            <= 0.000000000000007105427357601002
-                    ))
-                )(r, i, inv, t, inv.transform_point(r.center()), inv.outer_transformed_rect(r))
-            )(crop, image, transform.inverse(), transform);
+                ))(r, i, inv, t, inv.transform_point(r.center()), inv.outer_transformed_rect(r)))(
+            crop,
+            image,
+            transform.inverse(),
+            transform
+        );
     }
 
     out anchor: Point2D := transform.inverse().transform_point(crop.center()) require {
-        @feasible_anchor anchor.is_finite()
-            && anchor.x > image.min_x && anchor.x < image.max_x
-            && anchor.y > image.min_y && anchor.y < image.max_y;
+        @feasible_anchor anchor.is_finite() && anchor.x > image.min_x && anchor.x < image.max_x
+            && anchor.y > image.min_y
+            && anchor.y < image.max_y;
     };
     // Closed-edge coverage, not Euclid's half-open point containment.
     // Use the image coordinate/extent scale for the absolute rounding budget.
-    out coverage: bool :=
-        (|b: Rect, i: Rect, e: f64|
-            b.min_x >= i.min_x - e && b.max_x <= i.max_x + e
-                && b.min_y >= i.min_y - e && b.max_y <= i.max_y + e
-        )(transform.inverse().outer_transformed_rect(crop), image,
-            0.000000000000014210854715202004 * max(
+    out coverage: bool := (|b: Rect, i: Rect, e: f64|
+        b.min_x >= i.min_x - e && b.max_x <= i.max_x + e && b.min_y >= i.min_y - e
+            && b.max_y <= i.max_y + e)(
+        transform.inverse().outer_transformed_rect(crop),
+        image,
+        0.000000000000014210854715202004
+            * max(
                 max(image.width, image.height),
-                max(max(abs(image.min_x), abs(image.max_x)),
-                    max(abs(image.min_y), abs(image.max_y)))
+                max(
+                    max(abs(image.min_x), abs(image.max_x)),
+                    max(abs(image.min_y), abs(image.max_y))
+                )
             )
-        ) require { @closed_edges coverage; };
+    ) require {
+        @closed_edges coverage;
+    };
 }
