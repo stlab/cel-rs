@@ -2,9 +2,10 @@
 //! opening braces on the same line, `leading_comment`/`blank_line_before` reproduced exactly as
 //! [`crate::trivia::attach_trivia`] recovered them (including a file-header-style comment
 //! preceding the `sheet` keyword itself, `Sheet.leading_comment`), and binding bodies/cell
-//! initializers/requirement bodies delegated to [`cel_parser::format_expr`] (a normalization
-//! improvement over span-based re-emit, which was only ever a stopgap for when there was no
-//! parsed `Expr` to format). Type annotations are re-emitted via `Span::source_text()` directly
+//! initializers/requirement bodies delegated to [`cel_parser::format_expr_with_layout`].
+//! Expression layout targets 100 columns including declaration prefixes and punctuation. Nested
+//! lists, records and closure bodies use four spaces; binary continuations lead with operators.
+//! Type annotations are re-emitted via `Span::source_text()` directly
 //! via `TypeExpr::span()`, and branch-match literals via `ConditionalBranch::literal_span` — see
 //! the design doc for why no `Literal` value is needed. Conditional branches omit the grammar's
 //! optional trailing `,`, matching `begin/assets/demo.adm2`'s existing style.
@@ -13,6 +14,58 @@
 //! `textDocument/formatting` handler, which refuses to format in that case.
 
 use crate::ast;
+
+/// Returns the current output column in Unicode scalar values.
+///
+/// - Complexity: O(k) in the final line's length.
+fn output_column(out: &str) -> usize {
+    out.rsplit('\n').next().unwrap_or_default().chars().count()
+}
+
+/// Appends one expression using the complete emitted prefix and following punctuation budget.
+///
+/// - Complexity: O(n) document space plus layout, final-line measurement and source-gap scans.
+fn write_expression(
+    out: &mut String,
+    source: &str,
+    expr: &cel_parser::Expr,
+    depth: usize,
+    suffix_columns: usize,
+) {
+    let text = cel_parser::format_expr_with_layout(
+        expr,
+        source,
+        depth,
+        output_column(out),
+        100,
+        suffix_columns,
+    );
+    append_expression_layout(out, &text);
+}
+
+/// Appends expression layout, removing prefix padding when layout starts on a new line.
+///
+/// - Complexity: O(n + k) in the expression text and the prefix's trailing padding.
+fn append_expression_layout(out: &mut String, text: &str) {
+    if text.starts_with('\n') {
+        out.truncate(out.trim_end_matches(' ').len());
+    }
+    out.push_str(text);
+}
+
+/// Reserves punctuation before the next clause, or the declaration's semicolon.
+fn cell_clause_suffix(
+    filter: Option<&ast::CellFilter>,
+    require: Option<&ast::RequireBlock>,
+) -> usize {
+    if filter.is_some() {
+        8
+    } else if require.is_some() {
+        10
+    } else {
+        1
+    }
+}
 
 /// 4 spaces per nesting level.
 fn indent(depth: usize) -> String {
@@ -233,6 +286,8 @@ fn emit_decl_gap(
 
 /// Writes one `a := ...;` / `(a, b) := ...;` binding, delegating its body to
 /// [`cel_parser::format_expr`].
+///
+/// - Complexity: O(n) output/document space plus layout and source-gap scans.
 fn write_binding(out: &mut String, source: &str, binding: &ast::BindingDecl, depth: usize) {
     write_trivia(
         out,
@@ -274,7 +329,7 @@ fn write_binding(out: &mut String, source: &str, binding: &ast::BindingDecl, dep
         &[":="],
         depth,
     ));
-    out.push_str(&cel_parser::format_expr(&binding.body, source, depth));
+    write_expression(out, source, &binding.body, depth, 1);
     // Comment between the binding's body and its terminating `;`.
     out.push_str(&emit_decl_gap(
         source,
@@ -379,6 +434,8 @@ fn write_branch(out: &mut String, source: &str, branch: &ast::ConditionalBranch,
 /// order (dispatching on the match-subject expression), followed by its optional `_ => { ... }` default arm.
 ///
 /// Preserves header-boundary comments across omitted groups while reserving the body brace.
+///
+/// - Complexity: O(n) output/document space plus layout and source-gap scans.
 fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl, depth: usize) {
     write_trivia(
         out,
@@ -389,12 +446,16 @@ fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl
     write_doc_comment(out, "///", cond.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("conditional ");
-    out.push_str(&cel_parser::format_expr_header(
+    let header = cel_parser::format_expr_header_with_layout(
         &cond.match_expr,
         source,
         depth,
         (cond.span.start.end(), cond.open_brace_span.start.start()),
-    ));
+        output_column(out),
+        100,
+        2,
+    );
+    append_expression_layout(out, &header);
     out.push_str(" {\n");
     for branch in &cond.branches {
         write_branch(out, source, branch, depth + 1);
@@ -433,6 +494,8 @@ fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl
 /// Writes one `cell name[: type][ = initializer][ filter body][ require { ... }];` declaration,
 /// delegating its type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its
 /// initializer/filter body to [`cel_parser::format_expr`].
+///
+/// - Complexity: O(n) output/document space plus layout and source-gap scans.
 fn write_cell(out: &mut String, source: &str, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
@@ -456,7 +519,13 @@ fn write_cell(out: &mut String, source: &str, cell: &ast::CellDecl, depth: usize
             .map(ast::TypeExpr::span)
             .unwrap_or(cell.name_span);
         out.push_str(&emit_decl_gap(source, op_start, expr.span(), &["="], depth));
-        out.push_str(&cel_parser::format_expr(expr, source, depth));
+        write_expression(
+            out,
+            source,
+            expr,
+            depth,
+            cell_clause_suffix(cell.filter.as_ref(), cell.require.as_ref()),
+        );
     }
     write_cell_clauses(
         out,
@@ -476,6 +545,8 @@ fn write_cell(out: &mut String, source: &str, cell: &ast::CellDecl, depth: usize
 /// between adjacent segments (initializer → `filter` → `require` → `;`), shared by [`write_cell`],
 /// [`write_source`], and [`write_out`]. `prev_*` give the end span of whichever of
 /// initializer/type/name precedes the clauses; `terminator` is the declaration's own `;` span.
+///
+/// - Complexity: O(n) output/document space plus layout and source-gap scans.
 #[allow(clippy::too_many_arguments)]
 fn write_cell_clauses(
     out: &mut String,
@@ -499,7 +570,13 @@ fn write_cell_clauses(
             &["filter"],
             depth,
         ));
-        out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
+        write_expression(
+            out,
+            source,
+            &filter.body,
+            depth,
+            if require.is_some() { 10 } else { 1 },
+        );
         prev = filter.body.span();
     }
     if let Some(require) = require {
@@ -527,6 +604,8 @@ fn write_cell_clauses(
 }
 
 /// Writes one `[ "@" identifier " " ] ...;` requirement.
+///
+/// - Complexity: O(n) output/document space plus layout and source-gap scans.
 fn write_requirement(out: &mut String, source: &str, req: &ast::RequirementDecl, depth: usize) {
     write_trivia(
         out,
@@ -550,7 +629,7 @@ fn write_requirement(out: &mut String, source: &str, req: &ast::RequirementDecl,
         }
         out.push(' ');
     }
-    out.push_str(&cel_parser::format_expr(&req.body, source, depth));
+    write_expression(out, source, &req.body, depth, 1);
     write_line_end(out, ";", req.trailing_line_comment.as_ref(), depth);
 }
 
@@ -574,6 +653,8 @@ fn write_require_block(out: &mut String, source: &str, require: &ast::RequireBlo
 }
 
 /// Writes one `out name[: type] := ...[ filter body][ require { ... } ];` declaration.
+///
+/// - Complexity: O(n) output/document space plus layout and source-gap scans.
 fn write_out(out: &mut String, source: &str, decl: &ast::OutDecl, depth: usize) {
     write_trivia(
         out,
@@ -602,7 +683,13 @@ fn write_out(out: &mut String, source: &str, decl: &ast::OutDecl, depth: usize) 
         &[":="],
         depth,
     ));
-    out.push_str(&cel_parser::format_expr(&decl.initializer, source, depth));
+    write_expression(
+        out,
+        source,
+        &decl.initializer,
+        depth,
+        cell_clause_suffix(decl.filter.as_ref(), decl.require.as_ref()),
+    );
     write_cell_clauses(
         out,
         source,
@@ -619,6 +706,8 @@ fn write_out(out: &mut String, source: &str, decl: &ast::OutDecl, depth: usize) 
 
 /// Writes one `source name[: type][ = initializer][ filter body][ require { ... }];` declaration.
 /// Mirrors [`write_cell`] exactly.
+///
+/// - Complexity: O(n) output/document space plus layout and source-gap scans.
 fn write_source(out: &mut String, source: &str, decl: &ast::SourceDecl, depth: usize) {
     write_trivia(
         out,
@@ -642,7 +731,13 @@ fn write_source(out: &mut String, source: &str, decl: &ast::SourceDecl, depth: u
             .map(ast::TypeExpr::span)
             .unwrap_or(decl.name_span);
         out.push_str(&emit_decl_gap(source, op_start, expr.span(), &["="], depth));
-        out.push_str(&cel_parser::format_expr(expr, source, depth));
+        write_expression(
+            out,
+            source,
+            expr,
+            depth,
+            cell_clause_suffix(decl.filter.as_ref(), decl.require.as_ref()),
+        );
     }
     write_cell_clauses(
         out,
@@ -778,6 +873,19 @@ pub fn format_source(source: &str) -> Result<String, FormatSourceError> {
 
 #[cfg(test)]
 mod tests {
+    /// Measures the active line, counting Unicode scalars rather than UTF-8 bytes.
+    #[test]
+    fn output_column_tracks_the_active_line() {
+        for (text, expected) in [
+            ("", 0),
+            ("cell é = ", 9),
+            ("old prefix\n    := ", 7),
+            ("line\n", 0),
+        ] {
+            assert_eq!(super::output_column(text), expected);
+        }
+    }
+
     /// Verifies grouped restricted subjects retain boundary comments exactly once and in order.
     #[test]
     fn grouped_conditional_headers_preserve_comments() {

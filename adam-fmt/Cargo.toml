@@ -8,6 +8,9 @@ description = "Formats adam-lang .adm2 source files in place"
 adam-lang = { path = "../adam-lang" }
 annotate-snippets = "0.12"
 
+[dev-dependencies]
+tempfile = "3"
+
 [lib]
 name = "adam_fmt"
 path = "src/lib.rs"
