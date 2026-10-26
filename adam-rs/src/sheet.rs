@@ -285,6 +285,22 @@ impl Sheet {
         id
     }
 
+    /// Returns the fixed concrete type of a live cell, or `None` for an invalid ID.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::any::TypeId;
+    /// use adam_rs::{CellId, Sheet};
+    /// let mut sheet = Sheet::new();
+    /// let cell = sheet.add_cell(7i32);
+    /// assert_eq!(sheet.cell_type_id(cell), Some(TypeId::of::<i32>()));
+    /// assert_eq!(sheet.cell_type_id(CellId::default()), None);
+    /// ```
+    pub fn cell_type_id(&self, id: CellId) -> Option<TypeId> {
+        self.cells.get(id).map(|cell| cell.type_id)
+    }
+
     /// Returns `id`'s fixed cell kind.
     ///
     /// Returns `None` if `id` is not a live cell in this sheet.

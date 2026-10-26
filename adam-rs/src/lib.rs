@@ -178,6 +178,7 @@ mod planner;
 pub mod relationship;
 pub mod requirement;
 pub mod sheet;
+pub mod template;
 
 pub use cell::{CellId, CellKind};
 pub use conditional::{ConditionalId, MatchExpr};
@@ -186,3 +187,7 @@ pub use filter::{Filter, FilterKind, FilterViolation};
 pub use relationship::{Method, RelationshipId};
 pub use requirement::{Requirement, RequirementId};
 pub use sheet::Sheet;
+pub use template::{
+    CellSlot, Instance, MethodRecipe, RelationshipSlot, SheetTemplate, TemplateBuilder,
+    TemplateError, TemplateInclusion,
+};
