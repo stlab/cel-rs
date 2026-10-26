@@ -8,9 +8,9 @@ use crate::{CellId, Error};
 
 /// Identifies a malformed recipe, binding, factory, or native graph construction.
 ///
-/// Binding and structural errors precede destination mutation. Factory and native
-/// construction failures may leave partial structure; the sheet remains safe to
-/// discard. See [`super::SheetTemplate::instantiate`].
+/// Binding and declared-structure errors precede destination mutation. Factory-result
+/// validation, allocation and native construction failures may leave partial structure;
+/// the sheet remains safe to discard. See [`super::SheetTemplate::instantiate`].
 #[derive(Debug)]
 pub enum TemplateError {
     /// A binding names no formal parameter.
@@ -83,6 +83,11 @@ pub enum TemplateError {
         /// The private cell or first declared method output.
         slot: CellSlot,
     },
+    /// A conditional's repeatable match-expression factory failed.
+    ConditionalFactory {
+        /// The underlying factory failure.
+        source: anyhow::Error,
+    },
     /// An existing native graph mutator rejected construction.
     Runtime(Error),
 }
@@ -119,6 +124,9 @@ impl fmt::Display for TemplateError {
             Self::Factory { source, slot } => {
                 write!(f, "template factory failed at {slot:?}: {source}")
             }
+            Self::ConditionalFactory { source } => {
+                write!(f, "template conditional factory failed: {source}")
+            }
             Self::Runtime(source) => write!(f, "native template construction failed: {source}"),
         }
     }
@@ -129,6 +137,7 @@ impl std::error::Error for TemplateError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Factory { source, .. } => Some(source.as_ref()),
+            Self::ConditionalFactory { source } => Some(source.as_ref()),
             Self::Runtime(source) => Some(source),
             _ => None,
         }

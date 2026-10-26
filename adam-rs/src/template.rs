@@ -152,11 +152,38 @@ struct CellRecipe {
 enum Item {
     Cell(usize),
     Relationship(usize),
+    Policy(PolicyRecipe),
+    Conditional(ConditionalRecipe),
+}
+
+/// Registers one checked private-cell policy with fresh execution state.
+type PolicyFactory = dyn Fn(&mut Sheet, CellId, &[CellId]) -> Result<(), TemplateError>;
+
+/// Retains the private target and declared inputs of an ordered filter or requirement.
+struct PolicyRecipe {
+    cell: CellSlot,
+    inputs: Vec<CellSlot>,
+    make: Box<PolicyFactory>,
+}
+
+/// Registers a conditional using the expanded live members of its local groups.
+type ConditionalFactory = dyn Fn(
+    &mut Sheet,
+    &[CellId],
+    &[std::ops::Range<usize>],
+    &[RelationshipId],
+) -> Result<(), TemplateError>;
+
+/// Retains declared match inputs and a type-erased native conditional constructor.
+struct ConditionalRecipe {
+    inputs: Vec<CellSlot>,
+    make: Box<ConditionalFactory>,
 }
 
 /// Owns one relationship or a compact child-DAG edge with local formal bindings.
 enum RelationshipRecipe {
     Methods(Vec<MethodRecipe>),
+    Out(MethodRecipe),
     Include {
         child: Rc<SheetTemplate>,
         bindings: HashMap<usize, CellSlot>,
@@ -176,12 +203,17 @@ pub struct SheetTemplate {
     written_cells: HashSet<usize>,
     /// Caches the transitive relationship-only classification.
     relationship_only: bool,
+    /// Memoizes checked expanded storage/work, with `None` denoting overflow.
+    expanded_size: Option<usize>,
+    /// Bounds the explicit traversal stack without traversing descendants.
+    depth: Option<usize>,
 }
 
 impl SheetTemplate {
-    /// Returns whether expansion allocates no private cells.
+    /// Returns whether expansion contains only relationships and parameter declarations.
     ///
-    /// Parameters do not count as private cells. An empty recipe qualifies.
+    /// Private cells, policies, outputs and conditionals disqualify a recipe transitively.
+    /// An empty recipe qualifies, independently of source specialization.
     ///
     /// # Examples
     ///

@@ -5,10 +5,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use super::{
-    CellFactory, CellRecipe, CellSlot, Item, MethodRecipe, RelationshipRecipe, RelationshipSlot,
-    SheetTemplate, TemplateError, TemplateInclusion,
+    CellFactory, CellRecipe, CellSlot, ConditionalRecipe, Item, MethodRecipe, PolicyRecipe,
+    RelationshipRecipe, RelationshipSlot, SheetTemplate, TemplateError, TemplateInclusion,
 };
-use crate::{CellKind, Sheet};
+use crate::conditional::MatchSource;
+use crate::{CellId, CellKind, Filter, MatchExpr, Requirement, Sheet};
 
 /// Owns declarations and validates all local references before accepting them.
 ///
@@ -17,6 +18,10 @@ use crate::{CellKind, Sheet};
 pub struct TemplateBuilder {
     recipe: SheetTemplate,
     names: HashSet<String>,
+    /// Tracks local groups already owned by a conditional.
+    conditional_groups: HashSet<usize>,
+    /// Tracks private cells already assigned a filter.
+    filtered: HashSet<usize>,
 }
 
 impl Default for TemplateBuilder {
@@ -46,8 +51,12 @@ impl TemplateBuilder {
                 items: Vec::new(),
                 written_cells: HashSet::new(),
                 relationship_only: true,
+                expanded_size: Some(0),
+                depth: Some(1),
             },
             names: HashSet::new(),
+            conditional_groups: HashSet::new(),
+            filtered: HashSet::new(),
         }
     }
 
@@ -106,7 +115,7 @@ impl TemplateBuilder {
 
     /// Declares a private source initialized afresh for every live instance.
     ///
-    /// A source cannot be a declared method output.
+    /// Specialization removes every whole method that writes a source.
     ///
     /// # Errors
     ///
@@ -181,7 +190,7 @@ impl TemplateBuilder {
     /// Appends a relationship after validating owners and native edge-set rules.
     ///
     /// Methods must reference the same cell set and have distinct, non-nested
-    /// output sets. Private sources cannot be outputs.
+    /// output sets. Source-writing methods remain authored until specialization.
     ///
     /// # Errors
     ///
@@ -236,10 +245,10 @@ impl TemplateBuilder {
         if let Some(slot) = methods
             .iter()
             .flat_map(|m| &m.outputs)
-            .find(|s| self.recipe.cells[s.index].kind == CellKind::Source)
+            .find(|s| self.recipe.cells[s.index].kind == CellKind::Out)
         {
             return Err(TemplateError::InvalidDefinition {
-                detail: "a private source cannot be a method output",
+                detail: "an out cell already has its sole writer",
                 slot: Some(slot.clone()),
             });
         }
@@ -278,6 +287,340 @@ impl TemplateBuilder {
         Ok(())
     }
 
+    /// Promotes a private ordinary cell through its sole, single-output writer.
+    ///
+    /// Formal parameters cannot become outputs. Requirements attach separately,
+    /// in declaration order, through [`Self::require`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TemplateError::InvalidDefinition`] for a non-private, non-ordinary,
+    /// multiply-written, or non-single output; also returns relationship validation errors.
+    ///
+    /// - Complexity: O(i + r) time and O(i) space for inputs i and prior output summaries r.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use adam_rs::{TemplateBuilder, MethodRecipe, Method};
+    /// let mut b = TemplateBuilder::new();
+    /// let input = b.parameter::<i32>("input")?;
+    /// let output = b.cell("output", || Ok(0i32))?;
+    /// b.out(MethodRecipe::new(&[input], &[output], |i, o| {
+    ///     Ok(Method::from_fn_1_1(i[0], o[0], |x: &i32| Ok(*x)))
+    /// })?)?;
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn out(&mut self, writer: MethodRecipe) -> Result<RelationshipSlot, TemplateError> {
+        self.validate_relationship(std::slice::from_ref(&writer))?;
+        let output = &writer.outputs[0];
+        self.check_private(output)?;
+        if writer.outputs.len() != 1
+            || self.recipe.cells[output.index].kind != CellKind::Cell
+            || self.recipe.written_cells.contains(&output.index)
+        {
+            return Err(TemplateError::InvalidDefinition {
+                detail: "out requires one private ordinary cell with no prior writer",
+                slot: Some(output.clone()),
+            });
+        }
+        self.recipe
+            .relationships
+            .try_reserve(1)
+            .map_err(|_| TemplateError::Capacity)?;
+        self.recipe
+            .items
+            .try_reserve(1)
+            .map_err(|_| TemplateError::Capacity)?;
+        let index = self.recipe.relationships.len();
+        self.recipe.cells[output.index].kind = CellKind::Out;
+        self.recipe.written_cells.insert(output.index);
+        self.recipe
+            .relationships
+            .push(RelationshipRecipe::Out(writer));
+        self.recipe.items.push(Item::Relationship(index));
+        self.recipe.relationship_only = false;
+        Ok(RelationshipSlot {
+            owner: self.recipe.owner.clone(),
+            index,
+        })
+    }
+
+    /// Rejects policy targets that are not private declarations of this owner.
+    fn check_private(&self, cell: &CellSlot) -> Result<(), TemplateError> {
+        self.check_slot(cell)?;
+        if self.recipe.cells[cell.index].make.is_none() {
+            return Err(TemplateError::InvalidDefinition {
+                detail: "component policies and out writers require private targets",
+                slot: Some(cell.clone()),
+            });
+        }
+        Ok(())
+    }
+
+    /// Attaches one freshly constructed filter to a private cell.
+    ///
+    /// The factory receives the live target and positional dynamic arguments.
+    /// Its filter must declare those exact arguments and their concrete types.
+    ///
+    /// # Errors
+    ///
+    /// Returns ownership, capacity, or [`TemplateError::InvalidDefinition`] errors
+    /// for a formal target, duplicate filter, or self-dependent filter.
+    ///
+    /// - Complexity: O(i) time and space for i inputs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use adam_rs::{TemplateBuilder, Filter};
+    /// let mut b = TemplateBuilder::new();
+    /// let x = b.cell("x", || Ok(0i32))?;
+    /// b.filter(&x, &[], |_, _| Ok(Filter::from_fn_0(|x: &i32| Ok((*x).max(0)))))?;
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn filter<F>(
+        &mut self,
+        cell: &CellSlot,
+        inputs: &[CellSlot],
+        make: F,
+    ) -> Result<(), TemplateError>
+    where
+        F: Fn(CellId, &[CellId]) -> anyhow::Result<Filter> + 'static,
+    {
+        self.check_private(cell)?;
+        if self.filtered.contains(&cell.index) || inputs.contains(cell) {
+            return Err(TemplateError::InvalidDefinition {
+                detail: "duplicate or self-dependent filter",
+                slot: Some(cell.clone()),
+            });
+        }
+        let slot = cell.clone();
+        self.add_policy(
+            cell,
+            inputs,
+            Box::new(move |sheet, target, ids| {
+                let filter = make(target, ids).map_err(|source| TemplateError::Factory {
+                    source,
+                    slot: slot.clone(),
+                })?;
+                if filter.0.args != ids
+                    || filter.0.value_type != sheet.cell_type_id(target).unwrap()
+                    || !super::instantiate::signature_matches(sheet, ids, &filter.0.arg_types)
+                {
+                    return Err(TemplateError::InvalidDefinition {
+                        detail: "filter factory signature differs from its recipe",
+                        slot: Some(slot.clone()),
+                    });
+                }
+                sheet
+                    .add_filter(target, filter)
+                    .map_err(TemplateError::Runtime)
+            }),
+        )?;
+        self.filtered.insert(cell.index);
+        Ok(())
+    }
+
+    /// Attaches a freshly constructed requirement to a private cell.
+    ///
+    /// The factory must declare exactly the supplied positional inputs and types.
+    /// Native attachment evaluates ordinary/source requirements immediately;
+    /// output requirements wait until propagation.
+    ///
+    /// # Errors
+    ///
+    /// Returns ownership, capacity, or [`TemplateError::InvalidDefinition`] errors
+    /// for a formal target. Factory and native errors occur during instantiation.
+    ///
+    /// - Complexity: O(i) time and space for i inputs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use adam_rs::{TemplateBuilder, Requirement};
+    /// let mut b = TemplateBuilder::new();
+    /// let x = b.cell("x", || Ok(1i32))?;
+    /// b.require(&x, &[x.clone()], |i| Ok(Requirement::from_fn_1(i[0], |x: &i32| Ok(*x > 0))))?;
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn require<F>(
+        &mut self,
+        cell: &CellSlot,
+        inputs: &[CellSlot],
+        make: F,
+    ) -> Result<(), TemplateError>
+    where
+        F: Fn(&[CellId]) -> anyhow::Result<Requirement> + 'static,
+    {
+        let slot = cell.clone();
+        self.add_policy(
+            cell,
+            inputs,
+            Box::new(move |sheet, target, ids| {
+                let requirement = make(ids).map_err(|source| TemplateError::Factory {
+                    source,
+                    slot: slot.clone(),
+                })?;
+                if requirement.inputs != ids
+                    || !super::instantiate::signature_matches(sheet, ids, &requirement.input_types)
+                {
+                    return Err(TemplateError::InvalidDefinition {
+                        detail: "requirement factory signature differs from its recipe",
+                        slot: Some(slot.clone()),
+                    });
+                }
+                sheet
+                    .add_requirement(target, requirement)
+                    .map(|_| ())
+                    .map_err(TemplateError::Runtime)
+            }),
+        )
+    }
+
+    /// Appends a private policy after validating all local input owners.
+    ///
+    /// - Complexity: O(i) time and space for i inputs.
+    fn add_policy(
+        &mut self,
+        cell: &CellSlot,
+        inputs: &[CellSlot],
+        make: Box<super::PolicyFactory>,
+    ) -> Result<(), TemplateError> {
+        self.check_private(cell)?;
+        for input in inputs {
+            self.check_slot(input)?;
+        }
+        self.recipe
+            .items
+            .try_reserve(1)
+            .map_err(|_| TemplateError::Capacity)?;
+        self.recipe.items.push(Item::Policy(PolicyRecipe {
+            cell: cell.clone(),
+            inputs: inputs.to_vec(),
+            make,
+        }));
+        self.recipe.relationship_only = false;
+        Ok(())
+    }
+
+    /// Registers native conditional branches over direct relationships or included groups.
+    ///
+    /// Included groups must be transitively relationship-only before specialization.
+    /// Each constituent remains a distinct native relationship; no extra activation
+    /// layer is introduced. Keys follow native first-match semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TemplateError::ConditionalComponent`] for stateful groups, or
+    /// [`TemplateError::InvalidDefinition`] for foreign, reused, or duplicate groups
+    /// or empty branch keys. Input ownership and capacity errors are also reported.
+    ///
+    /// - Complexity: O(i + g + k) time and space for inputs i, groups g, and keys k.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use adam_rs::{TemplateBuilder, MatchExpr};
+    /// let mut b = TemplateBuilder::new();
+    /// let guard = b.parameter::<bool>("guard")?;
+    /// b.conditional(&[guard], |i| Ok(MatchExpr::cell(i[0])), vec![(vec![true], vec![])], vec![])?;
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn conditional<T, F>(
+        &mut self,
+        inputs: &[CellSlot],
+        make: F,
+        branches: Vec<(Vec<T>, Vec<RelationshipSlot>)>,
+        default: Vec<RelationshipSlot>,
+    ) -> Result<(), TemplateError>
+    where
+        T: Clone + Any + PartialEq + 'static,
+        F: Fn(&[CellId]) -> anyhow::Result<MatchExpr> + 'static,
+    {
+        for input in inputs {
+            self.check_slot(input)?;
+        }
+        if branches.iter().any(|(keys, _)| keys.is_empty()) {
+            return Err(TemplateError::InvalidDefinition {
+                detail: "conditional branch requires keys",
+                slot: None,
+            });
+        }
+        let mut seen = HashSet::new();
+        for group in branches.iter().flat_map(|(_, g)| g).chain(&default) {
+            if !Rc::ptr_eq(&self.recipe.owner, &group.owner)
+                || group.index >= self.recipe.relationships.len()
+                || self.conditional_groups.contains(&group.index)
+                || !seen.insert(group.index)
+            {
+                return Err(TemplateError::InvalidDefinition {
+                    detail: "foreign or already conditional relationship group",
+                    slot: None,
+                });
+            }
+            let eligible = match &self.recipe.relationships[group.index] {
+                RelationshipRecipe::Methods(_) => true,
+                RelationshipRecipe::Out(_) => false,
+                RelationshipRecipe::Include { child, .. } => child.relationship_only,
+            };
+            if !eligible {
+                return Err(TemplateError::ConditionalComponent);
+            }
+        }
+        self.recipe
+            .items
+            .try_reserve(1)
+            .map_err(|_| TemplateError::Capacity)?;
+        self.recipe.items.push(Item::Conditional(ConditionalRecipe {
+            inputs: inputs.to_vec(),
+            make: Box::new(move |sheet, ids, groups, relationships| {
+                let source =
+                    make(ids).map_err(|source| TemplateError::ConditionalFactory { source })?;
+                let valid = match &source.0 {
+                    MatchSource::Cell(id) => {
+                        ids == [*id] && sheet.cell_type_id(*id) == Some(TypeId::of::<T>())
+                    }
+                    MatchSource::Expr(expr) => {
+                        expr.inputs == ids
+                            && expr.output_type == TypeId::of::<T>()
+                            && super::instantiate::signature_matches(sheet, ids, &expr.input_types)
+                    }
+                };
+                if !valid {
+                    return Err(TemplateError::InvalidDefinition {
+                        detail: "conditional factory signature differs from its recipe",
+                        slot: None,
+                    });
+                }
+                let mut live_branches = Vec::new();
+                live_branches
+                    .try_reserve(branches.len())
+                    .map_err(|_| TemplateError::Capacity)?;
+                for (keys, slots) in &branches {
+                    let mut live_keys = Vec::new();
+                    live_keys
+                        .try_reserve(keys.len())
+                        .map_err(|_| TemplateError::Capacity)?;
+                    live_keys.extend_from_slice(keys);
+                    live_branches.push((
+                        live_keys,
+                        super::instantiate::group_members(slots, groups, relationships)?,
+                    ));
+                }
+                let live_default =
+                    super::instantiate::group_members(&default, groups, relationships)?;
+                sheet
+                    .add_conditional(source, live_branches, live_default)
+                    .map(|_| ())
+                    .map_err(TemplateError::Runtime)
+            }),
+        }));
+        self.conditional_groups.extend(seen);
+        self.recipe.relationship_only = false;
+        Ok(())
+    }
+
     /// Appends a compact child-DAG edge with checked named bindings.
     ///
     /// Binding and structural failures leave the builder unchanged. Immutable
@@ -289,7 +632,7 @@ impl TemplateBuilder {
     ///
     /// Returns binding errors for unknown, missing, duplicate, aliased, foreign,
     /// or wrongly typed arguments; returns [`TemplateError::InvalidDefinition`]
-    /// for a source output, or [`TemplateError::Capacity`] on expansion overflow.
+    /// for a private out argument, or [`TemplateError::Capacity`] on reservation failure.
     ///
     /// - Complexity: Expected O(c + b) time and space for the child's own local
     ///   cells c and bindings b, independent of transitive expansion size.
@@ -314,14 +657,12 @@ impl TemplateBuilder {
             self.check_slot(slot)?;
             Ok(self.recipe.cells[slot.index].type_id)
         })?;
-        if let Some(slot) = child
-            .written_cells
-            .iter()
-            .filter_map(|i| bound.get(i))
-            .find(|s| self.recipe.cells[s.index].kind == CellKind::Source)
+        if let Some(slot) = bound
+            .values()
+            .find(|s| self.recipe.cells[s.index].kind == CellKind::Out)
         {
             return Err(TemplateError::InvalidDefinition {
-                detail: "an included method writes a private source",
+                detail: "an included parameter cannot bind an out cell",
                 slot: Some(slot.clone()),
             });
         }
@@ -360,13 +701,55 @@ impl TemplateBuilder {
     ///
     /// # Errors
     ///
-    /// All current structural errors are reported by declaration mutators.
-    /// The fallible boundary also supports later native recipe kinds.
+    /// Rejects included parameters that became private outputs after inclusion.
+    /// Expanded-size overflow is retained for diagnosis before live expansion.
+    ///
+    /// - Complexity: O(n + e) time for local declarations n and edges e; no DAG expansion.
     ///
     /// # Examples
     ///
     /// See the [module example](super).
-    pub fn finish(self) -> Result<SheetTemplate, TemplateError> {
+    pub fn finish(mut self) -> Result<SheetTemplate, TemplateError> {
+        let mut size = self
+            .recipe
+            .cells
+            .len()
+            .checked_add(self.recipe.items.len())
+            .and_then(|n| n.checked_add(self.recipe.relationships.len()));
+        let mut depth = Some(1usize);
+        for relationship in &self.recipe.relationships {
+            match relationship {
+                RelationshipRecipe::Include { child, bindings } => {
+                    if let Some(slot) = bindings
+                        .values()
+                        .find(|s| self.recipe.cells[s.index].kind == CellKind::Out)
+                    {
+                        return Err(TemplateError::InvalidDefinition {
+                            detail: "an included parameter cannot bind an out cell",
+                            slot: Some(slot.clone()),
+                        });
+                    }
+                    size = size.and_then(|n| child.expanded_size.and_then(|c| n.checked_add(c)));
+                    depth = depth
+                        .and_then(|d| child.depth.and_then(|c| c.checked_add(1)).map(|c| d.max(c)));
+                }
+                RelationshipRecipe::Methods(methods) => {
+                    for method in methods {
+                        size = size
+                            .and_then(|n| n.checked_add(method.inputs.len()))
+                            .and_then(|n| n.checked_add(method.outputs.len()))
+                            .and_then(|n| n.checked_add(1));
+                    }
+                }
+                RelationshipRecipe::Out(method) => {
+                    size = size
+                        .and_then(|n| n.checked_add(method.inputs.len()))
+                        .and_then(|n| n.checked_add(method.outputs.len()));
+                }
+            }
+        }
+        self.recipe.expanded_size = size;
+        self.recipe.depth = depth;
         Ok(self.recipe)
     }
 }

@@ -740,6 +740,23 @@ impl Sheet {
         writer: Method,
         requirements: Vec<Requirement>,
     ) -> Result<CellId, Error> {
+        let out_cell = writer
+            .outputs
+            .first()
+            .copied()
+            .ok_or(Error::InvalidOutput)?;
+        self.add_out_writer(writer)?;
+        for requirement in requirements {
+            self.add_requirement(out_cell, requirement)?;
+        }
+        Ok(out_cell)
+    }
+
+    /// Registers the sole output writer and returns its native relationship identity.
+    ///
+    /// Reports the same writer validation errors as [`Self::add_out`].
+    /// - Complexity: O(r × e + i) for prior relationships r, edges e and writer inputs i.
+    pub(crate) fn add_out_writer(&mut self, writer: Method) -> Result<RelationshipId, Error> {
         if writer.outputs.len() != 1 {
             return Err(Error::InvalidOutput);
         }
@@ -750,14 +767,9 @@ impl Sheet {
             return Err(Error::InvalidCellKind { sites: vec![] });
         }
 
-        self.add_relationship(vec![writer])?;
+        let relationship = self.add_relationship(vec![writer])?;
         self.cells[out_cell].kind = CellKind::Out;
-
-        for requirement in requirements {
-            self.add_requirement(out_cell, requirement)?;
-        }
-
-        Ok(out_cell)
+        Ok(relationship)
     }
 
     /// Attaches `filter` to `cell`.
