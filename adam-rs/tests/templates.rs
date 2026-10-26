@@ -382,10 +382,24 @@ fn failed_method_factory_reports_its_local_site() {
     }
 }
 
-/// Detects accepting caller-owned out cells even when used only as inputs.
+/// Detects initializing private cells before rejecting out cells in either formal position.
 #[test]
 fn out_arguments_are_rejected_before_private_initialization() {
-    let template = identity();
+    let initializations = Rc::new(std::cell::Cell::new(0usize));
+    let observed = initializations.clone();
+    let mut builder = TemplateBuilder::new();
+    let input = builder.parameter::<i32>("input").unwrap();
+    let output = builder.parameter::<i32>("output").unwrap();
+    builder
+        .cell("private", move || {
+            observed.set(observed.get().checked_add(1).unwrap());
+            Ok(0i32)
+        })
+        .unwrap();
+    builder
+        .include(Rc::new(identity()), &[("input", input), ("output", output)])
+        .unwrap();
+    let template = builder.finish().unwrap();
     let mut sheet = Sheet::new();
     let source = sheet.add_source(7i32);
     let out = sheet.add_cell(0i32);
@@ -393,10 +407,18 @@ fn out_arguments_are_rejected_before_private_initialization() {
         .add_out(Method::from_fn_1_1(source, out, |x: &i32| Ok(*x)), vec![])
         .unwrap();
     let ordinary = sheet.add_cell(0i32);
-    assert!(
-        matches!(template.instantiate(&mut sheet, &[("input", out), ("output", ordinary)]),
-        Err(TemplateError::OutArgument { actual, .. }) if actual == out)
-    );
+    for bindings in [
+        [("input", out), ("output", ordinary)],
+        [("input", ordinary), ("output", out)],
+    ] {
+        let result = template.instantiate(&mut sheet, &bindings);
+        assert_eq!(initializations.get(), 0);
+        assert!(matches!(result, Err(TemplateError::OutArgument { actual, .. }) if actual == out));
+    }
+    template
+        .instantiate(&mut sheet, &[("input", source), ("output", ordinary)])
+        .unwrap();
+    assert_eq!(initializations.get(), 1);
 }
 
 /// Detects inclusion bypassing the same name, alias, and type rules as live use.
