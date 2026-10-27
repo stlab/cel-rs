@@ -371,6 +371,119 @@ fn resolution_borrows_native_definitions_without_execution() {
     assert_eq!(calls.get(), 0);
 }
 
+/// Builds a source-free template retaining exactly the supplied definition label.
+fn native_with_label(label: SourceLabel) -> adam_lang::TypedTemplate {
+    let mut builder = CompositionBuilder::new(TypeRegistry::new());
+    builder.set_label(label);
+    builder.finish().unwrap()
+}
+
+/// Labels a real helper-name range with an independently owned native source.
+fn located_native_label(file_name: &str, description: &str) -> SourceLabel {
+    let source = adam_lang::SourceMap::new().insert(file_name, "sheet helper() {}");
+    SourceLabel {
+        location: Some(adam_lang::SourceLocation {
+            source,
+            span: cel_parser::SourceSpan::new(1, 6, 1, 12),
+        }),
+        label: description.into(),
+    }
+}
+
+/// Preserves both genuine declaration owners when native insertion collides with parsed code.
+#[test]
+fn native_after_parsed_duplicates_retain_both_locations() {
+    let mut modules = ModuleSet::new();
+    insert(&mut modules, "lib", "sheet helper() {}");
+    let incoming = native_with_label(located_native_label(
+        "native-incoming.adm2",
+        "incoming native",
+    ));
+    let error = modules
+        .insert_template(path("lib"), "helper", incoming)
+        .unwrap_err();
+    drop(modules);
+
+    assert!(error.message.contains("duplicate"));
+    assert_eq!(error.labels.len(), 2);
+    assert_eq!(error.labels[0].label, "incoming native");
+    let files = error
+        .labels
+        .iter()
+        .map(|label| {
+            let location = label.location.as_ref().unwrap();
+            let text = location.source.text();
+            assert_eq!(&text[location.span.to_byte_range(text)], "helper");
+            location.source.file_name()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(files, ["native-incoming.adm2", "lib.adm2"]);
+}
+
+/// Preserves the span-free native site when a later parsed declaration collides.
+#[test]
+fn parsed_after_native_duplicates_retain_source_free_labels() {
+    let mut modules = ModuleSet::new();
+    modules
+        .insert_template(
+            path("lib"),
+            "helper",
+            native_with_label(SourceLabel {
+                location: None,
+                label: "existing native".into(),
+            }),
+        )
+        .unwrap();
+    insert(&mut modules, "lib", "sheet helper() {}");
+    let errors = modules.check_resolution().unwrap_err();
+    drop(modules);
+
+    let error = error_containing(&errors, "duplicate");
+    assert_eq!(error.labels.len(), 2);
+    let parsed = error.labels[0].location.as_ref().unwrap();
+    assert_eq!(parsed.source.file_name(), "lib.adm2");
+    assert_eq!(parsed.source.text(), "sheet helper() {}");
+    assert_eq!(error.labels[1].label, "existing native");
+    assert!(error.labels[1].location.is_none());
+}
+
+/// Preserves incoming source-free and existing located native sites after collection drop.
+#[test]
+fn native_after_native_duplicates_retain_supplied_owners() {
+    let mut modules = ModuleSet::new();
+    modules
+        .insert_template(
+            path("lib"),
+            "helper",
+            native_with_label(located_native_label(
+                "native-existing.adm2",
+                "existing native",
+            )),
+        )
+        .unwrap();
+    let incoming = native_with_label(SourceLabel {
+        location: None,
+        label: "incoming native".into(),
+    });
+    let error = modules
+        .insert_template(path("lib"), "helper", incoming)
+        .unwrap_err();
+    drop(modules);
+
+    assert!(error.message.contains("duplicate"));
+    assert_eq!(error.labels.len(), 2);
+    assert_eq!(error.labels[0].label, "incoming native");
+    assert!(error.labels[0].location.is_none());
+    assert_eq!(error.labels[1].label, "existing native");
+    let existing = error.labels[1].location.as_ref().unwrap();
+    assert_eq!(existing.source.file_name(), "native-existing.adm2");
+    assert_eq!(existing.source.text(), "sheet helper() {}");
+    assert_eq!(
+        &existing.source.text()[existing.span.to_byte_range(existing.source.text())],
+        "helper"
+    );
+}
+
 /// Handles deep dependency chains and shared descendants without recursive traversal.
 #[test]
 fn deep_compact_dependency_graphs_are_checked_iteratively() {

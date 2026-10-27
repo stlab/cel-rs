@@ -135,6 +135,7 @@ impl ModuleSet {
     /// # Errors
     /// Rejects malformed syntax or a second source file for the same module.
     /// Diagnostics own their source even after this collection is dropped.
+    /// The collection does not retain rejected malformed source revisions.
     /// - Complexity: O(n) source and AST size, excluding embedded CEL parsing.
     ///
     /// # Examples
@@ -152,13 +153,13 @@ impl ModuleSet {
                 "module already has a source file",
             ));
         }
-        let owner = self.sources.insert(file_name, source);
         let parsed = AdamAstParser::new()
             .parse_module_str(source)
-            .map_err(|error| parse_error(&owner, &error))?;
+            .map_err(|error| rejected_source_error(file_name, source, &error))?;
         if let Some(error) = parsed.errors.first() {
-            return Err(parse_error(&owner, error));
+            return Err(rejected_source_error(file_name, source, error));
         }
+        let owner = self.sources.insert(file_name, source);
         let entry = self.entry(path);
         entry.source = Some(owner.clone());
         for item in parsed.items {
@@ -182,7 +183,8 @@ impl ModuleSet {
     /// Native and parsed definitions share the module's export namespace.
     /// # Errors
     /// Rejects invalid identifiers or an already declared local definition.
-    /// - Complexity: O(d + b) existing local definitions and compared name bytes.
+    /// Duplicate errors retain the incoming and earlier declaration labels.
+    /// - Complexity: O(d + b) existing local definitions and compared/copied name/label bytes.
     ///
     /// # Examples
     /// ```
@@ -201,12 +203,18 @@ impl ModuleSet {
             return Err(crate::composition::diagnostic("invalid definition name"));
         }
         let entry = self.entry(path);
-        if entry
+        if let Some(existing) = entry
             .definitions
             .iter()
-            .any(|definition| definition.name == name)
+            .find(|definition| definition.name == name)
         {
-            return Err(crate::composition::diagnostic("duplicate local definition"));
+            return Err(ModuleDiagnostic {
+                message: "duplicate local definition".into(),
+                labels: vec![
+                    template.definition_label().clone(),
+                    existing.label().clone(),
+                ],
+            });
         }
         entry.definitions.push(Definition {
             name: name.into(),
@@ -307,4 +315,77 @@ fn parse_error(source: &SourceId, error: &crate::ParseError) -> ModuleDiagnostic
             label: secondary.label.clone(),
         }));
     diagnostic
+}
+
+/// Owns rejected text exclusively through the returned diagnostic's genuine labels.
+///
+/// - Complexity: O(f + t + l) file name, source text and diagnostic label bytes.
+fn rejected_source_error(
+    file_name: &str,
+    text: &str,
+    error: &crate::ParseError,
+) -> ModuleDiagnostic {
+    let owner = SourceMap::new().insert(file_name, text);
+    parse_error(&owner, error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Retains only accepted source revisions while each failure owns its diagnostic source.
+    #[test]
+    fn rejected_source_revisions_do_not_enter_the_source_collection() {
+        let mut modules = ModuleSet::new();
+        let template = crate::CompositionBuilder::new(crate::TypeRegistry::new())
+            .finish()
+            .unwrap();
+        modules
+            .insert_template("app".parse().unwrap(), "helper", template)
+            .unwrap();
+        let mut retained_error = None;
+        for revision in 0..8usize {
+            let source = if revision % 2 == 0 {
+                format!("sheet broken( // revision {revision}")
+            } else {
+                format!("sheet broken {{ cell x: ; }} // revision {revision}")
+            };
+            let error = modules
+                .insert_source(
+                    "app".parse().unwrap(),
+                    &format!("rejected-{revision}.adm2"),
+                    &source,
+                )
+                .unwrap_err();
+            assert_eq!(
+                modules.sources.sources().len(),
+                0,
+                "failed revision {revision} retained"
+            );
+            retained_error = Some(error);
+        }
+        modules
+            .insert_source(
+                "app".parse().unwrap(),
+                "accepted.adm2",
+                "sheet wrapper() { relationship helper(); }",
+            )
+            .unwrap();
+        assert_eq!(modules.sources.sources().len(), 1);
+        assert_eq!(modules.sources.sources()[0].file_name(), "accepted.adm2");
+        modules.check_resolution().unwrap();
+        drop(modules);
+
+        let error = retained_error.unwrap();
+        let location = error.labels[0].location.as_ref().unwrap();
+        assert_eq!(location.source.file_name(), "rejected-7.adm2");
+        assert_eq!(
+            location.source.text(),
+            "sheet broken { cell x: ; } // revision 7"
+        );
+        assert_eq!(
+            &location.source.text()[location.span.to_byte_range(location.source.text())],
+            ";"
+        );
+    }
 }
