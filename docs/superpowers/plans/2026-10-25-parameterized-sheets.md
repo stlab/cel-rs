@@ -417,6 +417,11 @@ These gates preserve the approved feature scope and public interfaces:
    imports, definition-use cycle checks and nonexecuting body compilation through
    5B's adapters. Keep root instantiation with Task 6.
 
+Within 5C, review collection/name resolution, borrowed signature/body analysis,
+and owned factory materialization as separate prerequisites. Resolution alone
+does not complete 5C. The borrowed analysis returns a checked-body plan that
+both the nonexecuting checker and owning compiler consume.
+
 Each gate supplies focused contract tests, exact validation evidence, an
 implementation commit and an independent review before the next gate begins.
 Source-free diagnostics carry absent locations rather than invented spans.
@@ -485,8 +490,11 @@ internal compilation entry point. Remove `AdamParser::op_lookup_mut` and
 install libraries before `AdamParser::new`, updating its current test caller.
 Do not clone an owning `OpLookup` or add shared mutable registry state to keep
 the old mutation API.
-Add `check_module(&ast::Module, &ModuleSet, &TypeRegistry, &OpLookup)
+Use `check_module(&ModulePath, &ModuleSet, &TypeRegistry, &OpLookup)
 -> Vec<ModuleDiagnostic>` for nonexecuting tooling checks.
+Gate 5C's borrowed analysis implements this entry point; Task 6 integrates it.
+The explicit path selects the AST and source owner already registered in the
+module collection, rather than guessing which file an unassociated AST replaces.
 
 - [ ] **Step 1:** Add `composed_matches_manual_inline`: typed `ordered`, two
   independently used multiply components, a wrapper with a private helper, and
