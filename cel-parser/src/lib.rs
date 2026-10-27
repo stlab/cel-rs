@@ -315,6 +315,8 @@
 //! ```
 
 pub mod ast;
+mod compile;
+pub use compile::compile_expr;
 mod error;
 mod fmt;
 pub mod lex_lexer;

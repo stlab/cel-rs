@@ -436,6 +436,7 @@ impl OpLookup {
         segment: &mut DynSegment,
         arity: usize,
         span: SourceSpan,
+        library_only: bool,
     ) -> Result<bool> {
         if arity == 0
             && let Some(function) = self.registered.functions.iter().find(|f| f.name == name)
@@ -456,7 +457,13 @@ impl OpLookup {
                 .find(|f| f.marker.type_id() == marker_type)
             {
                 let ambient_start = segment.stack_offset_before_top(arity)?;
-                if self.lookup_direct_operation(function.name, segment, arity - 1, span)? {
+                if self.lookup_direct_operation_scoped(
+                    function.name,
+                    segment,
+                    arity - 1,
+                    span,
+                    library_only,
+                )? {
                     segment.make_tuple(2, ambient_start)?;
                     segment.tuple_index(1)?;
                     return Ok(true);
