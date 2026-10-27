@@ -74,6 +74,7 @@ struct SourceFrame<'a> {
     recipe: &'a SheetTemplate,
     sources: Vec<bool>,
     next: usize,
+    incoming: Option<RelationshipSlot>,
 }
 
 /// Holds local live mappings while replaying one occurrence in declaration order.
@@ -118,6 +119,18 @@ impl<'a> LiveFrame<'a> {
             .iter()
             .filter(|item| matches!(item, Item::Conditional(_)))
             .count();
+        TemplateError::ConditionalConstruction {
+            template: self.recipe.id(),
+            conditional,
+            inclusions: self.inclusions(instance),
+            source: Box::new(source),
+        }
+    }
+
+    /// Retains only the current occurrence's active root-to-child inclusion identities.
+    ///
+    /// - Complexity: O(h) time and space for ancestor depth h.
+    fn inclusions(&self, instance: &Instance) -> Vec<RelationshipSlot> {
         let mut inclusions = std::iter::successors(Some(self.occurrence), |&index| {
             instance.occurrences[index]
                 .parent
@@ -127,10 +140,22 @@ impl<'a> LiveFrame<'a> {
         .filter_map(|index| instance.occurrences[index].inclusion_site.clone())
         .collect::<Vec<_>>();
         inclusions.reverse();
-        TemplateError::ConditionalConstruction {
+        inclusions
+    }
+
+    /// Wraps an original construction failure at its exact authored boundary.
+    ///
+    /// - Complexity: O(h) time and space for ancestor depth h.
+    fn construction_error(
+        &self,
+        source: TemplateError,
+        site: super::ConstructionSite,
+        instance: &Instance,
+    ) -> TemplateError {
+        TemplateError::Construction {
             template: self.recipe.id(),
-            conditional,
-            inclusions,
+            site,
+            inclusions: self.inclusions(instance),
             source: Box::new(source),
         }
     }
@@ -151,12 +176,13 @@ impl SheetTemplate {
     /// # Errors
     ///
     /// Returns binding errors for unknown, missing, repeated, aliased, invalid,
-    /// out-kind, or wrongly typed actuals. Returns [`TemplateError::Factory`] for
-    /// failed initializers/method factories, [`TemplateError::InvalidDefinition`]
-    /// for factory edge/type mismatches, and [`TemplateError::Runtime`] for native
-    /// graph construction failures. Returns [`TemplateError::EmptyRelationship`]
-    /// if specialization removes all directions, or [`TemplateError::Capacity`]
-    /// on checked-size overflow or failed expansion reservation.
+    /// out-kind, or wrongly typed actuals. Returns [`TemplateError::Construction`]
+    /// for initializer, method, policy, relationship and empty-specialization failures,
+    /// retaining the exact definition, authored site and actual inclusion chain.
+    /// Its source preserves the original [`TemplateError::Factory`],
+    /// [`TemplateError::InvalidDefinition`], [`TemplateError::Runtime`] or
+    /// [`TemplateError::EmptyRelationship`]. Returns [`TemplateError::Capacity`]
+    /// without a declaration site on checked-size overflow or failed reservation.
     /// A conditional construction failure returns [`TemplateError::ConditionalConstruction`],
     /// retaining its definition, registration ordinal and actual root-to-child inclusion
     /// sites. Its source is the original [`TemplateError::ConditionalFactory`],
@@ -327,6 +353,7 @@ impl SheetTemplate {
             recipe: self,
             sources,
             next: 0,
+            incoming: None,
         });
         while let Some(frame) = stack.last_mut() {
             let Some(relationship) = frame.recipe.relationships.get(frame.next) else {
@@ -340,7 +367,20 @@ impl SheetTemplate {
                         .iter()
                         .any(|m| m.outputs.iter().all(|s| !frame.sources[s.index]))
                     {
-                        return Err(TemplateError::EmptyRelationship);
+                        let template = frame.recipe.id();
+                        let site = super::ConstructionSite::Relationship(RelationshipSlot {
+                            owner: frame.recipe.owner.clone(),
+                            index: frame.next - 1,
+                        });
+                        return Err(TemplateError::Construction {
+                            template,
+                            site,
+                            inclusions: stack
+                                .iter()
+                                .filter_map(|frame| frame.incoming.clone())
+                                .collect(),
+                            source: Box::new(TemplateError::EmptyRelationship),
+                        });
                     }
                 }
                 RelationshipRecipe::Out(_) => {}
@@ -350,10 +390,15 @@ impl SheetTemplate {
                         sources[i] = cell.kind == CellKind::Source
                             || bindings.get(&i).is_some_and(|s| frame.sources[s.index]);
                     }
+                    let incoming = Some(RelationshipSlot {
+                        owner: frame.recipe.owner.clone(),
+                        index: frame.next - 1,
+                    });
                     stack.push(SourceFrame {
                         recipe: child,
                         sources,
                         next: 0,
+                        incoming,
                     });
                 }
             }
@@ -415,13 +460,23 @@ impl SheetTemplate {
             match item {
                 Item::Cell(index) => {
                     if let Some(make) = &frame.recipe.cells[*index].make {
-                        frame.cells[*index] =
-                            make(destination).map_err(|source| TemplateError::Factory {
+                        frame.cells[*index] = make(destination)
+                            .map_err(|source| TemplateError::Factory {
                                 source,
                                 slot: CellSlot {
                                     owner: frame.recipe.owner.clone(),
                                     index: *index,
                                 },
+                            })
+                            .map_err(|error| {
+                                frame.construction_error(
+                                    error,
+                                    super::ConstructionSite::Cell(CellSlot {
+                                        owner: frame.recipe.owner.clone(),
+                                        index: *index,
+                                    }),
+                                    instance,
+                                )
                             })?;
                         if frame.incoming.is_some() {
                             instance.cells.push(frame.cells[*index]);
@@ -430,7 +485,24 @@ impl SheetTemplate {
                 }
                 Item::Policy(policy) => {
                     let ids = edges(&policy.inputs, &frame.cells)?;
-                    (policy.make)(destination, frame.cells[policy.cell.index], &ids)?;
+                    (policy.make)(destination, frame.cells[policy.cell.index], &ids).map_err(
+                        |error| {
+                            frame.construction_error(
+                                error,
+                                super::ConstructionSite::Policy {
+                                    cell: policy.cell.clone(),
+                                    index: frame.recipe.items[..frame.next - 1]
+                                        .iter()
+                                        .filter(|item| {
+                                            matches!(item, Item::Policy(previous)
+                                        if previous.cell == policy.cell)
+                                        })
+                                        .count(),
+                                },
+                                instance,
+                            )
+                        },
+                    )?;
                 }
                 Item::Conditional(conditional) => {
                     let ids = edges(&conditional.inputs, &frame.cells)?;
@@ -448,8 +520,24 @@ impl SheetTemplate {
                                 .try_reserve(recipes.len())
                                 .map_err(|_| TemplateError::Capacity)?;
                             // Validate all authored factories before removing entire source-writing methods.
-                            for recipe in recipes {
-                                methods.push(recipe.instantiate(destination, &frame.cells)?);
+                            for (method_index, recipe) in recipes.iter().enumerate() {
+                                methods.push(
+                                    recipe.instantiate(destination, &frame.cells).map_err(
+                                        |error| {
+                                            frame.construction_error(
+                                                error,
+                                                super::ConstructionSite::Method {
+                                                    relationship: RelationshipSlot {
+                                                        owner: frame.recipe.owner.clone(),
+                                                        index: *index,
+                                                    },
+                                                    index: method_index,
+                                                },
+                                                instance,
+                                            )
+                                        },
+                                    )?,
+                                );
                             }
                             let mut authored_index = 0;
                             methods.retain(|method| {
@@ -465,9 +553,16 @@ impl SheetTemplate {
                             });
                             debug_assert!(!methods.is_empty());
                             instance.relationships.push(
-                                destination
-                                    .add_relationship(methods)
-                                    .map_err(TemplateError::Runtime)?,
+                                destination.add_relationship(methods).map_err(|error| {
+                                    frame.construction_error(
+                                        TemplateError::Runtime(error),
+                                        super::ConstructionSite::Relationship(RelationshipSlot {
+                                            owner: frame.recipe.owner.clone(),
+                                            index: *index,
+                                        }),
+                                        instance,
+                                    )
+                                })?,
                             );
                             instance.relationship_origins.push(RelationshipOrigin {
                                 occurrence: frame.occurrence,
@@ -477,10 +572,33 @@ impl SheetTemplate {
                             frame.groups[*index].end = instance.relationships.len();
                         }
                         RelationshipRecipe::Out(writer) => {
-                            let method = writer.instantiate(destination, &frame.cells)?;
-                            let relationship = destination
-                                .add_out_writer(method)
-                                .map_err(TemplateError::Runtime)?;
+                            let method =
+                                writer
+                                    .instantiate(destination, &frame.cells)
+                                    .map_err(|error| {
+                                        frame.construction_error(
+                                            error,
+                                            super::ConstructionSite::Method {
+                                                relationship: RelationshipSlot {
+                                                    owner: frame.recipe.owner.clone(),
+                                                    index: *index,
+                                                },
+                                                index: 0,
+                                            },
+                                            instance,
+                                        )
+                                    })?;
+                            let relationship =
+                                destination.add_out_writer(method).map_err(|error| {
+                                    frame.construction_error(
+                                        TemplateError::Runtime(error),
+                                        super::ConstructionSite::Relationship(RelationshipSlot {
+                                            owner: frame.recipe.owner.clone(),
+                                            index: *index,
+                                        }),
+                                        instance,
+                                    )
+                                })?;
                             instance.relationships.push(relationship);
                             let methods_start = instance.authored_methods.len();
                             instance.authored_methods.push(0);

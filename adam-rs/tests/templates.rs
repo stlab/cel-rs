@@ -604,7 +604,8 @@ fn pruned_method_factories_still_validate_every_edge_and_type() {
                 .finish()
                 .unwrap()
                 .instantiate(&mut sheet, &[("a", a), ("b", b)]),
-            Err(TemplateError::InvalidDefinition { .. })
+            Err(TemplateError::Construction { source, .. })
+                if matches!(*source, TemplateError::InvalidDefinition { .. })
         ));
         assert_eq!(sheet.relationships().count(), 0);
     }
@@ -644,7 +645,8 @@ fn inactive_branch_empty_relationship_is_preflight_error() {
             .finish()
             .unwrap()
             .instantiate(&mut sheet, &[("a", a), ("b", b)]),
-        Err(TemplateError::EmptyRelationship)
+        Err(TemplateError::Construction { source, .. })
+            if matches!(*source, TemplateError::EmptyRelationship)
     ));
     assert_eq!(calls.get(), 0);
     assert_eq!(sheet.relationships().count(), 0);
@@ -680,7 +682,8 @@ fn all_directions_removed_is_error() {
             .finish()
             .unwrap()
             .instantiate(&mut sheet, &[("a", a), ("b", b)]),
-        Err(TemplateError::EmptyRelationship)
+        Err(TemplateError::Construction { source, .. })
+            if matches!(*source, TemplateError::EmptyRelationship)
     ));
     assert_eq!(calls.get(), 0);
 }
@@ -832,7 +835,8 @@ fn private_policy_factories_validate_signatures() {
                 .finish()
                 .unwrap()
                 .instantiate(&mut Sheet::new(), &[]),
-            Err(TemplateError::InvalidDefinition { .. })
+            Err(TemplateError::Construction { source, .. })
+                if matches!(*source, TemplateError::InvalidDefinition { .. })
         ));
     }
 }
@@ -862,11 +866,24 @@ fn private_policy_failures_leave_destination_discardable() {
             .unwrap()
             .instantiate(&mut sheet, &[])
             .unwrap_err();
+        let TemplateError::Construction {
+            source,
+            site,
+            inclusions,
+            ..
+        } = error
+        else {
+            panic!("expected construction context");
+        };
+        assert!(inclusions.is_empty());
+        assert!(
+            matches!(site, adam_rs::template::ConstructionSite::Policy { cell, index: 0 } if cell == a)
+        );
         if case < 2 {
-            assert!(matches!(error, TemplateError::Factory { .. }));
+            assert!(matches!(*source, TemplateError::Factory { .. }));
         } else {
             assert!(matches!(
-                error,
+                *source,
                 TemplateError::Runtime(adam_rs::Error::InvalidRequirement)
             ));
         }
@@ -1150,7 +1167,8 @@ fn factories_must_match_declared_edges_and_types() {
         let b = sheet.add_cell(0i32);
         assert!(matches!(
             template.instantiate(&mut sheet, &[("a", a), ("b", b)]),
-            Err(TemplateError::InvalidDefinition { .. })
+            Err(TemplateError::Construction { source, .. })
+                if matches!(*source, TemplateError::InvalidDefinition { .. })
         ));
     }
 }
@@ -1180,7 +1198,8 @@ fn definition_and_factory_errors_are_reported() {
     let a = sheet.add_cell(1i32);
     assert!(matches!(
         template.instantiate(&mut sheet, &[("a", a)]),
-        Err(TemplateError::Factory { .. })
+        Err(TemplateError::Construction { source, .. })
+            if matches!(*source, TemplateError::Factory { .. })
     ));
 }
 
@@ -1337,11 +1356,27 @@ fn failed_method_factory_reports_its_local_site() {
         .instantiate(&mut sheet, &[("a", a), ("b", b)])
         .unwrap_err();
     assert!(error.to_string().contains("method factory failed"));
+    let TemplateError::Construction {
+        source: error,
+        site,
+        inclusions,
+        ..
+    } = error
+    else {
+        panic!("expected method construction context");
+    };
+    assert!(matches!(
+        site,
+        adam_rs::template::ConstructionSite::Method { index: 0, .. }
+    ));
+    assert!(inclusions.is_empty());
     assert_eq!(
-        std::error::Error::source(&error).unwrap().to_string(),
+        std::error::Error::source(error.as_ref())
+            .unwrap()
+            .to_string(),
         "method factory failed"
     );
-    match error {
+    match *error {
         TemplateError::Factory { source, slot } => {
             assert_eq!(slot, output);
             assert_eq!(source.to_string(), "method factory failed");
@@ -1583,6 +1618,7 @@ fn nested_source_outputs_are_rejected_before_factories() {
     let b = sheet.add_source(0i32);
     assert!(matches!(
         template.instantiate(&mut sheet, &[("a", a), ("b", b)]),
-        Err(TemplateError::EmptyRelationship)
+        Err(TemplateError::Construction { source, .. })
+            if matches!(*source, TemplateError::EmptyRelationship)
     ));
 }

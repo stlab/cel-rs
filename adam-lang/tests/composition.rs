@@ -19,6 +19,441 @@ fn root(source: &str, name: &str) -> Result<ParsedSheet, adam_lang::ModuleDiagno
     compiled.instantiate_root(&"app".parse().unwrap(), name)
 }
 
+/// Resolves exact CEL spans against their definition owner and only the failing use chain.
+#[test]
+fn composition_diagnostic_selects_definition_and_repeated_instance() {
+    let definition = "sheet divide(a: i32, denominator: i32, b: i32) {
+    relationship { a := b * denominator; b := 1 + a / denominator; }
+}
+sheet wrapper(a: i32, denominator: i32, b: i32) {
+    relationship divide(a: a, denominator: denominator, b: b);
+}";
+    let invocation = "use library::wrapper;
+sheet app {
+    source a: i32 = 12; source good: i32 = 3; source bad: i32 = 0;
+    cell first: i32; cell second: i32;
+    relationship wrapper(a: a, denominator: good, b: first);
+    relationship wrapper(a: a, denominator: bad, b: second);
+}";
+    let mut modules = adam_lang::ModuleSet::new();
+    modules
+        .insert_source("library".parse().unwrap(), "library.adm2", definition)
+        .unwrap();
+    modules
+        .insert_source("app".parse().unwrap(), "app.adm2", invocation)
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .compile(modules)
+        .unwrap();
+    let definition_source = compiled
+        .sources()
+        .iter()
+        .find(|s| s.file_name() == "library.adm2")
+        .unwrap()
+        .clone();
+    let invocation_source = compiled
+        .sources()
+        .iter()
+        .find(|s| s.file_name() == "app.adm2")
+        .unwrap()
+        .clone();
+    let mut parsed = compiled
+        .instantiate_root(&"app".parse().unwrap(), "app")
+        .unwrap();
+    drop(compiled);
+    let error = parsed.propagate().unwrap_err();
+    let labels = parsed.locate_error(&error);
+    assert!(
+        labels.iter().any(|label| label
+            .location
+            .as_ref()
+            .is_some_and(|location| location.source == definition_source
+                && location.span == cel_parser::SourceSpan::new(2, 50, 2, 65))),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label
+            .location
+            .as_ref()
+            .is_some_and(
+                |location| location.source == invocation_source && location.span.start.line == 6
+            )),
+        "{labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|label| label
+            .location
+            .as_ref()
+            .is_some_and(
+                |location| location.source == invocation_source && location.span.start.line == 5
+            )),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label
+            .location
+            .as_ref()
+            .is_some_and(
+                |location| location.source == definition_source && location.span.start.line == 5
+            )),
+        "{labels:?}"
+    );
+    let adam_rs::Error::MethodFailed { error, .. } = error else {
+        panic!("expected method failure")
+    };
+    assert!(error.downcast_ref::<cel_parser::SpanContext>().is_some());
+}
+
+/// Keeps source-free native diagnostics as labels without manufactured spans.
+#[test]
+fn composition_diagnostic_native_method_has_no_invented_span() {
+    let mut builder = CompositionBuilder::new(TypeRegistry::new());
+    builder.set_label(adam_lang::SourceLabel {
+        location: None,
+        label: "host native operation".into(),
+    });
+    let a = builder.parameter("a", int()).unwrap();
+    let b = builder.parameter("b", int()).unwrap();
+    let method = builder
+        .method(std::slice::from_ref(&a), std::slice::from_ref(&b), || {
+            let mut segment = DynSegment::new::<()>();
+            segment.push_arg::<i32>(0);
+            segment.op1r(|_: i32| -> anyhow::Result<i32> {
+                Err(std::io::Error::other("native failure").into())
+            })?;
+            Ok(segment)
+        })
+        .unwrap();
+    builder.relationship(vec![method]).unwrap();
+    let template = builder.finish().unwrap();
+    let mut parsed = ParsedSheet::new();
+    let a = parsed.add_cell(1i32);
+    let b = parsed.add_cell(0i32);
+    parsed
+        .register_cell("a", a, int(), &TypeRegistry::new())
+        .unwrap();
+    parsed
+        .register_cell("b", b, int(), &TypeRegistry::new())
+        .unwrap();
+    template
+        .instantiate(&mut parsed, &[("a", a), ("b", b)])
+        .unwrap();
+    let error = parsed.propagate().unwrap_err();
+    let labels = parsed.locate_error(&error);
+    assert!(!labels.is_empty());
+    assert!(labels.iter().all(|label| label.location.is_none()));
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.label.contains("host native operation")),
+        "{labels:?}"
+    );
+    assert!(
+        std::error::Error::source(&error)
+            .unwrap()
+            .is::<std::io::Error>()
+    );
+}
+
+/// Selects only the failed imported native invocation without an inner CEL context.
+#[test]
+fn composition_diagnostic_imported_native_selects_actual_use() {
+    let mut builder = CompositionBuilder::new(TypeRegistry::new());
+    let a = builder.parameter("a", int()).unwrap();
+    let b = builder.parameter("b", int()).unwrap();
+    let method = builder
+        .method(&[a], &[b], || {
+            let mut segment = DynSegment::new::<()>();
+            segment.push_arg::<i32>(0);
+            segment.op1r(|value: i32| -> anyhow::Result<i32> {
+                if value == 0 {
+                    Err(std::io::Error::other("native zero").into())
+                } else {
+                    Ok(value)
+                }
+            })?;
+            Ok(segment)
+        })
+        .unwrap();
+    builder.relationship(vec![method]).unwrap();
+    let mut modules = adam_lang::ModuleSet::new();
+    modules
+        .insert_template("native".parse().unwrap(), "copy", builder.finish().unwrap())
+        .unwrap();
+    modules
+        .insert_source(
+            "app".parse().unwrap(),
+            "caller.adm2",
+            "use native::copy;
+sheet app {
+source good: i32 = 1; source bad: i32 = 0; cell first: i32; cell second: i32;
+relationship copy(a: good, b: first);
+relationship copy(a: bad, b: second);
+}",
+        )
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .compile(modules)
+        .unwrap();
+    let source = compiled.sources()[0].clone();
+    let mut parsed = compiled
+        .instantiate_root(&"app".parse().unwrap(), "app")
+        .unwrap();
+    drop(compiled);
+    let error = parsed.propagate().unwrap_err();
+    let labels = parsed.locate_error(&error);
+    assert!(labels[0].location.is_none(), "{labels:?}");
+    let located: Vec<_> = labels
+        .iter()
+        .filter_map(|label| label.location.as_ref())
+        .collect();
+    assert_eq!(located.len(), 1, "{labels:?}");
+    assert_eq!(located[0].source, source);
+    assert_eq!(located[0].span.start.line, 5);
+    let adam_rs::Error::MethodFailed { error, .. } = error else {
+        panic!("expected native failure")
+    };
+    assert!(error.downcast_ref::<cel_parser::SpanContext>().is_none());
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+}
+
+/// Retains the exact failing initializer definition and repeated construction path.
+#[test]
+fn composition_diagnostic_construction_selects_actual_use() {
+    let mut lookup = cel_parser::OpLookup::new();
+    let mut count = 0;
+    thread_local! { static CALLS: Cell<usize> = const { Cell::new(0) }; }
+    CALLS.with(|calls| calls.set(0));
+    lookup.push_scope(|name, body, arity, _| {
+        if name != "initial" || arity != 0 {
+            return Ok(false);
+        }
+        body.op0r(|| -> anyhow::Result<i32> {
+            CALLS.with(|calls| {
+                let count = calls.get();
+                calls.set(count + 1);
+                if count == 1 {
+                    Err(std::io::Error::other("second initializer").into())
+                } else {
+                    Ok(7)
+                }
+            })
+        });
+        Ok(true)
+    });
+    let mut modules = adam_lang::ModuleSet::new();
+    modules
+        .insert_source(
+            "library".parse().unwrap(),
+            "definition.adm2",
+            "sheet child() { cell value: i32 = initial; }",
+        )
+        .unwrap();
+    modules
+        .insert_source(
+            "app".parse().unwrap(),
+            "caller.adm2",
+            "use library::child;
+sheet app {
+relationship child();
+relationship child();
+relationship child();
+}",
+        )
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), lookup)
+        .compile(modules)
+        .unwrap();
+    let error = compiled
+        .instantiate_root(&"app".parse().unwrap(), "app")
+        .unwrap_err();
+    drop(compiled);
+    let uses: Vec<_> = error
+        .labels
+        .iter()
+        .filter(|label| label.label == "component use")
+        .filter_map(|label| label.location.as_ref())
+        .collect();
+    assert_eq!(uses.len(), 1, "{error:?}");
+    assert_eq!(uses[0].span.start.line, 4);
+    assert!(
+        error.labels.iter().any(
+            |label| label
+                .location
+                .as_ref()
+                .is_some_and(|location| location.source.file_name() == "definition.adm2"
+                    && location.span.start.column == 21)
+        ),
+        "{error:?}"
+    );
+    let mut cause = std::error::Error::source(&error);
+    while let Some(error) = cause {
+        if error.is::<std::io::Error>() {
+            count += 1;
+        }
+        cause = error.source();
+    }
+    assert_eq!(count, 1);
+}
+
+/// Locates the actual failing source-mask preflight use before executing any factory.
+#[test]
+fn composition_diagnostic_preflight_selects_actual_use() {
+    let mut modules = adam_lang::ModuleSet::new();
+    modules
+        .insert_source(
+            "library".parse().unwrap(),
+            "definition.adm2",
+            "sheet copy(a: i32, b: i32) { relationship { b := a; } }",
+        )
+        .unwrap();
+    modules
+        .insert_source(
+            "app".parse().unwrap(),
+            "caller.adm2",
+            "use library::copy;
+sheet app(a: i32, locked: i32, first: i32, third: i32) {
+relationship copy(a: a, b: first);
+relationship copy(a: a, b: locked);
+relationship copy(a: a, b: third);
+}",
+        )
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .compile(modules)
+        .unwrap();
+    let mut parsed = ParsedSheet::new();
+    let a = parsed.add_source(1i32);
+    let locked = parsed.add_source(0i32);
+    let first = parsed.add_cell(0i32);
+    let third = parsed.add_cell(0i32);
+    let bindings = [
+        ("a", a),
+        ("locked", locked),
+        ("first", first),
+        ("third", third),
+    ];
+    for (name, id) in bindings {
+        parsed
+            .register_cell(name, id, int(), &TypeRegistry::new())
+            .unwrap();
+    }
+    let error = compiled
+        .template(&"app".parse().unwrap(), "app")
+        .unwrap()
+        .instantiate(&mut parsed, &bindings)
+        .unwrap_err();
+    let uses: Vec<_> = error
+        .labels
+        .iter()
+        .filter(|label| label.label == "component use")
+        .filter_map(|label| label.location.as_ref())
+        .collect();
+    assert_eq!(uses.len(), 1, "{error:?}");
+    assert_eq!(uses[0].span.start.line, 4);
+    assert!(
+        error.labels.iter().any(
+            |label| label
+                .location
+                .as_ref()
+                .is_some_and(|location| location.source.file_name() == "definition.adm2"
+                    && location.span.start.column == 29)
+        ),
+        "{error:?}"
+    );
+}
+
+/// Resolves eager requirement evaluation spans against the actual policy definition.
+#[test]
+fn composition_diagnostic_requirement_construction_keeps_definition_span() {
+    let mut modules = adam_lang::ModuleSet::new();
+    modules
+        .insert_source(
+            "library".parse().unwrap(),
+            "policy.adm2",
+            "sheet child() {
+cell value: i32 = 1 require {
+    value / 0 > 0;
+};
+}",
+        )
+        .unwrap();
+    modules
+        .insert_source(
+            "app".parse().unwrap(),
+            "app.adm2",
+            "use library::child; sheet app { relationship child(); }",
+        )
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .compile(modules)
+        .unwrap();
+    let owner = compiled
+        .sources()
+        .iter()
+        .find(|source| source.file_name() == "policy.adm2")
+        .unwrap()
+        .clone();
+    let error = compiled
+        .instantiate_root(&"app".parse().unwrap(), "app")
+        .unwrap_err();
+    drop(compiled);
+    assert!(
+        error.labels.iter().any(|label| label
+            .location
+            .as_ref()
+            .is_some_and(|location| location.source == owner
+                && location.span == cel_parser::SourceSpan::new(3, 4, 3, 13))),
+        "{error:?}"
+    );
+}
+
+/// Resolves private output-writer errors through their authored output expression.
+#[test]
+fn composition_diagnostic_output_writer_keeps_definition_span() {
+    let mut modules = adam_lang::ModuleSet::new();
+    modules
+        .insert_source(
+            "library".parse().unwrap(),
+            "output.adm2",
+            "sheet child(a: i32) {
+    out answer := 1 + 4 / a;
+}",
+        )
+        .unwrap();
+    modules
+        .insert_source(
+            "app".parse().unwrap(),
+            "app.adm2",
+            "use library::child; sheet app { source a: i32 = 0; relationship child(a: a); }",
+        )
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .compile(modules)
+        .unwrap();
+    let owner = compiled
+        .sources()
+        .iter()
+        .find(|source| source.file_name() == "output.adm2")
+        .unwrap()
+        .clone();
+    let mut parsed = compiled
+        .instantiate_root(&"app".parse().unwrap(), "app")
+        .unwrap();
+    drop(compiled);
+    let error = parsed.propagate().unwrap_err();
+    let labels = parsed.locate_error(&error);
+    assert!(
+        labels.iter().any(|label| label
+            .location
+            .as_ref()
+            .is_some_and(|location| location.source == owner
+                && location.span == cel_parser::SourceSpan::new(2, 22, 2, 27))),
+        "{labels:?}"
+    );
+    assert!(labels.iter().any(|label| label.label == "component use"));
+}
+
 /// Matches inline values, aspirations and diagnostics after identical public edits.
 #[test]
 fn composed_matches_manual_inline() {

@@ -202,6 +202,179 @@ pub struct CellOrigin {
     pub label: SourceLabel,
 }
 
+/// Selects an authored declaration using exact native slots and original ordinals.
+///
+/// - Complexity: O(a) authored records, with O(1) additional space.
+fn construction_item<'a>(
+    authored: &'a [AuthoredItem],
+    site: &adam_rs::template::ConstructionSite,
+) -> Option<&'a AuthoredItem> {
+    use adam_rs::template::ConstructionSite;
+    match site {
+        ConstructionSite::Cell(cell) => authored.iter().find(|item| {
+            item.cell.as_ref() == Some(cell)
+                && matches!(
+                    item.role,
+                    AuthoredRole::Cell | AuthoredRole::Source | AuthoredRole::Out
+                )
+        }),
+        ConstructionSite::Policy { cell, index } => authored
+            .iter()
+            .filter(|item| {
+                item.cell.as_ref() == Some(cell)
+                    && matches!(
+                        item.role,
+                        AuthoredRole::Filter
+                            | AuthoredRole::RangeFilter
+                            | AuthoredRole::Requirement
+                    )
+            })
+            .nth(*index),
+        ConstructionSite::Method {
+            relationship,
+            index,
+        } => authored.iter().find(|item| {
+            item.relationship.as_ref() == Some(relationship)
+                && (item.method_index == Some(*index) || item.role == AuthoredRole::Out)
+        }),
+        ConstructionSite::Relationship(relationship) => authored.iter().find(|item| {
+            item.relationship.as_ref() == Some(relationship)
+                && matches!(item.role, AuthoredRole::Relationship | AuthoredRole::Out)
+        }),
+    }
+}
+
+/// Borrows the original CEL span from a construction cause, without erasing its type.
+///
+/// - Complexity: O(h) nested construction envelopes.
+fn construction_span(error: &adam_rs::TemplateError) -> Option<cel_parser::SourceSpan> {
+    match error {
+        adam_rs::TemplateError::Factory { source, .. }
+        | adam_rs::TemplateError::ConditionalFactory { source }
+        | adam_rs::TemplateError::Runtime(adam_rs::Error::MethodFailed { error: source, .. }) => {
+            source
+                .downcast_ref::<cel_parser::SpanContext>()
+                .map(cel_parser::SpanContext::span)
+        }
+        adam_rs::TemplateError::Construction { source, .. }
+        | adam_rs::TemplateError::ConditionalConstruction { source, .. } => {
+            construction_span(source)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use adam_rs::template::ConstructionSite;
+
+    /// Builds one source-free authored record with exact native identities.
+    fn item(
+        role: AuthoredRole,
+        cell: &adam_rs::CellSlot,
+        relationship: &RelationshipSlot,
+        method_index: Option<usize>,
+    ) -> AuthoredItem {
+        AuthoredItem {
+            role,
+            parent: None,
+            label: SourceLabel {
+                location: None,
+                label: format!("{role:?}"),
+            },
+            cell: Some(cell.clone()),
+            relationship: Some(relationship.clone()),
+            method_index,
+            requirement_name: None,
+            expression: None,
+        }
+    }
+
+    /// Selects native construction slots, cell-local policy ordinals and authored method gaps.
+    #[test]
+    fn construction_items_use_exact_identity_and_authored_ordinals() {
+        let mut builder = TemplateBuilder::new();
+        let cell = builder.cell("value", || Ok(1i32)).unwrap();
+        let relationship = builder
+            .relationship(vec![
+                adam_rs::MethodRecipe::new(&[], std::slice::from_ref(&cell), |_, _| unreachable!())
+                    .unwrap(),
+            ])
+            .unwrap();
+        let authored = [
+            item(AuthoredRole::Cell, &cell, &relationship, None),
+            item(AuthoredRole::Filter, &cell, &relationship, None),
+            item(AuthoredRole::Requirement, &cell, &relationship, None),
+            item(AuthoredRole::Relationship, &cell, &relationship, None),
+            item(AuthoredRole::Method, &cell, &relationship, Some(3)),
+        ];
+        let cases = [
+            (ConstructionSite::Cell(cell.clone()), 0),
+            (
+                ConstructionSite::Policy {
+                    cell: cell.clone(),
+                    index: 1,
+                },
+                2,
+            ),
+            (ConstructionSite::Relationship(relationship.clone()), 3),
+            (
+                ConstructionSite::Method {
+                    relationship: relationship.clone(),
+                    index: 3,
+                },
+                4,
+            ),
+        ];
+        for (site, index) in cases {
+            assert!(std::ptr::eq(
+                construction_item(&authored, &site).unwrap(),
+                &authored[index]
+            ));
+        }
+        assert!(
+            construction_item(
+                &authored,
+                &ConstructionSite::Method {
+                    relationship,
+                    index: 0
+                }
+            )
+            .is_none()
+        );
+        let foreign = TemplateBuilder::new().cell("foreign", || Ok(1i32)).unwrap();
+        assert!(construction_item(&authored, &ConstructionSite::Cell(foreign)).is_none());
+    }
+
+    /// Keeps exact CEL coordinates optional while leaving the original typed error intact.
+    #[test]
+    fn construction_span_retains_typed_causes() {
+        let slot = TemplateBuilder::new().cell("value", || Ok(1i32)).unwrap();
+        let error = adam_rs::TemplateError::Factory {
+            slot: slot.clone(),
+            source: std::io::Error::other("native").into(),
+        };
+        assert!(construction_span(&error).is_none());
+        let span = cel_parser::SourceSpan::new(2, 4, 2, 9);
+        let error = adam_rs::TemplateError::Factory {
+            slot,
+            source: anyhow::Error::new(std::io::Error::other("division"))
+                .context(cel_parser::SpanContext::new(span)),
+        };
+        assert_eq!(construction_span(&error), Some(span));
+        let adam_rs::TemplateError::Factory { source, .. } = error else {
+            unreachable!()
+        };
+        assert!(source.downcast_ref::<std::io::Error>().is_some());
+        let error = adam_rs::TemplateError::Runtime(adam_rs::Error::MethodFailed {
+            error: source,
+            sites: vec![],
+        });
+        assert_eq!(construction_span(&error), Some(span));
+    }
+}
+
 /// Constructs fresh type-erased initial values for monomorphized native adapters.
 type Initializer = Box<dyn Fn() -> anyhow::Result<Box<dyn Any>>>;
 
@@ -1342,11 +1515,57 @@ impl TypedTemplate {
 
     /// Retains the native construction error and real authored source owners.
     ///
-    /// Conditional failures label the failed definition/item and only the active native
-    /// inclusion chain. Other errors retain implicated cells and possible invocation sites.
+    /// Contextual failures label the failed definition/item and only the active native
+    /// inclusion chain. Failures without native occurrence context retain only known
+    /// declarations; reachable uses do not imply a selected path.
     /// - Complexity: O(d + a + h × a) unique metadata nodes/edges d, authored items a
     ///   and active conditional inclusion depth h.
     fn construction_error(&self, error: adam_rs::TemplateError) -> ModuleDiagnostic {
+        if let adam_rs::TemplateError::Construction {
+            template,
+            site,
+            inclusions,
+            source,
+        } = &error
+        {
+            let definitions = self.definitions();
+            let mut labels = Vec::new();
+            if let Some(definition) = definitions.get(template) {
+                if let Some(item) = construction_item(&definition.authored, site) {
+                    let mut label = item.label.clone();
+                    if let Some(span) = construction_span(source)
+                        && let Some(location) = item
+                            .expression
+                            .as_ref()
+                            .and_then(|label| label.location.as_ref())
+                    {
+                        label.location = Some(crate::SourceLocation {
+                            source: location.source.clone(),
+                            span,
+                        });
+                    }
+                    labels.push(label);
+                }
+                labels.push(definition.label.clone());
+            }
+            for site in inclusions {
+                labels.extend(
+                    definitions
+                        .values()
+                        .flat_map(|definition| definition.authored.iter())
+                        .filter(|item| {
+                            item.role == AuthoredRole::Use
+                                && item.relationship.as_ref() == Some(site)
+                        })
+                        .map(|item| item.label.clone()),
+                );
+            }
+            return ModuleDiagnostic {
+                message: error.to_string(),
+                labels,
+                cause: Some(crate::source_map::ModuleCause::new(error)),
+            };
+        }
         if let adam_rs::TemplateError::ConditionalConstruction {
             template,
             conditional,
@@ -1406,13 +1625,6 @@ impl TypedTemplate {
                         .map(|item| item.label.clone()),
                 );
             }
-            labels.extend(
-                definition
-                    .authored
-                    .iter()
-                    .filter(|item| item.role == AuthoredRole::Use)
-                    .map(|item| item.label.clone()),
-            );
         }
         ModuleDiagnostic {
             message: error.to_string(),

@@ -102,6 +102,8 @@ pub struct ParsedSheet {
     pub cell_spans: HashMap<CellId, SourceSpan>,
     /// Retains independent source identities used by instantiated definitions.
     pub sources: Vec<crate::SourceId>,
+    /// Identifies the anonymous convenience frontend's source for display-name overrides.
+    pub(crate) anonymous_source: Option<crate::SourceId>,
     /// Retains parent-linked provenance for direct template invocations.
     pub instance_origins: Vec<crate::composition::InstanceOrigin>,
     /// Maps compact live method indices to occurrence and authored method identity.
@@ -288,6 +290,7 @@ impl ParsedSheet {
             relationship_spans: HashMap::new(),
             cell_spans: HashMap::new(),
             sources: Vec::new(),
+            anonymous_source: None,
             instance_origins: Vec::new(),
             method_origins: HashMap::new(),
             cell_origins: HashMap::new(),
@@ -485,12 +488,15 @@ impl ParsedSheet {
         Ok(unsafe { cell.0.try_clone()?.into_typed_bound::<R>() })
     }
 
-    /// Resolves each of `e`'s `ErrorSite`s to a source span and a human label, primary first.
+    /// Resolves native error sites to owning labels and actual invocation context.
     ///
-    /// Sites whose span is not recorded are skipped, so the result may be shorter than
-    /// `e.sites()`; empty when none resolves (the caller then falls back to `Display`).
+    /// Definition labels precede root-to-child invocation context. Inner CEL spans
+    /// resolve only against the failed method's definition owner. Native definitions
+    /// retain labels without locations; unknown sites are skipped.
     ///
-    /// - Complexity: O(s) in the number of sites.
+    /// - Complexity: O(o + m + c + q × a + l²) time and O(o + m + c + l)
+    ///   space for occurrences o, methods m, public cells c, visited occurrence/ancestor
+    ///   records q, local authored items a and returned labels l.
     ///
     /// # Examples
     ///
@@ -511,29 +517,23 @@ impl ParsedSheet {
     /// let e = parsed.propagate().unwrap_err();
     /// let located = parsed.locate_error(&e);
     /// assert!(!located.is_empty());
-    /// assert!(!located[0].1.is_empty());
+    /// assert!(!located[0].label.is_empty());
     /// ```
-    pub fn locate_error(&self, e: &adam_rs::Error) -> Vec<(SourceSpan, String)> {
-        let by_id: HashMap<CellId, String> = self
-            .cell_names
-            .iter()
-            .map(|(n, (id, _))| (*id, n.clone()))
-            .collect();
-        let name = |id: CellId| by_id.get(&id).cloned();
-        let mut out = Vec::new();
-        for (i, site) in e.sites().iter().enumerate() {
-            let span = match site {
-                ErrorSite::Method(r, idx) => self.method_spans.get(&(*r, *idx)).copied(),
-                ErrorSite::Relationship(r) => self.relationship_spans.get(r).copied(),
-                ErrorSite::Cell(c) => self.cell_spans.get(c).copied(),
-                ErrorSite::MethodIndex(_) => None,
-                _ => None,
-            };
-            if let Some(span) = span {
-                out.push((span, crate::error_labels::site_label(e, i, &name)));
-            }
-        }
-        out
+    pub fn locate_error(&self, e: &adam_rs::Error) -> Vec<crate::SourceLabel> {
+        crate::error_labels::locate_error(self, e)
+    }
+
+    /// Borrows the anonymous frontend source whose display name the caller supplies.
+    ///
+    /// Explicit module roots and programmatic sheets return `None`; their owning
+    /// file names must not be replaced by a renderer's caller-source arguments.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(adam_lang::ParsedSheet::new().anonymous_source().is_none());
+    /// ```
+    pub fn anonymous_source(&self) -> Option<&crate::SourceId> {
+        self.anonymous_source.as_ref()
     }
 }
 
@@ -629,9 +629,17 @@ impl AdamParser {
                 },
             ));
         }
-        compiled
+        let mut parsed = compiled
             .instantiate_root(&path, name)
-            .map_err(|error| frontend_error(source, error))
+            .map_err(|error| frontend_error(source, error))?;
+        parsed.anonymous_source = Some(
+            compiled
+                .sources()
+                .first()
+                .expect("the convenience frontend retains its supplied source")
+                .clone(),
+        );
+        Ok(parsed)
     }
 }
 

@@ -37,7 +37,7 @@ use std::rc::Rc;
 use crate::{CellId, CellKind, Method, RelationshipId, Sheet};
 
 pub use builder::TemplateBuilder;
-pub use error::TemplateError;
+pub use error::{ConstructionSite, TemplateError};
 pub use provenance::{InstanceOccurrence, MethodOrigin, OccurrenceId, TemplateId};
 
 /// Identifies a cell declaration within exactly one owning builder/template.

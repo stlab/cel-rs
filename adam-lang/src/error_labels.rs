@@ -3,6 +3,132 @@
 //! diagnostic (see [`cel_parser::SpanLabel`]).
 
 use adam_rs::{CellId, Error, ErrorSite};
+use std::collections::HashMap;
+
+use crate::{AuthoredRole, ParsedSheet, SourceLabel, composition::OccurrenceOrigin};
+
+/// Resolves native error identities to owning definition and actual invocation labels.
+///
+/// Inner CEL coordinates belong only to the selected method's expression owner.
+/// - Complexity: O(o + m + c + q × a + l²) time and O(o + m + c + l) space
+///   for occurrences o, methods m, public cells c, visited occurrence/ancestor
+///   records q, local authored items a and returned labels l.
+pub(crate) fn locate_error(parsed: &ParsedSheet, error: &Error) -> Vec<SourceLabel> {
+    let occurrences: HashMap<_, _> = parsed
+        .instance_origins
+        .iter()
+        .flat_map(|instance| &instance.occurrences)
+        .map(|occurrence| (&occurrence.id, occurrence))
+        .collect();
+    let relationships: HashMap<_, _> = parsed
+        .method_origins
+        .iter()
+        .map(|((relationship, _), origin)| (*relationship, origin))
+        .collect();
+    let names: HashMap<_, _> = parsed
+        .cell_names
+        .iter()
+        .map(|(name, (id, _))| (*id, name))
+        .collect();
+    let mut labels = Vec::new();
+    for (index, site) in error.sites().iter().enumerate() {
+        let text = site_label(error, index, &|id| {
+            names.get(&id).map(|name| (*name).clone())
+        });
+        match site {
+            ErrorSite::Method(relationship, method) => {
+                if let Some(origin) = parsed.method_origins.get(&(*relationship, *method))
+                    && let Some(occurrence) = occurrences.get(&origin.occurrence)
+                {
+                    let item = occurrence.authored_items().iter().find(|item| {
+                        item.relationship.as_ref() == Some(&origin.relationship)
+                            && item.method_index == Some(origin.authored_index)
+                    });
+                    let mut label = item.map_or(&occurrence.label, |item| &item.label).clone();
+                    if let Error::MethodFailed { error, .. } = error
+                        && index == 0
+                        && let Some(span) = error.downcast_ref::<cel_parser::SpanContext>()
+                        && let Some(location) = item
+                            .and_then(|item| item.expression.as_ref())
+                            .and_then(|label| label.location.as_ref())
+                    {
+                        label.location = Some(crate::SourceLocation {
+                            source: location.source.clone(),
+                            span: span.span(),
+                        });
+                    }
+                    label.label = if item.is_some() {
+                        text
+                    } else {
+                        format!("{text}: {}", label.label)
+                    };
+                    labels.push(label);
+                    labels.extend(invocations(occurrence, &occurrences));
+                }
+            }
+            ErrorSite::Relationship(relationship) => {
+                if let Some(origin) = relationships.get(relationship)
+                    && let Some(occurrence) = occurrences.get(&origin.occurrence)
+                {
+                    let item = occurrence.authored_items().iter().find(|item| {
+                        item.role == AuthoredRole::Relationship
+                            && item.relationship.as_ref() == Some(&origin.relationship)
+                    });
+                    let mut label = item.map_or(&occurrence.label, |item| &item.label).clone();
+                    label.label = if item.is_some() {
+                        text
+                    } else {
+                        format!("{text}: {}", label.label)
+                    };
+                    labels.push(label);
+                    labels.extend(invocations(occurrence, &occurrences));
+                }
+            }
+            ErrorSite::Cell(cell) => {
+                if let Some(origins) = parsed.cell_origins.get(cell) {
+                    for origin in origins {
+                        let mut label = origin.label.clone();
+                        label.label = text.clone();
+                        labels.push(label);
+                        if let Some(occurrence) = occurrences.get(&origin.occurrence) {
+                            labels.extend(invocations(occurrence, &occurrences));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut distinct = Vec::with_capacity(labels.len());
+    // Error paths are short; preserve primary order while removing shared ancestor labels.
+    for label in labels {
+        if !distinct.contains(&label) {
+            distinct.push(label);
+        }
+    }
+    distinct
+}
+
+/// Returns only this occurrence's active inclusion labels, ordered root to child.
+///
+/// - Complexity: O(h × a) time and O(h) space for depth h and local authored items a.
+fn invocations(
+    occurrence: &OccurrenceOrigin,
+    occurrences: &HashMap<&adam_rs::OccurrenceId, &OccurrenceOrigin>,
+) -> Vec<SourceLabel> {
+    let mut labels = Vec::new();
+    let mut current = occurrence;
+    while let Some(parent) = current.parent.as_ref().and_then(|id| occurrences.get(id)) {
+        if let Some(item) = parent.authored_items().iter().find(|item| {
+            item.role == AuthoredRole::Use && item.relationship == current.inclusion_site
+        }) {
+            labels.push(item.label.clone());
+        }
+        current = parent;
+    }
+    labels.reverse();
+    labels
+}
 
 /// Describes the `index`-th entry of `e.sites()` in plain language, for use as a
 /// [`cel_parser::SpanLabel`]'s label text.

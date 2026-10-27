@@ -6,6 +6,46 @@ use std::fmt;
 use super::{CellSlot, RelationshipSlot, TemplateId};
 use crate::{CellId, Error};
 
+/// Identifies an authored construction boundary before any live relationship exists.
+///
+/// Method indices precede source specialization; policy indices count registrations
+/// on the same local cell. Handles retain definition identity without retaining recipes.
+///
+/// # Examples
+/// ```
+/// use adam_rs::{ConstructionSite, Sheet, TemplateBuilder, TemplateError};
+/// let mut builder = TemplateBuilder::new();
+/// let slot = builder.cell::<i32, _>("value",
+///     || Err(std::io::Error::other("initialization failed").into()))?;
+/// let template = builder.finish()?;
+/// let error = template.instantiate(&mut Sheet::new(), &[]).unwrap_err();
+/// assert!(matches!(error, TemplateError::Construction {
+///     site: ConstructionSite::Cell(ref failed), ..
+/// } if failed == &slot));
+/// # Ok::<(), TemplateError>(())
+/// ```
+#[derive(Debug)]
+pub enum ConstructionSite {
+    /// Constructs one private cell.
+    Cell(CellSlot),
+    /// Attaches one cell's filter or requirement, in registration order.
+    Policy {
+        /// Identifies the governed cell.
+        cell: CellSlot,
+        /// Identifies the cell-local policy registration.
+        index: usize,
+    },
+    /// Constructs one authored method before specialization.
+    Method {
+        /// Identifies the local relationship.
+        relationship: RelationshipSlot,
+        /// Identifies the original authored method.
+        index: usize,
+    },
+    /// Registers the combined relationship after its factories succeed.
+    Relationship(RelationshipSlot),
+}
+
 /// Identifies a malformed recipe, binding, factory, or native graph construction.
 ///
 /// Binding and declared-structure errors precede destination mutation. Factory-result
@@ -88,6 +128,20 @@ pub enum TemplateError {
         /// The underlying factory failure.
         source: anyhow::Error,
     },
+    /// Retains a construction boundary and only its actual root-to-child inclusion chain.
+    ///
+    /// The boxed original failure preserves concrete error downcasting.
+    /// See [`super::SheetTemplate::instantiate`].
+    Construction {
+        /// Identifies the failed definition.
+        template: TemplateId,
+        /// Identifies the declaration or registration that failed.
+        site: ConstructionSite,
+        /// Retains active inclusion sites, ordered root to child.
+        inclusions: Vec<RelationshipSlot>,
+        /// Retains the original failure without requiring Send or Sync.
+        source: Box<TemplateError>,
+    },
     /// Retains a failed conditional's definition, local ordinal and active invocation sites.
     ///
     /// Context owns identities, not recipes or live state. The original error and
@@ -142,6 +196,7 @@ impl fmt::Display for TemplateError {
             Self::ConditionalFactory { source } => {
                 write!(f, "template conditional factory failed: {source}")
             }
+            Self::Construction { source, .. } => source.fmt(f),
             Self::ConditionalConstruction {
                 conditional,
                 source,
@@ -162,6 +217,7 @@ impl std::error::Error for TemplateError {
             Self::Factory { source, .. } => Some(source.as_ref()),
             Self::ConditionalFactory { source } => Some(source.as_ref()),
             Self::ConditionalConstruction { source, .. } => Some(source.as_ref()),
+            Self::Construction { source, .. } => Some(source.as_ref()),
             Self::Runtime(source) => Some(source),
             _ => None,
         }
