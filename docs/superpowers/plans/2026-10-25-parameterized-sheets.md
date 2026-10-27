@@ -142,7 +142,7 @@ pub struct TypedTemplate { /* Rc<SheetTemplate>, full formal shapes, metadata */
 pub struct ModuleCompiler { /* owned TypeRegistry and OpLookup */ }
 pub struct SourceMap { /* immutable source owners indexed by SourceId */ }
 pub struct SourceLocation { pub source: SourceId, pub span: SourceSpan }
-pub struct SourceLabel { pub location: SourceLocation, pub label: String }
+pub struct SourceLabel { pub location: Option<SourceLocation>, pub label: String }
 pub struct ModuleDiagnostic { pub message: String, pub labels: Vec<SourceLabel> }
 
 impl AdamAstParser {
@@ -400,6 +400,27 @@ operation dispatch; do not serialize AST back to text or clone `OpLookup`.
 
 ### Task 5: Resolve modules and build typed reusable definitions
 
+Execute this task through three serial implementation/review gates. Initial
+inspection identified native occurrence metadata and registry adapters as
+prerequisites; no Task 5 implementation was produced during that inspection.
+These gates preserve the approved feature scope and public interfaces:
+
+1. **5A: Sources and native provenance.** Add owning, collision-free source
+   identities and diagnostics, then capture parent-linked inclusion occurrences,
+   local-to-live mappings and authored-to-surviving method indices during native
+   expansion. Preserve checked expansion accounting and iterative owner teardown.
+2. **5B: Source-free complete-shape composition.** Add registry-driven native
+   builder adapters, language slots/recipes, `CompositionBuilder`, checked
+   `TypedTemplate::instantiate`, and retained `ParsedSheet` sources/origins.
+   Cover registered host leaves and compound shapes without parsing source text.
+3. **5C: Module resolution and retained-AST lowering.** Add module collection,
+   imports, definition-use cycle checks and nonexecuting body compilation through
+   5B's adapters. Keep root instantiation with Task 6.
+
+Each gate supplies focused contract tests, exact validation evidence, an
+implementation commit and an independent review before the next gate begins.
+Source-free diagnostics carry absent locations rather than invented spans.
+
 **Files:** create `adam-lang/src/module.rs`, `module/{resolve,compile}.rs`,
 `composition.rs`, `source_map.rs`; modify `type_registry.rs`, `lib.rs`;
 extend `adam-lang/tests/modules.rs`.
@@ -507,7 +528,7 @@ Add `check_module(&ast::Module, &ModuleSet, &TypeRegistry, &OpLookup)
 modify `adam-web-ui/src/labels.rs`; extend `adam-lang/tests/composition.rs` and
 the existing label tests.
 
-**Interfaces:** store `Origin { definition: SourceLocation,
+**Interfaces:** store `Origin { definition: Option<SourceLocation>,
 invocations: Vec<SourceLocation> }` for instantiated cells, relationships and
 methods. `ParsedSheet::locate_error(&adam_rs::Error) -> Vec<SourceLabel>` returns
 definition labels with use-site context. `SourceMap` resolves each `SourceId`
@@ -523,8 +544,10 @@ to owned file name/text. Update all affected direct callers/field accesses.
 
   ```rust
   let labels = parsed.locate_error(&error);
-  assert!(labels.iter().any(|label| label.location.source == definition_source));
-  assert!(labels.iter().any(|label| label.location.source == invocation_source));
+  assert!(labels.iter().any(|label| label.location.as_ref()
+      .is_some_and(|location| location.source == definition_source)));
+  assert!(labels.iter().any(|label| label.location.as_ref()
+      .is_some_and(|location| location.source == invocation_source)));
   ```
 - [ ] **Step 2:** Run the composition diagnostic selector and
   `cargo test -p adam-web-ui --lib labels`; expect failures demonstrating the
