@@ -131,6 +131,65 @@ fn full_shapes_reject_same_carrier_arrays_and_tuples() {
     }
 }
 
+/// Rejects incompatible emitted arrays without reserving declarations or adding graph items.
+#[test]
+fn emitted_array_results_require_complete_declared_shapes() {
+    let emit_ints = || {
+        let mut body = DynSegment::new::<()>();
+        body.op0_repr::<ArrayOf<Leaf<i32>>, _>(|| Array::from_vec(vec![7i32]))?;
+        Ok(body)
+    };
+    let emit_bools = || {
+        let mut body = DynSegment::new::<()>();
+        body.op0_repr::<ArrayOf<Leaf<bool>>, _>(|| Array::from_vec(vec![true]))?;
+        Ok(body)
+    };
+    let shape = TypeShape::Array(Box::new(int()));
+    let mut builder = CompositionBuilder::new(TypeRegistry::new());
+    let mut destination = ParsedSheet::new();
+    let existing = destination.add_cell(9i32);
+
+    let error = builder
+        .cell("output", shape.clone(), emit_bools)
+        .unwrap_err();
+    assert!(!error.message.is_empty());
+    assert_eq!(destination.cells().count(), 1);
+    assert_eq!(destination.relationships().count(), 0);
+
+    let output = builder.cell("output", shape, emit_ints).unwrap();
+    let error = builder
+        .method(&[], std::slice::from_ref(&output), emit_bools)
+        .err()
+        .expect("declared [i32] output must reject an emitted [bool]");
+    assert!(!error.message.is_empty());
+    assert_eq!(destination.cells().count(), 1);
+    assert_eq!(destination.relationships().count(), 0);
+
+    let valid = builder
+        .method(&[], std::slice::from_ref(&output), emit_ints)
+        .unwrap();
+    builder.relationship(vec![valid]).unwrap();
+    let instance = builder
+        .finish()
+        .unwrap()
+        .instantiate(&mut destination, &[])
+        .unwrap();
+    assert_eq!(destination.cells().count(), 2);
+    assert_eq!(destination.relationships().count(), 1);
+    let output = instance
+        .cell(instance.occurrences()[0].id(), output.native())
+        .unwrap();
+    destination.propagate().unwrap();
+    assert_eq!(
+        destination
+            .read_compound::<ArrayOf<Leaf<i32>>>(output)
+            .unwrap()
+            .as_slice(),
+        &[7]
+    );
+    assert_eq!(*destination.read::<i32>(existing).unwrap(), 9);
+}
+
 #[test]
 fn nested_bindings_compare_callable_signatures_and_reject_foreign_slots() {
     let mut child = CompositionBuilder::new(TypeRegistry::new());
