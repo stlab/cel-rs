@@ -369,27 +369,77 @@ fn zero_parameter_empty_groups_can_be_conditional() {
     assert!(instance.relationships().is_empty());
 }
 
-/// Detects recursive expansion of untrusted include nesting.
+/// Detects recursive traversal or last-owner destruction of an accepted deep include chain.
 #[test]
-fn deep_inclusions_expand_without_host_recursion() {
-    let mut keep_alive = Vec::new();
-    keep_alive.push(Rc::new(TemplateBuilder::new().finish().unwrap()));
-    for _ in 0..4096 {
-        let mut builder = TemplateBuilder::new();
-        builder
-            .include(keep_alive.last().unwrap().clone(), &[])
-            .unwrap();
-        keep_alive.push(Rc::new(builder.finish().unwrap()));
-    }
-    let instance = keep_alive
-        .last()
+fn deep_inclusions_expand_and_drop_without_host_recursion() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let mut root = Rc::new(TemplateBuilder::new().finish().unwrap());
+            for _ in 0..32768 {
+                let mut builder = TemplateBuilder::new();
+                builder.include(root, &[]).unwrap();
+                root = Rc::new(builder.finish().unwrap());
+            }
+            let instance = root.instantiate(&mut Sheet::new(), &[]).unwrap();
+            assert!(instance.cells().is_empty());
+            assert!(instance.relationships().is_empty());
+            eprintln!("instantiated 32768 includes; dropping sole root");
+            drop(root);
+        })
         .unwrap()
-        .instantiate(&mut Sheet::new(), &[])
+        .join()
         .unwrap();
-    assert!(instance.cells().is_empty());
-    assert!(instance.relationships().is_empty());
-    // Drop from roots to leaves so this test isolates traversal, not Rc's destructor.
-    while keep_alive.pop().is_some() {}
+}
+
+/// Detects releasing a child's factories while another including template still owns it.
+#[test]
+fn shared_child_factories_live_until_the_last_template_owner_drops() {
+    let captured = Rc::new(7i32);
+    let lifetime = Rc::downgrade(&captured);
+    let mut child = TemplateBuilder::new();
+    child.cell("private", move || Ok(*captured)).unwrap();
+    let child = Rc::new(child.finish().unwrap());
+    let mut first = TemplateBuilder::new();
+    first.include(child.clone(), &[]).unwrap();
+    let first = first.finish().unwrap();
+    let mut second = TemplateBuilder::new();
+    second.include(child.clone(), &[]).unwrap();
+    let second = second.finish().unwrap();
+    drop(child);
+    drop(first);
+    assert!(lifetime.upgrade().is_some());
+    let mut sheet = Sheet::new();
+    let instance = second.instantiate(&mut sheet, &[]).unwrap();
+    assert_eq!(*sheet.read::<i32>(instance.cells()[0]).unwrap(), 7);
+    drop(second);
+    assert!(lifetime.upgrade().is_none());
+    sheet.write(instance.cells()[0], 9i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(instance.cells()[0]).unwrap(), 9);
+}
+
+/// Detects premature release through repeated DAG edges or an external child owner.
+#[test]
+fn repeated_child_edges_preserve_external_template_ownership() {
+    let captured = Rc::new(3i32);
+    let lifetime = Rc::downgrade(&captured);
+    let mut leaf = TemplateBuilder::new();
+    leaf.cell("private", move || Ok(*captured)).unwrap();
+    let leaf = Rc::new(leaf.finish().unwrap());
+    let mut parent = TemplateBuilder::new();
+    parent.include(leaf.clone(), &[]).unwrap();
+    parent.include(leaf.clone(), &[]).unwrap();
+    let parent = parent.finish().unwrap();
+    let mut sheet = Sheet::new();
+    let instance = parent.instantiate(&mut sheet, &[]).unwrap();
+    assert_ne!(instance.cells()[0], instance.cells()[1]);
+    drop(parent);
+    assert!(lifetime.upgrade().is_some());
+    let instance = leaf.instantiate(&mut sheet, &[]).unwrap();
+    assert_eq!(*sheet.read::<i32>(instance.cells()[0]).unwrap(), 3);
+    drop(leaf);
+    assert!(lifetime.upgrade().is_none());
 }
 
 /// Builds three equality directions, each preserving its entire output tuple.

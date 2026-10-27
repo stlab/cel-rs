@@ -193,6 +193,8 @@ enum RelationshipRecipe {
 /// Owns an immutable ordered graph recipe, independent of any live sheet.
 ///
 /// Parameters alias bindings; private cells and methods are fresh per instance.
+/// Destruction releases last-owned inclusion edges iteratively; shared children
+/// and their factories remain alive until their last strong owner releases them.
 /// See the [module example](self).
 pub struct SheetTemplate {
     owner: Rc<()>,
@@ -207,6 +209,27 @@ pub struct SheetTemplate {
     expanded_size: Option<usize>,
     /// Bounds the explicit traversal stack without traversing descendants.
     depth: Option<usize>,
+}
+
+impl Drop for SheetTemplate {
+    /// Releases uniquely owned inclusion descendants without recursive destruction.
+    ///
+    /// Shared children retain their recipes unchanged. Detaching a uniquely owned
+    /// child's edges before dropping it bounds destructor call depth independently
+    /// of inclusion nesting.
+    ///
+    /// - Complexity: O(n) time for released recipe storage n, excluding captured-value
+    ///   destructors; O(w) additional space for the maximum pending relationship edges w.
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.relationships);
+        while let Some(relationship) = pending.pop() {
+            if let RelationshipRecipe::Include { child, .. } = relationship
+                && let Ok(mut child) = Rc::try_unwrap(child)
+            {
+                pending.append(&mut child.relationships);
+            }
+        }
+    }
 }
 
 impl SheetTemplate {
