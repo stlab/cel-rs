@@ -141,6 +141,239 @@ fn publications(
     }
 }
 
+/// Starts the real transport with an explicit caller-owned source collection.
+fn start_modules(
+    records: serde_json::Value,
+) -> (Connection, std::thread::JoinHandle<anyhow::Result<()>>) {
+    let (server, client) = Connection::memory();
+    let thread = std::thread::spawn(move || adam_lsp::serve(&server));
+    client
+        .sender
+        .send(Message::Request(Request::new(
+            1.into(),
+            "initialize".into(),
+            json!({"initializationOptions":{"moduleSources":records}}),
+        )))
+        .unwrap();
+    assert!(matches!(receive(&client), Message::Response(_)));
+    notify(&client, "initialized", json!({}));
+    (client, thread)
+}
+
+/// Completes the in-memory shutdown handshake and joins the bounded server task.
+fn stop_modules(client: &Connection, thread: std::thread::JoinHandle<anyhow::Result<()>>) {
+    client
+        .sender
+        .send(Message::Request(Request::new(
+            2.into(),
+            "shutdown".into(),
+            json!(null),
+        )))
+        .unwrap();
+    assert!(matches!(receive(client), Message::Response(_)));
+    notify(client, "exit", json!(null));
+    thread.join().unwrap().unwrap();
+}
+
+/// A malformed definition cannot clear independent registered errors or hide incomplete checking.
+#[test]
+fn transport_malformed_definition_preserves_independent_errors_and_recovers() {
+    let records = json!([
+        {"path":"lib","uri":"file:///lib.adm2","text":"sheet pair(a: f64) {}"},
+        {"path":"app","uri":"file:///app.adm2","text":"use lib::pair; sheet app { cell x: i32; relationship pair(a: x); }"},
+        {"path":"unrelated","uri":"file:///unrelated.adm2","text":"sheet unrelated { cell x: i32 = true; }"}
+    ]);
+    let (client, thread) = start_modules(records.clone());
+    notify(
+        &client,
+        "workspace/didChangeConfiguration",
+        json!({"settings":{"moduleSources":records}}),
+    );
+    let baseline = publications(&client);
+    let independent_messages: Vec<_> = baseline["file:///unrelated.adm2"]
+        .diagnostics
+        .iter()
+        .filter(|d| !d.message.contains("incomplete"))
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(!independent_messages.is_empty(), "{baseline:?}");
+    assert!(
+        !baseline["file:///app.adm2"].diagnostics.is_empty(),
+        "{baseline:?}"
+    );
+    notify(
+        &client,
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":"file:///lib.adm2","languageId":"adam-lang","version":1,"text":"use"}}),
+    );
+    let broken = publications(&client);
+    assert!(
+        independent_messages
+            .iter()
+            .any(|message| broken["file:///unrelated.adm2"]
+                .diagnostics
+                .iter()
+                .any(|d| &d.message == message)),
+        "{broken:?}"
+    );
+    assert!(
+        broken["file:///app.adm2"]
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("incomplete")),
+        "{broken:?}"
+    );
+    assert!(
+        broken["file:///lib.adm2"]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic
+                    .related_information
+                    .as_ref()
+                    .is_some_and(|related| {
+                        related
+                            .iter()
+                            .any(|label| label.location.uri.as_str() == "file:///lib.adm2")
+                    })
+            }),
+        "{broken:?}"
+    );
+    notify(
+        &client,
+        "textDocument/didChange",
+        json!({"textDocument":{"uri":"file:///lib.adm2","version":2},"contentChanges":[{"text":"sheet pair(a: f64) {}"}]}),
+    );
+    let restored = publications(&client);
+    assert!(independent_messages.iter().any(|message| {
+        restored["file:///unrelated.adm2"]
+            .diagnostics
+            .iter()
+            .any(|d| &d.message == message)
+    }));
+    assert!(restored["file:///app.adm2"].diagnostics.iter().any(|d| {
+        d.related_information.as_ref().is_some_and(|related| {
+            related
+                .iter()
+                .any(|r| r.location.uri.as_str() == "file:///lib.adm2")
+        })
+    }));
+    notify(
+        &client,
+        "textDocument/didChange",
+        json!({"textDocument":{"uri":"file:///lib.adm2","version":3},"contentChanges":[{"text":"sheet pair(a: i32) {}"}]}),
+    );
+    let fixed = publications(&client);
+    assert!(
+        fixed["file:///app.adm2"].diagnostics.is_empty(),
+        "{fixed:?}"
+    );
+    assert!(
+        fixed["file:///lib.adm2"].diagnostics.is_empty(),
+        "{fixed:?}"
+    );
+    assert!(!fixed["file:///unrelated.adm2"].diagnostics.is_empty());
+    stop_modules(&client, thread);
+}
+
+/// Only an explicit array replaces/removes ownership after successful registration.
+#[test]
+fn transport_incomplete_refresh_retains_owners_until_explicit_removal() {
+    let records = json!([
+        {"path":"lib","uri":"file:///lib.adm2","text":"sheet pair(a: f64) {}"},
+        {"path":"app","uri":"file:///app.adm2","text":"use lib::pair; sheet app { cell x: i32; relationship pair(a: x); }"}
+    ]);
+    let (client, thread) = start_modules(records.clone());
+    notify(
+        &client,
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":"file:///app.adm2","languageId":"adam-lang","version":1,"text":"use lib::pair; sheet app { cell x: i32; relationship pair(a: x); }"}}),
+    );
+    assert!(
+        !publications(&client)["file:///app.adm2"]
+            .diagnostics
+            .is_empty()
+    );
+    for settings in [
+        json!({}),
+        json!(null),
+        json!({"editor":{"tabSize":4}}),
+        json!({"moduleSource":records}),
+        json!({"moduleSources":null}),
+    ] {
+        notify(
+            &client,
+            "workspace/didChangeConfiguration",
+            json!({"settings":settings}),
+        );
+        let failed = publications(&client);
+        assert!(
+            !failed["file:///lib.adm2"].diagnostics.is_empty(),
+            "{settings}: {failed:?}"
+        );
+        assert!(
+            failed["file:///app.adm2"]
+                .diagnostics
+                .iter()
+                .all(|d| d.source.as_deref() == Some("adam-lang configuration")),
+            "{settings}: {failed:?}"
+        );
+        assert!(
+            !failed["file:///app.adm2"].diagnostics.is_empty(),
+            "{settings}: {failed:?}"
+        );
+        notify(
+            &client,
+            "workspace/didChangeConfiguration",
+            json!({"settings":{"moduleSources":records}}),
+        );
+        let recovered = publications(&client);
+        assert!(recovered["file:///app.adm2"].diagnostics.iter().any(|d| {
+            d.related_information.as_ref().is_some_and(|related| {
+                related
+                    .iter()
+                    .any(|r| r.location.uri.as_str() == "file:///lib.adm2")
+            })
+        }));
+    }
+    notify(
+        &client,
+        "workspace/didChangeConfiguration",
+        json!({"settings":{"moduleSources":[]}}),
+    );
+    let removed = publications(&client);
+    assert!(removed["file:///lib.adm2"].diagnostics.is_empty());
+    assert!(
+        removed["file:///app.adm2"]
+            .diagnostics
+            .iter()
+            .all(|d| d.source.as_deref() != Some("adam-lang configuration"))
+    );
+    notify(
+        &client,
+        "workspace/didChangeConfiguration",
+        json!({"settings":{"moduleSources":records}}),
+    );
+    let restored = publications(&client);
+    assert!(
+        restored["file:///app.adm2"]
+            .diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic
+                    .related_information
+                    .as_ref()
+                    .is_some_and(|related| {
+                        related
+                            .iter()
+                            .any(|label| label.location.uri.as_str() == "file:///lib.adm2")
+                    })
+            }),
+        "{restored:?}"
+    );
+    stop_modules(&client, thread);
+}
+
 /// Close, source/configuration failure and removal all replace stale transport diagnostics.
 #[test]
 fn transport_close_failures_recovery_and_removal_are_consistent() {

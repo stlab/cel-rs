@@ -24,6 +24,10 @@
 //! with visible configuration diagnostics until a valid snapshot arrives; it never
 //! substitutes empty source text. Invalid snapshots retain the last valid ownership
 //! mapping and report errors. An empty `moduleSources` array explicitly removes it.
+//! Only initialization permits absent module options for source-only hosts.
+//! Refresh settings must explicitly contain `moduleSources` or `moduleSourcesError`;
+//! missing, null, unrelated or misspelled refresh data reports a configuration
+//! error without discarding the registered mapping.
 //!
 //! Open-document text overrides the registered revision by exact URI, including
 //! through configuration refreshes. Closing restores the supplied revision. Changes
@@ -33,6 +37,13 @@
 //! files use the source-only convenience checker with the same standard/Euclid
 //! libraries. The server does no filesystem loading, discovery, root instantiation
 //! or automatic language migration.
+//!
+//! Independent module dependency groups are checked separately using structural
+//! imports and qualified component uses, including conditional/default branches.
+//! A rejected source retains its syntax diagnostic; successfully inserted peers
+//! are still checked. Failed groups also receive an explicit incomplete-check
+//! status because earlier checker phases can prevent later analysis. Errors in
+//! another group never turn a known invalid module into a clean publication.
 //!
 //! # Example
 //!

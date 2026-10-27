@@ -86,9 +86,18 @@ snapshot. The server retains the last valid ownership mapping, blocks checking
 with configuration diagnostics until recovery, and never silently falls back to
 source-only checking for registered modules. All open edits overlay by exact URI
 through refreshes; `didClose` restores the latest supplied revision.
+Only initialization permits an omitted module snapshot for source-only hosts.
+Every refresh must contain `moduleSources` or `moduleSourcesError`. Missing,
+null, unrelated or misspelled refresh settings report a configuration error
+while retaining registered ownership; they never mean implicit removal.
 
 Checking conservatively republishes all registered/open sources so dependents
-and cleared errors stay current. Core libraries perform no filesystem discovery,
+and cleared errors stay current. Independent dependency groups are checked
+separately. Malformed sources retain their syntax diagnostics while the checker
+still checks successfully registered peers. Sources in failed groups also show
+an explicit incomplete-check status because early checker errors can block later
+analysis; independent groups keep their own semantic diagnostics.
+Core libraries perform no filesystem discovery,
 glob imports, automatic language migration or root execution.
 
 ## Trying it out

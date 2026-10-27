@@ -61,8 +61,7 @@ pub fn serve(connection: &Connection) -> anyhow::Result<()> {
         ..Default::default()
     })?;
     let options = connection.initialize(capabilities)?;
-    let mut modules = ModuleSources::default();
-    modules.configure(
+    let modules = ModuleSources::from_initialization(
         options
             .get("initializationOptions")
             .unwrap_or(&serde_json::Value::Null),
