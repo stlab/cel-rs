@@ -16,6 +16,7 @@
 - [[knowledge/filter-purity-and-idempotence-contract.md|Filter Purity and Idempotence Contract]] (observation, 0.80) `adam-rs` `filter` `method` `idempotence` `purity` `constraints`
 - [[knowledge/four-layer-stack-runtime-architecture.md|Four-Layer Stack Runtime Architecture]] (concept, 0.80) `cel-runtime` `raw-stack` `raw-segment` `dyn-segment` `segment` `type-safety`
 - [[knowledge/git-worktree-and-no-direct-commit-policy.md|Git Worktree and No-Direct-Commit Policy]] (procedure, 0.85) `git` `worktree` `githooks` `branching` `repository-policy`
+- [[knowledge/lsp-source-spans-require-original-text-utf-16-projection-in-both-diagnostic-paths.md|LSP source spans require original-text UTF-16 projection in both diagnostic paths]] (discovery, 0.99) `adam-lsp` `unicode` `diagnostics` `source-ownership` `parameterized-sheets`
 - [[knowledge/oplookup-scoping-and-resolution-hierarchy.md|OpLookup Scoping and Resolution Hierarchy]] (concept, 0.80) `cel-parser` `op-lookup` `operator-resolution` `scope` `builtins`
 - [[knowledge/sheet-constraint-planning-and-method-selection-flow.md|Sheet Constraint Planning and Method Selection Flow]] (observation, 0.80) `adam-rs` `sheet` `planner` `multi-way-constraints` `method-selection`
 - [[knowledge/vendored-spectrum-bundle-maintenance-via-xtask.md|Vendored Spectrum Bundle Maintenance via xtask]] (procedure, 0.85) `xtask` `spectrum` `swc-js` `assets` `build-js`
