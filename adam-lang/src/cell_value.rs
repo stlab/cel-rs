@@ -253,18 +253,19 @@ impl Frame {
 }
 
 impl RawFrame {
-    /// Validates every positional read and the result once before execution.
+    /// Validates every positional read and binds the result's capabilities before execution.
     ///
     /// # Errors
     /// Rejects a mismatched signature or missing borrowed cloning.
     /// - Complexity: O(n) in descriptor nodes and emitted reads.
     pub(crate) fn new(
-        body: DynSegment,
+        mut body: DynSegment,
         inputs: &[TypeShape],
         result: &ValueType,
         types: &TypeRegistry,
     ) -> anyhow::Result<Self> {
         let input_types: Vec<_> = inputs.iter().map(|shape| types.value_type(shape)).collect();
+        body.annotate_top(result.clone())?;
         Ok(Self {
             body: PreparedRawSegment::new(body, &input_types, result)?,
             inputs: inputs

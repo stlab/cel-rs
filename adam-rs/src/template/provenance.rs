@@ -159,6 +159,49 @@ pub(super) struct RelationshipOrigin {
 }
 
 impl Instance {
+    /// Enumerates live methods and their authored origins in expansion order.
+    ///
+    /// Tuple fields are relationship identity, compact method index, and authored origin.
+    /// This avoids repeated linear searches when retaining all provenance.
+    /// - Complexity: O(r + m) time for r relationships and m surviving methods;
+    ///   O(1) additional space, excluding collected results.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let template = adam_rs::TemplateBuilder::new().finish()?;
+    /// let instance = template.instantiate(&mut adam_rs::Sheet::new(), &[])?;
+    /// assert_eq!(instance.method_origins().count(), 0);
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn method_origins(
+        &self,
+    ) -> impl Iterator<Item = (RelationshipId, usize, MethodOrigin)> + '_ {
+        self.relationships
+            .iter()
+            .zip(&self.relationship_origins)
+            .flat_map(move |(&relationship, origin)| {
+                let record = &self.occurrences[origin.occurrence];
+                self.authored_methods[origin.methods.clone()]
+                    .iter()
+                    .enumerate()
+                    .map(move |(live, &authored_index)| {
+                        (
+                            relationship,
+                            live,
+                            MethodOrigin {
+                                occurrence: record.id.clone(),
+                                relationship: RelationshipSlot {
+                                    owner: record.template.0.clone(),
+                                    index: origin.slot,
+                                },
+                                authored_index,
+                            },
+                        )
+                    })
+            })
+    }
+
     /// Borrows occurrences in depth-first inclusion order, beginning with the root.
     ///
     /// Filtering by immediate parent yields children in authored inclusion order.

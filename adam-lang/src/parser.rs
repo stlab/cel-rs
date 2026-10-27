@@ -34,11 +34,12 @@ type NamedCells = Vec<(String, CellId, TypeShape)>;
 // ParsedSheet
 // ---------------------------------------------------------------------------
 
-/// The result of [`AdamParser::parse_str`]: a live [`Sheet`] plus the declared
-/// cell names, in source declaration order.
+/// Owns a live [`Sheet`], ordered public root names, complete shapes and provenance.
 ///
 /// Derefs to [`Sheet`] so callers that only need sheet methods (e.g.
 /// `propagate`) can use the result exactly as if it were a `Sheet`.
+/// [`Self::new`] constructs a source-free destination; [`AdamParser::parse_str`]
+/// retains the ordinary source-parsing convenience.
 ///
 /// # Examples
 ///
@@ -85,6 +86,16 @@ pub struct ParsedSheet {
     /// `cell`, `source`, and `out`. Resolves an `adam_rs::Error`'s `ErrorSite::Cell` back to a
     /// source location.
     pub cell_spans: HashMap<CellId, SourceSpan>,
+    /// Retains independent source identities used by instantiated definitions.
+    pub sources: Vec<crate::SourceId>,
+    /// Retains parent-linked provenance for direct template invocations.
+    pub instance_origins: Vec<crate::composition::InstanceOrigin>,
+    /// Maps compact live method indices to occurrence and authored method identity.
+    pub method_origins: HashMap<(RelationshipId, usize), adam_rs::MethodOrigin>,
+    /// Retains every occurrence-local declaration/formal mapped to each live cell.
+    pub cell_origins: HashMap<CellId, Vec<crate::composition::CellOrigin>>,
+    /// Retains full private shapes without exposing private names in root maps.
+    pub(crate) cell_shapes: HashMap<CellId, TypeShape>,
 }
 
 impl std::fmt::Debug for ParsedSheet {
@@ -100,7 +111,148 @@ impl std::fmt::Debug for ParsedSheet {
     }
 }
 
+impl Default for ParsedSheet {
+    /// Constructs an empty source-free destination.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParsedSheet {
+    /// Constructs an empty source-free destination without invoking a parser.
+    ///
+    /// Register manually added root cells with [`Self::register_cell`] before binding.
+    /// # Examples
+    /// ```
+    /// assert_eq!(adam_lang::ParsedSheet::new().cells().count(), 0);
+    /// ```
+    pub fn new() -> Self {
+        Self {
+            sheet: Sheet::new(),
+            cell_names: IndexMap::new(),
+            output_names: IndexMap::new(),
+            requirement_names: HashMap::new(),
+            method_spans: HashMap::new(),
+            relationship_spans: HashMap::new(),
+            cell_spans: HashMap::new(),
+            sources: Vec::new(),
+            instance_origins: Vec::new(),
+            method_origins: HashMap::new(),
+            cell_origins: HashMap::new(),
+            cell_shapes: HashMap::new(),
+        }
+    }
+
+    /// Registers an existing root cell's checked shape and public name.
+    ///
+    /// Rejection leaves metadata and graph unchanged. Private cells are registered
+    /// automatically without root names by typed template instantiation.
+    /// Root output cells also enter `output_names`.
+    /// # Errors
+    /// Rejects duplicate names, unknown shapes/IDs, storage or complete-shape mismatches.
+    /// - Complexity: Expected O(n + l) shape nodes and name bytes.
+    ///
+    /// # Examples
+    /// See [`crate::composition`].
+    pub fn register_cell(
+        &mut self,
+        name: &str,
+        id: CellId,
+        shape: TypeShape,
+        types: &TypeRegistry,
+    ) -> std::result::Result<(), crate::ModuleDiagnostic> {
+        types
+            .validate_shape(&shape)
+            .map_err(crate::composition::diagnostic)?;
+        if self.cell_names.contains_key(name) {
+            return Err(crate::composition::diagnostic("duplicate root cell name"));
+        }
+        self.validate_cell_shape(id, &shape)
+            .map_err(crate::composition::diagnostic)?;
+        if self.sheet.cell_kind(id) == Some(adam_rs::CellKind::Out) {
+            self.output_names.insert(name.into(), id);
+        }
+        self.cell_shapes.insert(id, shape.clone());
+        self.cell_names.insert(name.into(), (id, shape));
+        Ok(())
+    }
+
+    /// Adds a source-free ordinary compound cell with a checked canonical witness.
+    ///
+    /// # Errors
+    /// Rejects duplicate names, unknown leaves, or missing cell clone/equality capabilities
+    /// before graph mutation.
+    /// - Complexity: O(n) shape nodes plus value capability preparation.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{Array, ArrayOf, Leaf};
+    /// let mut sheet = adam_lang::ParsedSheet::new();
+    /// let id = sheet.add_compound_cell::<ArrayOf<Leaf<i32>>>(
+    ///     "xs", Array::from_vec(vec![1]), &adam_lang::TypeRegistry::new())?;
+    /// assert_eq!(sheet.read_compound::<ArrayOf<Leaf<i32>>>(id)?.len(), 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn add_compound_cell<R: cel_runtime::ValueRepr>(
+        &mut self,
+        name: &str,
+        value: R::Value,
+        types: &TypeRegistry,
+    ) -> std::result::Result<CellId, crate::ModuleDiagnostic> {
+        let shape = types
+            .shape_of(&R::value_type())
+            .map_err(crate::composition::diagnostic)?;
+        if matches!(shape, TypeShape::Named(_)) || self.cell_names.contains_key(name) {
+            return Err(crate::composition::diagnostic(
+                "expected compound shape and unused root name",
+            ));
+        }
+        let descriptor = types
+            .checked_value_type(&shape)
+            .map_err(crate::composition::diagnostic)?;
+        CellValue::validate(&descriptor).map_err(crate::composition::diagnostic)?;
+        let owned = cel_runtime::OwnedValue::new::<R>(value)
+            .with_value_type(descriptor)
+            .map_err(crate::composition::diagnostic)?;
+        let id = self.sheet.add_cell(CellValue(owned));
+        self.cell_shapes.insert(id, shape.clone());
+        self.cell_names.insert(name.into(), (id, shape));
+        Ok(id)
+    }
+
+    /// Borrows a root or hygienically private cell's complete registered shape.
+    ///
+    /// Returns `None` for unregistered handles.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(adam_lang::ParsedSheet::new().cell_names.is_empty());
+    /// ```
+    pub fn cell_shape(&self, id: CellId) -> Option<&TypeShape> {
+        self.cell_shapes.get(&id)
+    }
+
+    /// Checks a live cell's concrete storage and full compound identity.
+    ///
+    /// # Errors
+    /// Rejects unknown handles, different storage or recursive shape.
+    /// - Complexity: O(n) compound shape nodes.
+    pub(crate) fn validate_cell_shape(&self, id: CellId, shape: &TypeShape) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.sheet.cell_type_id(id) == Some(cell_type_id(shape)),
+            "invalid actual storage"
+        );
+        if !matches!(shape, TypeShape::Named(_)) {
+            let actual = self.sheet.read::<CellValue>(id)?;
+            // Compare structural identity directly; no registry or carrier inference is needed.
+            anyhow::ensure!(
+                shape_matches(shape, actual.0.value_type()),
+                "complete shape mismatch"
+            );
+        }
+        Ok(())
+    }
+
     /// Clones a compound cell into its exact canonical witness representation.
     ///
     /// # Errors
@@ -365,12 +517,21 @@ impl AdamParser {
             .map_err(|e| Self::validated_sheet_error(&ctx, e))?;
         Ok(ParsedSheet {
             sheet: ctx.sheet,
+            cell_shapes: ctx
+                .cell_names
+                .values()
+                .map(|(id, shape)| (*id, shape.clone()))
+                .collect(),
             cell_names: ctx.cell_names,
             output_names: ctx.output_names,
             requirement_names: ctx.requirement_names,
             method_spans: ctx.method_spans,
             relationship_spans: ctx.relationship_spans,
             cell_spans: ctx.cell_spans,
+            sources: Vec::new(),
+            instance_origins: Vec::new(),
+            method_origins: HashMap::new(),
+            cell_origins: HashMap::new(),
         })
     }
 
@@ -612,10 +773,6 @@ impl AdamParser {
         })?;
 
         let arg_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
-        let arg_type_ids: Vec<TypeId> = inputs
-            .iter()
-            .map(|(_, _, shape)| cell_type_id(shape))
-            .collect();
         let mut input_shapes = vec![declared_shape.clone()];
         input_shapes.extend(inputs.iter().map(|(_, _, shape)| shape.clone()));
 
@@ -634,43 +791,14 @@ impl AdamParser {
                 ));
             }
 
-            let default_fn = self
-                .types
-                .entry_by_type_id(value_type_id)
-                .expect("declared cell type registered")
-                .default_fn
-                .expect("numeric range-filter cell type has a default");
-            let placeholder = default_fn();
-            let result = segment.peek_stack_infos(1)[0].value_type.clone();
-            let segment = std::rc::Rc::new(RefCell::new(
-                RawFrame::new(segment, &input_shapes, &result, &self.types)
-                    .map_err(|e| ParseError::new(e.to_string(), cell_span))?,
-            ));
-            let clamp_segment = std::rc::Rc::clone(&segment);
-            let bounds_segment = std::rc::Rc::clone(&segment);
-            let clamp_fn = range_shape.clamp_fn;
-            let bounds_fn = range_shape.bounds_fn;
-
-            return Ok(adam_rs::Filter::range(
-                value_type_id,
+            return build_range_filter(
+                segment,
                 arg_ids,
-                arg_type_ids,
-                move |value, args| {
-                    clamp_fn(
-                        clamp_segment.borrow_mut().call_with_prefix(value, args)?,
-                        value,
-                    )
-                },
-                move |args| {
-                    bounds_fn(
-                        bounds_segment
-                            .borrow_mut()
-                            .call_checked_with_prefix(placeholder.as_ref(), args)
-                            .ok()?,
-                    )
-                    .ok()
-                },
-            ));
+                &input_shapes[1..],
+                declared_shape,
+                &self.types,
+            )
+            .map_err(|e| ParseError::new(e.to_string(), cell_span));
         }
 
         if !underscore_used {
@@ -693,29 +821,14 @@ impl AdamParser {
             ));
         }
 
-        let frame = RefCell::new(
-            Frame::new(
-                segment,
-                &input_shapes,
-                std::slice::from_ref(declared_shape),
-                false,
-                &self.types,
-            )
-            .map_err(|e| ParseError::new(e.to_string(), cell_span))?,
-        );
-
-        Ok(adam_rs::Filter::new(
-            value_type_id,
+        build_value_filter(
+            segment,
             arg_ids,
-            arg_type_ids,
-            move |value, args| {
-                Ok(frame
-                    .borrow_mut()
-                    .call_with_prefix(value, args)?
-                    .pop()
-                    .expect("one result"))
-            },
-        ))
+            &input_shapes[1..],
+            declared_shape,
+            &self.types,
+        )
+        .map_err(|e| ParseError::new(e.to_string(), cell_span))
     }
 
     /// Prepares and evaluates a nullary expression into concrete leaf or canonical ownership.
@@ -1677,27 +1790,16 @@ impl AdamParser {
         }
 
         let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
-        let input_types: Vec<TypeId> = inputs
-            .iter()
-            .map(|(_, _, shape)| cell_type_id(shape))
-            .collect();
-        let frame = RefCell::new(
-            RawFrame::new(
-                segment,
-                &inputs
-                    .iter()
-                    .map(|(_, _, shape)| shape.clone())
-                    .collect::<Vec<_>>(),
-                &cel_runtime::ValueType::leaf::<bool>(),
-                &self.types,
-            )
-            .map_err(|e| ctx.err_at(e.to_string()))?,
-        );
-        let requirement = Requirement::new(input_ids, input_types, move |args| {
-            let value = frame.borrow_mut().call(args)?;
-            // SAFETY: The complete result was bound as the concrete bool leaf.
-            Ok(unsafe { value.into_typed_bound::<cel_runtime::Leaf<bool>>() })
-        });
+        let requirement = build_requirement(
+            segment,
+            input_ids,
+            &inputs
+                .iter()
+                .map(|(_, _, shape)| shape.clone())
+                .collect::<Vec<_>>(),
+            &self.types,
+        )
+        .map_err(|e| ctx.err_at(e.to_string()))?;
 
         Ok((name, requirement))
     }
@@ -1881,13 +1983,155 @@ fn build_method(
 /// Flattens a declared cell's `TypeShape` to the single `TypeId` `adam_rs` itself needs for its
 /// own (CEL-agnostic) storage bookkeeping. Compound shape identity remains separate from
 /// the private common storage carrier and is validated before constructing any adapter.
-fn cell_type_id(shape: &TypeShape) -> TypeId {
+pub(crate) fn cell_type_id(shape: &TypeShape) -> TypeId {
     match shape {
         TypeShape::Named(type_id) => *type_id,
         _ => TypeId::of::<CellValue>(),
     }
 }
 
+/// Checks a complete shape against an existing canonical descriptor without a registry.
+///
+/// - Complexity: O(n) descriptor nodes.
+fn shape_matches(shape: &TypeShape, value: &cel_runtime::ValueType) -> bool {
+    use cel_runtime::ValueKind;
+    match (shape, value.kind()) {
+        (TypeShape::Named(a), ValueKind::Leaf(b)) => a == b,
+        (TypeShape::Array(a), ValueKind::Array(b)) => shape_matches(a, b),
+        (TypeShape::Tuple(a), ValueKind::Tuple(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(a, b)| shape_matches(a, &b.value_type))
+        }
+        (
+            TypeShape::Callable(a, ar),
+            ValueKind::Callable {
+                parameters: b,
+                result: br,
+            },
+        ) => {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(a, b)| shape_matches(a, b))
+                && shape_matches(ar, br)
+        }
+        _ => false,
+    }
+}
+
+/// Prepares a numeric range filter shared by parsed and native builders.
+///
+/// - Precondition: All named shapes are registered.
+/// # Errors
+/// Rejects missing/mismatched numeric ranges, unavailable defaults or invalid frames.
+/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
+pub(crate) fn build_range_filter(
+    body: DynSegment,
+    ids: Vec<CellId>,
+    inputs: &[TypeShape],
+    output: &TypeShape,
+    types: &TypeRegistry,
+) -> anyhow::Result<adam_rs::Filter> {
+    let id = body
+        .peek_output_type_id()
+        .ok_or_else(|| anyhow::anyhow!("filter has no result"))?;
+    let range = types
+        .range_entry(id)
+        .ok_or_else(|| anyhow::anyhow!("expected numeric range filter"))?;
+    let value_type = cell_type_id(output);
+    anyhow::ensure!(
+        range.element_type_id == value_type,
+        "filter range element mismatch"
+    );
+    let default = types
+        .entry_by_type_id(value_type)
+        .and_then(|entry| entry.default_fn)
+        .ok_or_else(|| anyhow::anyhow!("numeric range filter requires a default"))?;
+    let placeholder = default();
+    let result = body.peek_stack_infos(1)[0].value_type.clone();
+    let shapes: Vec<_> = std::iter::once(output.clone())
+        .chain(inputs.iter().cloned())
+        .collect();
+    let frame = std::rc::Rc::new(RefCell::new(RawFrame::new(body, &shapes, &result, types)?));
+    let clamp = frame.clone();
+    let clamp_fn = range.clamp_fn;
+    let bounds_fn = range.bounds_fn;
+    Ok(adam_rs::Filter::range(
+        value_type,
+        ids,
+        inputs.iter().map(cell_type_id).collect(),
+        move |value, args| clamp_fn(clamp.borrow_mut().call_with_prefix(value, args)?, value),
+        move |args| {
+            bounds_fn(
+                frame
+                    .borrow_mut()
+                    .call_checked_with_prefix(placeholder.as_ref(), args)
+                    .ok()?,
+            )
+            .ok()
+        },
+    ))
+}
+
+/// Prepares the common value-returning filter frame for parsed and native builders.
+///
+/// - Precondition: All named shapes are registered.
+/// # Errors
+/// Rejects incompatible emitted signatures or missing required cell capabilities.
+/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
+pub(crate) fn build_value_filter(
+    body: DynSegment,
+    ids: Vec<CellId>,
+    inputs: &[TypeShape],
+    output: &TypeShape,
+    types: &TypeRegistry,
+) -> anyhow::Result<adam_rs::Filter> {
+    let shapes: Vec<_> = std::iter::once(output.clone())
+        .chain(inputs.iter().cloned())
+        .collect();
+    let frame = RefCell::new(Frame::new(
+        body,
+        &shapes,
+        std::slice::from_ref(output),
+        false,
+        types,
+    )?);
+    Ok(adam_rs::Filter::new(
+        cell_type_id(output),
+        ids,
+        inputs.iter().map(cell_type_id).collect(),
+        move |value, args| Ok(frame.borrow_mut().call_with_prefix(value, args)?.remove(0)),
+    ))
+}
+
+/// Prepares the common bool-returning requirement frame for both builder paths.
+///
+/// - Precondition: All named shapes are registered.
+/// # Errors
+/// Rejects incompatible signatures or unavailable borrowed cloning.
+/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
+pub(crate) fn build_requirement(
+    body: DynSegment,
+    ids: Vec<CellId>,
+    inputs: &[TypeShape],
+    types: &TypeRegistry,
+) -> anyhow::Result<Requirement> {
+    let frame = RefCell::new(RawFrame::new(
+        body,
+        inputs,
+        &cel_runtime::ValueType::leaf::<bool>(),
+        types,
+    )?);
+    Ok(Requirement::new(
+        ids,
+        inputs.iter().map(cell_type_id).collect(),
+        move |args| {
+            let value = frame.borrow_mut().call(args)?;
+            // SAFETY: RawFrame bound the result to the complete concrete bool descriptor.
+            Ok(unsafe { value.into_typed_bound::<cel_runtime::Leaf<bool>>() })
+        },
+    ))
+}
 /// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
 ///
 /// Returns the output names in declaration order alongside whether the left-hand side requests

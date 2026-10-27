@@ -193,6 +193,7 @@
 pub mod ast;
 mod ast_parser;
 mod cell_value;
+pub mod composition;
 mod error_labels;
 mod fmt;
 mod parser;
@@ -207,6 +208,10 @@ mod typecheck;
 pub use ast_parser::AdamAstParser;
 pub use cel_parser::ParseError;
 pub use cell_value::{debug_compound_cell, prepare_compound_cell_formatter};
+pub use composition::{
+    CellOrigin, CellSlot, CompositionBuilder, InstanceOrigin, MethodRecipe, OccurrenceOrigin,
+    TypedTemplate,
+};
 pub use fmt::{FormatSourceError, format_module, format_sheet, format_source};
 pub use parser::{AdamParser, ParsedSheet};
 pub use source_map::{ModuleDiagnostic, SourceId, SourceLabel, SourceLocation, SourceMap};

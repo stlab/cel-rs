@@ -92,6 +92,8 @@ pub(crate) struct RangeEntry {
 /// Metadata for a single type registered in a [`TypeRegistry`].
 #[derive(Clone)]
 pub struct TypeEntry {
+    /// Selects native recipe constructors monomorphized for this registered leaf.
+    pub(crate) template: crate::composition::LeafAdapters,
     /// Moves an exactly bound canonical leaf into its concrete Adam storage.
     pub(crate) box_owned: unsafe fn(cel_runtime::OwnedValue) -> Box<dyn Any>,
     /// Runtime type identity.
@@ -378,6 +380,7 @@ impl TypeRegistry {
         self.by_name.insert(
             name.to_owned(),
             TypeEntry {
+                template: crate::composition::LeafAdapters::of::<T>(),
                 box_owned: box_owned_impl::<T>,
                 type_id,
                 type_name: std::any::type_name::<T>(),
@@ -422,6 +425,7 @@ impl TypeRegistry {
         self.by_name.insert(
             name.to_owned(),
             TypeEntry {
+                template: crate::composition::LeafAdapters::of::<T>(),
                 box_owned: box_owned_impl::<T>,
                 type_id,
                 type_name: std::any::type_name::<T>(),
@@ -608,6 +612,64 @@ impl TypeRegistry {
     /// - Complexity: O(n) in shape nodes.
     pub(crate) fn value_type(&self, shape: &TypeShape) -> cel_runtime::ValueType {
         self.one_associated(shape).value_type
+    }
+
+    /// Checks every registered leaf and representable compound layout without evaluation.
+    ///
+    /// Callable signatures and empty arrays still require registered element leaves.
+    /// # Errors
+    /// Rejects unregistered leaves or unrepresentable tuple layouts.
+    /// - Complexity: O(n) descriptor nodes and space.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_lang::{TypeRegistry, type_registry::TypeShape};
+    /// let types = TypeRegistry::new();
+    /// assert!(types.validate_shape(&TypeShape::Array(Box::new(
+    ///     TypeShape::Named(std::any::TypeId::of::<i32>())
+    /// ))).is_ok());
+    /// ```
+    pub fn validate_shape(&self, shape: &TypeShape) -> anyhow::Result<()> {
+        self.checked_value_type(shape).map(|_| ())
+    }
+
+    /// Resolves a full descriptor while rejecting unknown leaves and invalid layouts.
+    ///
+    /// # Errors
+    /// Rejects unregistered leaves and unrepresentable tuple layouts.
+    /// - Complexity: O(n) descriptor nodes and space.
+    pub(crate) fn checked_value_type(
+        &self,
+        shape: &TypeShape,
+    ) -> anyhow::Result<cel_runtime::ValueType> {
+        use cel_runtime::{AssociatedType, ValueType};
+        Ok(match shape {
+            TypeShape::Named(id) => {
+                let entry = self
+                    .entry_by_type_id(*id)
+                    .ok_or_else(|| anyhow::anyhow!("unregistered shape leaf {id:?}"))?;
+                (entry.value_type_fn)()
+            }
+            TypeShape::Tuple(fields) => ValueType::tuple(
+                fields
+                    .iter()
+                    .map(|field| {
+                        Ok(AssociatedType {
+                            offset: 0,
+                            value_type: self.checked_value_type(field)?,
+                        })
+                    })
+                    .collect::<anyhow::Result<_>>()?,
+            )?,
+            TypeShape::Array(element) => ValueType::array(self.checked_value_type(element)?),
+            TypeShape::Callable(parameters, result) => ValueType::callable(
+                parameters
+                    .iter()
+                    .map(|p| self.checked_value_type(p))
+                    .collect::<anyhow::Result<_>>()?,
+                self.checked_value_type(result)?,
+            ),
+        })
     }
 
     /// Recovers structural identity without synthesizing aggregate Rust identities.

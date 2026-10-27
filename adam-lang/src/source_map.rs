@@ -181,3 +181,14 @@ pub struct ModuleDiagnostic {
     /// Identifies implicated definitions and uses in diagnostic order.
     pub labels: Vec<SourceLabel>,
 }
+
+impl std::fmt::Display for ModuleDiagnostic {
+    /// Formats the primary diagnostic message without rendering source labels.
+    ///
+    /// - Complexity: O(m) message bytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ModuleDiagnostic {}
