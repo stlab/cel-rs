@@ -6,8 +6,10 @@ and approved corrections. Task 10 audited the public contracts, added missing
 boundary coverage, corrected source-only Unicode diagnostic columns, and ran
 the complete local gate. The independent whole-branch review then found one
 Important and two actionable Minor findings. The consolidated local fix wave
-addresses all three; the controller's scoped re-review remains pending.
-No push, pull request, merge, issue update or release is claimed.
+addresses all three. The scoped re-review approved those fixes with no new
+breakage or open findings on 2026-10-27, at
+`2b817a95f94cb59430adc13558b759cd0ee8d0c0`.
+No push, pull request, merge or release is claimed.
 
 The approved semantic authority is
 [`specs/2026-10-25-parameterized-sheets-design.md`](specs/2026-10-25-parameterized-sheets-design.md).
@@ -313,11 +315,15 @@ installation or new mdBook distribution build is claimed.
 
 ## What's left
 
-The sole independent whole-branch review is complete. The controller must inspect
-the consolidated fix report and supply the scoped re-review before publication.
-Only after that confirmation should it publish the branch/PR and update #29's
-design-stage issue body and the milestone with the verified local
-implementation/review status. #29 remains
-open, titled “parameterized sheets”, in v1.0. No automatic closure or merged
-status follows from this handoff. Publishing, merging and release remain
-separate authorized actions. Existing #261–#264 exclusions are unchanged.
+The independent whole-branch review and scoped fix re-review are complete.
+All three findings are addressed; no findings remain open. The final product
+commits are `b82d55c` (review fixes) and `2b817a9` (durable Scout knowledge).
+The full gate recorded above covers that product state. The final status
+updates change only prose.
+
+#29 remains open in v1.0 pending publication. Publishing the branch/PR, merging
+and release require separate authorization; no automatic closure or merged
+status follows from this handoff. Existing #261–#264 exclusions are unchanged.
+Retain the ignored local review reports and raw logs until publication so their
+evidence links remain usable. The scoped report is
+`.superpowers/sdd/2026-10-25-parameterized-sheets/final-fix-review.md`.
