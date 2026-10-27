@@ -397,7 +397,112 @@ fn failure(message: impl fmt::Display, site: SourceLabel) -> ModuleDiagnostic {
     }
 }
 
+/// Adds declaration context while retaining the original inference site as secondary.
+///
+/// - Complexity: O(m + l) message bytes and labels.
+fn contextual_error(
+    mut error: ModuleDiagnostic,
+    context: &str,
+    site: SourceLabel,
+) -> ModuleDiagnostic {
+    error.message = format!("{context}: {}", error.message);
+    error.labels.insert(0, site);
+    error
+}
+
+/// Describes the first differing complete type, including tuple arity.
+///
+/// - Precondition: `expected` and `actual` differ and contain registered leaves.
+/// - Complexity: O(n) compared type nodes and formatted name bytes.
+fn shape_mismatch(expected: &TypeShape, actual: &TypeShape, types: &TypeRegistry) -> String {
+    debug_assert_ne!(expected, actual);
+    if let (TypeShape::Tuple(expected), TypeShape::Tuple(actual)) = (expected, actual) {
+        if expected.len() != actual.len() {
+            return format!(
+                "tuple arity mismatch: expected {}, got {}",
+                expected.len(),
+                actual.len()
+            );
+        }
+        if let Some((expected, actual)) = expected.iter().zip(actual).find(|(a, b)| a != b) {
+            return shape_mismatch(expected, actual, types);
+        }
+    }
+    format!(
+        "type mismatch: expected `{}`, got `{}`",
+        types.display_name(expected),
+        types.display_name(actual)
+    )
+}
+
+/// Returns the first invalid native method prefix, or no method for an empty relationship.
+///
+/// Binary search uses the monotone native structural-validity predicate.
+/// - Precondition: The complete edge list fails native validation.
+/// - Complexity: O(m²e log m) time and O(me) native scratch space for m methods of e edges.
+fn first_invalid_method(edges: &[(&[usize], &[usize])]) -> Option<usize> {
+    debug_assert!(adam_rs::template::check_relationship_edges(edges).is_err());
+    if edges.is_empty() {
+        return None;
+    }
+    let mut lower = 1;
+    let mut upper = edges.len();
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2;
+        if adam_rs::template::check_relationship_edges(&edges[..middle]).is_ok() {
+            lower = middle + 1;
+        } else {
+            upper = middle;
+        }
+    }
+    Some(lower - 1)
+}
+
 impl<'a> Checker<'a, '_> {
+    /// Locates a rejected native relationship at its first invalid authored prefix.
+    ///
+    /// The native validator remains authoritative; this error-only pass adds
+    /// binding/declaration labels without constructing methods or another graph.
+    /// - Precondition: `edges` correspond to `relationship` and fail native validation.
+    /// - Complexity: O(m²e log m) error-only native validation and O(me) label work.
+    fn relationship_error(
+        &self,
+        relationship: &ast::RelationshipDecl,
+        edges: &[(&[usize], &[usize])],
+        message: &str,
+    ) -> ModuleDiagnostic {
+        let Some(index) = first_invalid_method(edges) else {
+            return failure(
+                message,
+                label(self.owner, relationship.span, "relationship"),
+            );
+        };
+        let mut error = failure(
+            format!("invalid relationship methods/outputs: {message}"),
+            label(self.owner, relationship.bindings[index].span, "method"),
+        );
+        let claimed: HashSet<_> = edges[index].1.iter().collect();
+        for (prior, (_, outputs)) in edges[..index].iter().enumerate() {
+            let overlap = outputs.iter().any(|id| claimed.contains(id));
+            error.labels.push(label(
+                self.owner,
+                relationship.bindings[prior].span,
+                if overlap {
+                    "collides with this earlier method"
+                } else {
+                    "earlier method declared here"
+                },
+            ));
+            for &id in outputs.iter().filter(|id| claimed.contains(id)) {
+                let cell = &self.definitions[self.id].cells[id];
+                let mut site = cell.label.clone();
+                site.label = format!("output cell `{}` is claimed more than once", cell.name);
+                error.labels.push(site);
+            }
+        }
+        error
+    }
+
     /// Appends a local item and returns its stable ordinal.
     ///
     /// - Complexity: Amortized O(1), plus label bytes.
@@ -440,6 +545,7 @@ impl<'a> Checker<'a, '_> {
         syntax: &'a Expr,
         capture: bool,
         candidate: Option<usize>,
+        context: Option<(&str, SourceLabel)>,
     ) -> Result<(Expression<'a>, DynSegment, bool), ModuleDiagnostic> {
         let definition = &self.definitions[self.id];
         let cells = &definition.cells;
@@ -481,7 +587,7 @@ impl<'a> Checker<'a, '_> {
                 Ok(true)
             },
         )
-        .map_err(|error| failure(error, site.clone()))?;
+        .map_err(|error| parse_error(self.owner, &error))?;
         let ty = segment
             .peek_stack_infos(1)
             .first()
@@ -494,9 +600,14 @@ impl<'a> Checker<'a, '_> {
         {
             TypeShape::Named(id)
         } else {
-            self.types
-                .shape_of(&ty)
-                .map_err(|error| failure(error, site.clone()))?
+            self.types.shape_of(&ty).map_err(|error| {
+                let error = failure(error, site.clone());
+                if let Some((context, site)) = context {
+                    contextual_error(error, context, site)
+                } else {
+                    error
+                }
+            })?
         };
         Ok((
             Expression {
@@ -553,11 +664,26 @@ impl<'a> Checker<'a, '_> {
         kind: Kind,
     ) -> Result<usize, ModuleDiagnostic> {
         let site = label(self.owner, span, "cell declaration");
+        let context = format!(
+            "{} `{name}`",
+            match kind {
+                Kind::Source => "source",
+                Kind::Out => "out",
+                _ => "cell",
+            }
+        );
         if self.definitions[self.id].names.contains_key(name) {
             return Err(failure(format!("duplicate cell `{name}`"), site));
         }
         let compiled = initializer
-            .map(|syntax| self.expression(syntax, kind == Kind::Out, None))
+            .map(|syntax| {
+                self.expression(
+                    syntax,
+                    kind == Kind::Out,
+                    None,
+                    Some((&context, site.clone())),
+                )
+            })
             .transpose()?;
         let shape = if let Some(annotation) = annotation {
             self.types
@@ -575,12 +701,15 @@ impl<'a> Checker<'a, '_> {
             .types
             .checked_value_type(&shape)
             .map_err(|error| failure(error, site.clone()))?;
-        CellValue::validate(&ty).map_err(|error| failure(error, site.clone()))?;
         if let Some((expression, _, _)) = &compiled {
             if expression.shape != shape {
                 return Err(failure(
-                    "initializer type mismatch",
-                    expression.label.clone(),
+                    format!(
+                        "{context}: initializer type mismatch: expected `{}`, got `{}`",
+                        self.types.display_name(&shape),
+                        self.types.display_name(&expression.shape)
+                    ),
+                    site.clone(),
                 ));
             }
         } else {
@@ -588,6 +717,7 @@ impl<'a> Checker<'a, '_> {
                 .validate_default(&shape)
                 .map_err(|error| failure(error, site.clone()))?;
         }
+        CellValue::validate(&ty).map_err(|error| failure(error, site.clone()))?;
         let id = self.definitions[self.id].cells.len();
         self.definitions[self.id].cells.push(Cell {
             name,
@@ -633,7 +763,8 @@ impl<'a> Checker<'a, '_> {
     ) -> Result<(), ModuleDiagnostic> {
         let shape = self.definitions[self.id].cells[cell].shape.clone();
         if let Some(filter) = filter {
-            let (expression, segment, used) = self.expression(&filter.body, true, Some(cell))?;
+            let (expression, segment, used) =
+                self.expression(&filter.body, true, Some(cell), None)?;
             if expression.inputs.contains(&cell) {
                 return Err(failure(
                     "filter cannot depend on its own cell",
@@ -645,8 +776,14 @@ impl<'a> Checker<'a, '_> {
                 .and_then(|id| self.types.range_entry(id));
             let is_range = range.is_some();
             if let Some(range) = range {
-                if range.element_type_id != crate::parser::cell_type_id(&shape) {
-                    return Err(failure("filter range element mismatch", expression.label));
+                if range.element_type_id != crate::cell_value::cell_type_id(&shape) {
+                    return Err(failure(
+                        format!(
+                            "filter range bounds must be `{}`",
+                            self.types.display_name(&shape)
+                        ),
+                        expression.label,
+                    ));
                 }
                 let result = segment.peek_stack_infos(1)[0].value_type.clone();
                 let cells = &self.definitions[self.id].cells;
@@ -674,11 +811,24 @@ impl<'a> Checker<'a, '_> {
                 },
             );
         }
+        let mut names = HashSet::new();
         for requirement in requirements
             .into_iter()
             .flat_map(|block| &block.requirements)
         {
-            let (expression, segment, _) = self.expression(&requirement.body, true, None)?;
+            if let Some(name) = &requirement.name
+                && !names.insert(name)
+            {
+                return Err(failure(
+                    format!("duplicate requirement `{name}`"),
+                    label(
+                        self.owner,
+                        requirement.name_span.unwrap_or(requirement.span),
+                        "requirement",
+                    ),
+                ));
+            }
+            let (expression, segment, _) = self.expression(&requirement.body, true, None, None)?;
             self.frame(
                 &expression,
                 segment,
@@ -728,7 +878,11 @@ impl<'a> Checker<'a, '_> {
                     label(self.owner, binding.span, "method"),
                 ));
             }
-            let (expression, segment, _) = self.expression(&binding.body, true, None)?;
+            let (name, span) = &binding.outputs[0];
+            let context = format!("output `{name}`");
+            let site = label(self.owner, *span, "output");
+            let (expression, segment, _) =
+                self.expression(&binding.body, true, None, Some((&context, site.clone())))?;
             let shapes: Vec<_> = outputs
                 .iter()
                 .map(|id| self.definitions[self.id].cells[*id].shape.clone())
@@ -738,6 +892,15 @@ impl<'a> Checker<'a, '_> {
             } else {
                 shapes[0].clone()
             };
+            if result != expression.shape {
+                return Err(failure(
+                    format!(
+                        "{context}: {}",
+                        shape_mismatch(&result, &expression.shape, self.types)
+                    ),
+                    site,
+                ));
+            }
             self.frame(&expression, segment, &result)?;
             edges.push((expression.inputs.clone(), outputs.clone()));
             self.push(
@@ -754,9 +917,8 @@ impl<'a> Checker<'a, '_> {
             .iter()
             .map(|(inputs, outputs)| (inputs.as_slice(), outputs.as_slice()))
             .collect();
-        adam_rs::template::check_relationship_edges(&views).map_err(|error| {
-            failure(error, label(self.owner, relationship.span, "relationship"))
-        })?;
+        adam_rs::template::check_relationship_edges(&views)
+            .map_err(|error| self.relationship_error(relationship, &views, error))?;
         let end = self.definitions[self.id].items.len();
         self.definitions[self.id].items[ordinal].body = Body::Relationship {
             methods: ordinal + 1..end,
@@ -849,7 +1011,17 @@ impl<'a> Checker<'a, '_> {
         &mut self,
         conditional: &'a ast::ConditionalDecl,
     ) -> Result<(), ModuleDiagnostic> {
-        let (expression, segment, _) = self.expression(&conditional.match_expr, true, None)?;
+        let site = label(
+            self.owner,
+            conditional.match_expr.span(),
+            "match expression",
+        );
+        let (expression, segment, _) = self.expression(
+            &conditional.match_expr,
+            true,
+            None,
+            Some(("match expression", site)),
+        )?;
         let shape = expression.shape.clone();
         CellValue::validate(&self.types.value_type(&shape))
             .map_err(|error| failure(error, expression.label.clone()))?;
@@ -1102,6 +1274,18 @@ impl Checked<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// Locates early, late and empty structural failures without accepting later methods.
+    #[test]
+    fn invalid_prefix_selects_the_first_authored_failure() {
+        let valid = (&[0usize][..], &[1usize][..]);
+        let reverse = (&[1usize][..], &[0usize][..]);
+        let invalid = (&[][..], &[2usize][..]);
+        assert_eq!(first_invalid_method(&[]), None);
+        assert_eq!(first_invalid_method(&[(&[][..], &[][..])]), Some(0));
+        assert_eq!(first_invalid_method(&[valid, invalid, reverse]), Some(1));
+        assert_eq!(first_invalid_method(&[valid, reverse, invalid]), Some(2));
+    }
+
     use super::*;
     use crate::cell_value::Frame;
 

@@ -251,37 +251,6 @@ fn range_bounds_impl<T: Clone + 'static>(
 }
 
 impl TypeRegistry {
-    /// Retains recursive identities while installing registered leaf capabilities.
-    ///
-    /// # Errors
-    /// Returns an error if a tuple layout is unrepresentable.
-    ///
-    /// - Complexity: O(n) in descriptor nodes.
-    pub(crate) fn enrich_value_type(
-        &self,
-        ty: &cel_runtime::ValueType,
-    ) -> anyhow::Result<cel_runtime::ValueType> {
-        use cel_runtime::{AssociatedType, ValueKind, ValueType};
-        match ty.kind() {
-            ValueKind::Leaf(id) => Ok(self
-                .entry_by_type_id(*id)
-                .map_or_else(|| ty.clone(), |entry| (entry.value_type_fn)())),
-            ValueKind::Array(element) => Ok(ValueType::array(self.enrich_value_type(element)?)),
-            ValueKind::Tuple(fields) => ValueType::tuple(
-                fields
-                    .iter()
-                    .map(|field| {
-                        Ok(AssociatedType {
-                            offset: 0,
-                            value_type: self.enrich_value_type(&field.value_type)?,
-                        })
-                    })
-                    .collect::<anyhow::Result<_>>()?,
-            ),
-            ValueKind::Callable { .. } => Ok(ty.clone()),
-        }
-    }
-
     /// Returns a registered leaf's source-facing name and complete CEL element descriptor.
     ///
     /// - Complexity: O(l) to clone the registered name of length l.

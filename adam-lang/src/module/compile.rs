@@ -102,7 +102,7 @@ pub struct RootCell {
 
 /// Owns a lowered root and its public-name assembly inputs, without constructing it.
 ///
-/// Task 6 consumes the internal recipe through the same native instantiator as components.
+/// [`CompiledModules::instantiate_root`] uses the same native instantiator as components.
 /// See [`CompiledModules::prepared_root`].
 pub struct PreparedRoot {
     pub(crate) template: TypedTemplate,
@@ -137,11 +137,69 @@ pub struct CompiledModules {
     templates: HashMap<ModulePath, HashMap<String, TypedTemplate>>,
     roots: HashMap<ModulePath, Vec<(String, PreparedRoot)>>,
     sources: Vec<SourceId>,
-    /// Keeps the immutable entry available to Task 6 without cloning a registry/lookup.
+    /// Shares the immutable entry with subsequent compilations and parser conveniences.
     pub(crate) environment: Rc<Environment>,
 }
 
 impl CompiledModules {
+    /// Constructs one explicitly selected root without propagation.
+    ///
+    /// Only authored root declarations enter the ordered public maps. Included
+    /// private cells retain shapes and provenance but never become public names.
+    /// The complete combined sheet passes native guard-independence validation.
+    ///
+    /// # Errors
+    /// Returns an owning diagnostic for an unknown selection, construction failure,
+    /// or invalid combined graph. No partial live sheet escapes on failure.
+    /// - Complexity: Native instantiation and validation plus O(c + a + s) root
+    ///   declarations, authored records and retained source identities.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut modules = adam_lang::ModuleSet::new();
+    /// let path = "app".parse()?;
+    /// modules.insert_source(path, "app.adm2", "sheet app { cell x: i32 = 7; }")?;
+    /// let compiled = adam_lang::ModuleCompiler::new(adam_lang::TypeRegistry::new(),
+    ///     cel_parser::OpLookup::new()).compile(modules).map_err(|mut e| e.remove(0))?;
+    /// let parsed = compiled.instantiate_root(&"app".parse()?, "app")?;
+    /// assert_eq!(*parsed.read::<i32>(parsed.cell_names["x"].0).unwrap(), 7);
+    /// # Ok::<(), adam_lang::ModuleDiagnostic>(())
+    /// ```
+    pub fn instantiate_root(
+        &self,
+        module: &ModulePath,
+        name: &str,
+    ) -> Result<crate::ParsedSheet, ModuleDiagnostic> {
+        let root = self.prepared_root(module, name).ok_or_else(|| {
+            crate::composition::diagnostic(format!("unknown root `{module}::{name}`"))
+        })?;
+        let mut destination = crate::ParsedSheet::new();
+        let instance = root.template.instantiate(&mut destination, &[])?;
+        let occurrence = instance.occurrences()[0].id();
+        for cell in root.cells() {
+            let id = instance
+                .cell(occurrence, &cell.slot)
+                .expect("prepared root owns each authored local slot");
+            destination
+                .cell_names
+                .insert(cell.name.clone(), (id, cell.shape.clone()));
+            if cell.kind == adam_rs::CellKind::Out {
+                destination.output_names.insert(cell.name.clone(), id);
+            }
+        }
+        destination.retain_root_spans(&instance);
+        let mut sources: HashSet<_> = destination.sources.iter().cloned().collect();
+        for source in &self.sources {
+            if sources.insert(source.clone()) {
+                destination.sources.push(source.clone());
+            }
+        }
+        destination.sheet.validate().map_err(|error| {
+            destination.validation_diagnostic(error, root.definition_label(), &instance)
+        })?;
+        Ok(destination)
+    }
+
     /// Borrows source identities from supplied files and imported immutable templates.
     ///
     /// Includes empty source modules. Independent sources keep their ownership identity

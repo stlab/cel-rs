@@ -6,9 +6,13 @@
 //! # Grammar
 //!
 //! ```text
-//! sheet              = "sheet" identifier "{" { sheet_item } "}".
+//! module             = { use_decl | sheet }.
+//! use_decl           = "use" qualified_name [ "as" identifier ] ";".
+//! sheet              = "sheet" identifier [ "(" [ parameter { "," parameter } [ "," ] ] ")" ]
+//!                        "{" { sheet_item } "}".
+//! parameter          = identifier ":" type_expr.
 //! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
-//!                        | source_decl).
+//!                        | source_decl | relationship_use).
 //! cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 //! cell_filter        = "filter" expression.
 //! cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
@@ -17,15 +21,26 @@
 //!                    | "[" type_expr "]"
 //!                    | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" "{" { binding } "}".
+//! relationship_use   = "relationship" qualified_name "(" [ actual { "," actual } [ "," ] ] ")" ";".
+//! actual             = identifier ":" identifier.
+//! qualified_name     = identifier { "::" identifier }.
 //! binding            = binding_target ":=" expression ";".
 //! binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
 //! conditional_decl   = "conditional" expression "{" { conditional_branch } "}".
-//! conditional_branch = (literal_pattern | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+//! conditional_branch = (literal_pattern | "_") "=>" "{"
+//!                        { relationship_decl | relationship_use } "}" [ "," ].
 //! out_decl           = "out" identifier [":" type_expr] ":=" expression
 //!                        [ cell_filter ] [ require_block ] ";".
 //! require_block      = "require" "{" { requirement } "}".
 //! requirement        = [ "@" identifier ] expression ";".
 //! ```
+//!
+//! A sheet without a parameter list is a root; a sheet with a parameter list
+//! defines a reusable component. [`AdamParser::parse_str`] constructs a module's
+//! sole root through [`ModuleCompiler`]. Collections with several roots use
+//! [`CompiledModules::instantiate_root`] for explicit selection. Construction
+//! checks the final combined graph without propagation. [`check_module`] checks
+//! registered sources and imports without executing any expressions.
 //!
 //! The design spec for `cell_decl` also calls for an optional trailing `":=" expression`
 //! clause, not shown above because **this crate does not yet implement it** — see
@@ -204,8 +219,7 @@ mod trivia;
 pub mod type_registry;
 mod typecheck;
 
-// adam-lang reuses cel_parser::ParseError directly; no new error type is introduced.
-// All parse errors carry a proc_macro2::Span for source-location diagnostics.
+// Live-root errors keep their owning ModuleDiagnostic in ParseError's source chain.
 pub use ast_parser::AdamAstParser;
 pub use cel_parser::ParseError;
 pub use cell_value::{debug_compound_cell, prepare_compound_cell_formatter};

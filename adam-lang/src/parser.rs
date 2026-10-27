@@ -1,34 +1,53 @@
-//! adam-lang parser — grammar productions and sheet construction.
+//! Builds live roots through the checked module compiler and native instantiator.
 //!
 //! See the crate root's [`# Grammar`](crate#grammar) section for the full EBNF.
 
-use std::any::{Any, TypeId};
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 
-use adam_rs::{
-    CellId, ErrorSite, MatchExpr, Method, RelationshipId, Requirement, RequirementId, Sheet,
-};
-use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
-use cel_parser::{CELParser, OpLookup, ParseError, SourceSpan};
-use cel_runtime::DynSegment;
+use adam_rs::{CellId, ErrorSite, RelationshipId, RequirementId, Sheet};
+use cel_parser::lex_lexer::{HasSpan, LexLexer};
+use cel_parser::{OpLookup, ParseError, SourceSpan};
 use proc_macro2::{Span, TokenStream};
 
 use crate::TypeRegistry;
-use crate::cell_value::{CellValue, Frame, RawFrame};
-use crate::type_registry::{AddConditionalFn, TypeShape};
+use crate::cell_value::{CellValue, cell_type_id};
+use crate::type_registry::TypeShape;
 
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
 
-/// A parsed identifier's resolved `(CellId, TypeShape)`, paired with its source name — used both
-/// for a construct's declared outputs and for the inputs [`AdamParser::parse_deduced_expr`]
-/// deduces from whichever already-declared cells an expression references.
-type NamedCells = Vec<(String, CellId, TypeShape)>;
+/// Checks a complete shape against an existing canonical descriptor without a registry.
+///
+/// - Complexity: O(n) descriptor nodes.
+fn shape_matches(shape: &TypeShape, value: &cel_runtime::ValueType) -> bool {
+    use cel_runtime::ValueKind;
+    match (shape, value.kind()) {
+        (TypeShape::Named(a), ValueKind::Leaf(b)) => a == b,
+        (TypeShape::Array(a), ValueKind::Array(b)) => shape_matches(a, b),
+        (TypeShape::Tuple(a), ValueKind::Tuple(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(a, b)| shape_matches(a, &b.value_type))
+        }
+        (
+            TypeShape::Callable(a, ar),
+            ValueKind::Callable {
+                parameters: b,
+                result: br,
+            },
+        ) => {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(a, b)| shape_matches(a, b))
+                && shape_matches(ar, br)
+        }
+        _ => false,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ParsedSheet
@@ -65,26 +84,21 @@ pub struct ParsedSheet {
     /// Lookup takes expected O(1) time. Iterate the sheet's requirement IDs, not this map,
     /// to preserve attachment or violation order.
     pub requirement_names: HashMap<RequirementId, String>,
-    /// `(RelationshipId, method index)` → the source span of that binding, populated for
-    /// every successfully-added relationship. Lets a caller translate an `adam_rs::Error`'s
+    /// `(RelationshipId, method index)` → the source span of a root-local binding.
+    /// Lets a caller translate an `adam_rs::Error`'s
     /// `ErrorSite::Method` (raised well after parsing, e.g. from `Sheet::propagate`) back
     /// to a source location.
     ///
-    /// `out` declarations' internal writer relationships (created via `Sheet::add_out`, not
-    /// `parse_relationship_decl`) are not recorded here, since `add_out` returns only a
-    /// `CellId`, not the writer's `RelationshipId`. In practice this is narrow: an `out`
-    /// writer's body is always a CEL expression, so arithmetic failures already carry a
-    /// `cel_parser::SpanContext` regardless of this gap. A `MethodFailed`/`TypeMismatch` from
-    /// an `out` writer without a `SpanContext` falls back to `Display` instead of a
-    /// source-span diagnostic — never worse than resolving no site at all.
+    /// This legacy single-source view excludes included component methods and output
+    /// writers. Their complete owning metadata remains in `method_origins` and
+    /// `instance_origins`.
     pub method_spans: HashMap<(RelationshipId, usize), SourceSpan>,
-    /// `RelationshipId` → the source span of that `relationship { ... }` block, populated for
-    /// every successfully-added relationship. Resolves an `adam_rs::Error`'s
+    /// `RelationshipId` → the source span of a root-local `relationship { ... }` block.
+    /// Resolves an `adam_rs::Error`'s
     /// `ErrorSite::Relationship` (e.g. from `Error::Conflict`) back to a source location.
     pub relationship_spans: HashMap<RelationshipId, SourceSpan>,
-    /// `CellId` → the source span of that cell's declared name, populated for every declared
-    /// `cell`, `source`, and `out`. Resolves an `adam_rs::Error`'s `ErrorSite::Cell` back to a
-    /// source location.
+    /// `CellId` → the source span of a root-local `cell`, `source`, or `out` name.
+    /// Included private declarations retain their owning locations in `cell_origins`.
     pub cell_spans: HashMap<CellId, SourceSpan>,
     /// Retains independent source identities used by instantiated definitions.
     pub sources: Vec<crate::SourceId>,
@@ -119,6 +133,144 @@ impl Default for ParsedSheet {
 }
 
 impl ParsedSheet {
+    /// Retains the legacy root-only span views from owner-checked native identities.
+    ///
+    /// Private occurrences remain in the owning provenance tables, never in these
+    /// unqualified single-source maps.
+    /// - Precondition: `instance` is this destination's most recent root expansion.
+    /// - Complexity: O(a + m) authored root records and live method origins.
+    pub(crate) fn retain_root_spans(&mut self, instance: &adam_rs::Instance) {
+        let occurrence = &self
+            .instance_origins
+            .last()
+            .expect("root expansion retained")
+            .occurrences[0];
+        debug_assert_eq!(&occurrence.id, instance.occurrences()[0].id());
+        let mut methods = HashMap::new();
+        for item in occurrence.authored_items() {
+            let Some(location) = &item.label.location else {
+                continue;
+            };
+            if let Some(slot) = &item.cell
+                && matches!(
+                    item.role,
+                    crate::AuthoredRole::Cell
+                        | crate::AuthoredRole::Source
+                        | crate::AuthoredRole::Out
+                )
+            {
+                let id = instance
+                    .cell(&occurrence.id, slot)
+                    .expect("authored local slot");
+                self.cell_spans.insert(id, location.span);
+            }
+            if matches!(
+                item.role,
+                crate::AuthoredRole::Relationship | crate::AuthoredRole::Method
+            ) && let Some(slot) = &item.relationship
+            {
+                for &relationship in instance
+                    .relationship_group(&occurrence.id, slot)
+                    .expect("authored root relationship slot")
+                {
+                    if item.role == crate::AuthoredRole::Relationship {
+                        self.relationship_spans.insert(relationship, location.span);
+                    }
+                    if let Some(index) = item.method_index {
+                        methods.insert((relationship, index), location.span);
+                    }
+                }
+            }
+        }
+        for (relationship, live, origin) in instance.method_origins() {
+            if origin.occurrence != occurrence.id {
+                continue;
+            }
+            if let Some(span) = methods.get(&(relationship, origin.authored_index)) {
+                self.method_spans.insert((relationship, live), *span);
+            }
+        }
+    }
+
+    /// Retains native validation causes and source-owning site labels, primary cell first.
+    ///
+    /// Falls back to the real root declaration only when no live site resolves.
+    /// - Precondition: `instance` identifies this destination's root expansion.
+    /// - Complexity: O(c + a + s) public names, expanded authored records and native sites.
+    pub(crate) fn validation_diagnostic(
+        &self,
+        error: adam_rs::Error,
+        root: &crate::SourceLabel,
+        instance: &adam_rs::Instance,
+    ) -> crate::ModuleDiagnostic {
+        let mut labels = Vec::new();
+        let wanted: HashSet<_> = error
+            .sites()
+            .iter()
+            .filter_map(|site| {
+                if let ErrorSite::Relationship(id) = site {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut relationships = HashMap::new();
+        for occurrence in &self
+            .instance_origins
+            .last()
+            .expect("root expansion retained")
+            .occurrences
+        {
+            for item in occurrence.authored_items() {
+                if matches!(
+                    item.role,
+                    crate::AuthoredRole::Relationship | crate::AuthoredRole::Out
+                ) && let Some(slot) = &item.relationship
+                {
+                    for &id in instance
+                        .relationship_group(&occurrence.id, slot)
+                        .expect("authored relationship slot")
+                    {
+                        if wanted.contains(&id) {
+                            relationships.insert(id, &item.label);
+                        }
+                    }
+                }
+            }
+        }
+        let names: HashMap<_, _> = self
+            .cell_names
+            .iter()
+            .map(|(name, (id, _))| (*id, name))
+            .collect();
+        let name = |id| names.get(&id).map(|name| (*name).clone());
+        for (index, site) in error.sites().iter().enumerate() {
+            let label = match site {
+                ErrorSite::Cell(id) => self
+                    .cell_origins
+                    .get(id)
+                    .and_then(|origins| origins.first())
+                    .map(|origin| &origin.label),
+                ErrorSite::Relationship(id) => relationships.get(id).copied(),
+                _ => None,
+            };
+            if let Some(label) = label {
+                let mut label = label.clone();
+                label.label = crate::error_labels::site_label(&error, index, &name);
+                labels.push(label);
+            }
+        }
+        if labels.is_empty() {
+            labels.push(root.clone());
+        }
+        crate::ModuleDiagnostic {
+            message: error.to_string(),
+            labels,
+            cause: Some(crate::ModuleCause::new(error)),
+        }
+    }
+
     /// Constructs an empty source-free destination without invoking a parser.
     ///
     /// Register manually added root cells with [`Self::register_cell`] before binding.
@@ -399,1779 +551,144 @@ impl std::ops::DerefMut for ParsedSheet {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ParseContext — mutable state for one parse_str call
-// ---------------------------------------------------------------------------
-
-/// Accumulates one sheet's declarations, display metadata, and source locations.
-struct ParseContext {
-    cursor: crate::token_cursor::TokenCursor,
-    sheet: Sheet,
-    /// Maps cell name → (CellId, TypeShape), in declaration order, for method and
-    /// conditional compilation and for exposing to callers via `ParsedSheet`.
-    cell_names: IndexMap<String, (CellId, TypeShape)>,
-    /// Maps output name → `CellId`, in declaration order, for exposing to callers via
-    /// `ParsedSheet`.
-    output_names: IndexMap<String, CellId>,
-    /// Accumulates only explicit labels against successfully registered requirement IDs.
-    requirement_names: HashMap<RequirementId, String>,
-    /// Accumulates spans for every successfully-added relationship's methods, for exposing to
-    /// callers via `ParsedSheet::method_spans`.
-    method_spans: HashMap<(RelationshipId, usize), SourceSpan>,
-    /// Accumulates spans for every successfully-added relationship block, for exposing to
-    /// callers via `ParsedSheet::relationship_spans`.
-    relationship_spans: HashMap<RelationshipId, SourceSpan>,
-    /// Accumulates spans for every declared cell's name, for exposing to callers via
-    /// `ParsedSheet::cell_spans`.
-    cell_spans: HashMap<CellId, SourceSpan>,
-    /// Accumulates proc-macro spans for every declared cell's name, for primary parser errors.
-    cell_token_spans: HashMap<CellId, Span>,
-}
-
-impl std::ops::Deref for ParseContext {
-    type Target = crate::token_cursor::TokenCursor;
-
-    fn deref(&self) -> &crate::token_cursor::TokenCursor {
-        &self.cursor
-    }
-}
-
-impl std::ops::DerefMut for ParseContext {
-    fn deref_mut(&mut self) -> &mut crate::token_cursor::TokenCursor {
-        &mut self.cursor
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AdamParser
-// ---------------------------------------------------------------------------
-
-/// Parses adam-lang source strings into live [`ParsedSheet`]s (sheet + cell names).
+/// Owns one immutable type/operation environment for repeatable root construction.
 ///
-/// # Example
+/// Install libraries and register types before construction. Each parse creates a
+/// fresh module collection and live graph; no execution state is shared.
 ///
-/// ```rust
-/// use adam_lang::{AdamParser, TypeRegistry};
-/// use cel_parser::OpLookup;
-///
-/// let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-/// let parsed = parser.parse_str("sheet s { cell x: i32 = 0; }").unwrap();
+/// # Examples
+/// ```
+/// let mut parser = adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(),
+///     cel_parser::OpLookup::new());
+/// let parsed = parser.parse_str("sheet app { cell x: i32 = 7; }")?;
+/// assert_eq!(*parsed.read::<i32>(parsed.cell_names["x"].0).unwrap(), 7);
+/// # Ok::<(), cel_parser::ParseError>(())
 /// ```
 pub struct AdamParser {
-    pub(crate) types: TypeRegistry,
-    pub(crate) cel: CELParser,
+    environment: Rc<crate::module::compile::Environment>,
 }
 
 impl AdamParser {
-    /// Creates a parser with the given type registry and operation lookup.
+    /// Takes ownership of types and operations, shared immutably with compiled factories.
     ///
-    /// `op_lookup` is forwarded to the embedded [`CELParser`] when compiling method
-    /// body expressions. See
-    /// [`OpLookup::push_library_scope`](cel_parser::OpLookup::push_library_scope) for how to
-    /// install a function library (e.g. `cel-std`) before parsing. The embedded CEL parser also
-    /// receives a snapshot of `types`' registered scalar leaf names so typed array annotations
-    /// such as `[]: [Custom]` resolve custom Adam types during direct parsing.
-    pub fn new(types: TypeRegistry, op_lookup: OpLookup) -> Self {
-        let cel = CELParser::with_type_resolver(op_lookup, types.cel_type_resolver());
-        AdamParser { types, cel }
+    /// # Examples
+    /// See [`AdamParser`].
+    pub fn new(types: TypeRegistry, lookup: OpLookup) -> Self {
+        Self {
+            environment: Rc::new(crate::module::compile::Environment {
+                types: Rc::new(types),
+                lookup,
+            }),
+        }
     }
 
-    /// Returns a mutable reference to the embedded CEL operation lookup.
-    pub fn op_lookup_mut(&mut self) -> &mut OpLookup {
-        self.cel.op_lookup_mut()
-    }
-
-    /// Parses an adam-lang source string into a live [`ParsedSheet`].
+    /// Constructs the sole root in a source module without propagation.
     ///
-    /// Resets internal parse state on each call.
+    /// Reusable definitions may accompany the root. All definitions and inactive
+    /// branches check before construction. Zero or multiple roots require explicit
+    /// selection through [`crate::CompiledModules::instantiate_root`].
     ///
     /// # Errors
+    /// Returns syntax, checking, selection, construction or combined validation
+    /// errors. The error source retains the original owning [`crate::ModuleDiagnostic`].
+    /// - Complexity: Module compilation, native construction and combined validation;
+    ///   adapting a diagnostic additionally scans O(n) source tokens.
     ///
-    /// Returns `Err` on any syntax error, unknown type name, type mismatch between a
-    /// cell annotation and its initializer, undeclared cell name in a `relationship` binding's
-    /// output list, or a tuple arity/element-type mismatch between the output expression
-    /// and its declared outputs.
+    /// # Examples
+    /// See [`AdamParser`].
     pub fn parse_str(&mut self, source: &str) -> Result<ParsedSheet> {
-        let stream =
-            TokenStream::from_str(source).map_err(|e| ParseError::from_lex_error(source, e))?;
-        let mut ctx = ParseContext {
-            cursor: crate::token_cursor::TokenCursor::new(
-                LexLexer::new(stream.into_iter()).peekable(),
-            ),
-            sheet: Sheet::new(),
-            cell_names: IndexMap::new(),
-            output_names: IndexMap::new(),
-            requirement_names: HashMap::new(),
-            method_spans: HashMap::new(),
-            relationship_spans: HashMap::new(),
-            cell_spans: HashMap::new(),
-            cell_token_spans: HashMap::new(),
-        };
-        let _ = ctx.consume_doc_comment_run(true); // sheet-level `//!` docs (ignored at runtime)
-        self.parse_sheet(&mut ctx)?;
-        if let Some(tok) = ctx.peek_token() {
-            return Err(ParseError::new("unexpected token", tok.span()));
-        }
-        ctx.sheet
-            .validate()
-            .map_err(|e| Self::validated_sheet_error(&ctx, e))?;
-        Ok(ParsedSheet {
-            sheet: ctx.sheet,
-            cell_shapes: ctx
-                .cell_names
-                .values()
-                .map(|(id, shape)| (*id, shape.clone()))
-                .collect(),
-            cell_names: ctx.cell_names,
-            output_names: ctx.output_names,
-            requirement_names: ctx.requirement_names,
-            method_spans: ctx.method_spans,
-            relationship_spans: ctx.relationship_spans,
-            cell_spans: ctx.cell_spans,
-            sources: Vec::new(),
-            instance_origins: Vec::new(),
-            method_origins: HashMap::new(),
-            cell_origins: HashMap::new(),
-        })
-    }
-
-    // -----------------------------------------------------------------------
-    // Grammar productions
-    // -----------------------------------------------------------------------
-
-    /// `sheet = "sheet" identifier "{" { sheet_item } "}".`
-    fn parse_sheet(&mut self, ctx: &mut ParseContext) -> Result<()> {
-        if !ctx.is_keyword("sheet") {
-            return Err(ctx.err_at("expected `sheet`"));
-        }
-        ctx.consume_ident()?; // sheet name (ignored at runtime)
-        ctx.expect_open_brace()?;
-        while !ctx.at_close_brace() {
-            self.parse_sheet_item(ctx)?;
-        }
-        ctx.expect_close_brace()?;
-        Ok(())
-    }
-
-    /// `sheet_item = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
-    /// | source_decl).`
-    fn parse_sheet_item(&mut self, ctx: &mut ParseContext) -> Result<()> {
-        let _ = ctx.consume_doc_comment_run(false); // outer `///` docs (ignored at runtime)
-        match ctx.peek_token() {
-            Some(Token::Identifier(id)) if id == "cell" => self.parse_cell_decl(ctx),
-            Some(Token::Identifier(id)) if id == "relationship" => {
-                self.parse_relationship_decl(ctx).map(|_| ())
-            }
-            Some(Token::Identifier(id)) if id == "conditional" => self.parse_conditional_decl(ctx),
-            Some(Token::Identifier(id)) if id == "out" => self.parse_out_decl(ctx),
-            Some(Token::Identifier(id)) if id == "source" => self.parse_source_decl(ctx),
-            Some(tok) => Err(ParseError::new(
-                "expected `cell`, `relationship`, `conditional`, `out`, or `source`",
-                tok.span(),
-            )),
-            None => Err(ParseError::new(
-                "unexpected end of input",
-                Span::call_site(),
-            )),
-        }
-    }
-
-    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" {
-    /// requirement } "}" ] ";".`
-    ///
-    /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
-    fn parse_cell_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
-        ctx.is_keyword("cell"); // consume
-        let (name, name_span) = ctx.consume_ident()?;
-        if ctx.cell_names.contains_key(&name) {
-            return Err(ParseError::new(
-                format!("duplicate cell `{name}`"),
-                name_span,
-            ));
-        }
-
-        let declared_shape: Option<TypeShape> = if ctx.consume_punct(":") {
-            let type_expr = self.parse_type_expr(ctx)?;
-            Some(
-                self.types
-                    .resolve(&type_expr)
-                    .map_err(|(msg, span)| ParseError::new(msg, span))?,
-            )
-        } else {
-            None
-        };
-
-        let has_initializer = ctx.consume_punct("=");
-        let (shape, cell_id) = if has_initializer {
-            let segment = self.parse_cel_expression(ctx)?;
-            self.validate_initializer(&segment, declared_shape.as_ref(), "cell", &name, name_span)?;
-            let (actual_shape, cell_id) = self
-                .build_cell_from_segment(segment, ctx)
-                .map_err(|e| ParseError::new(e.message(), name_span))?;
-            (actual_shape, cell_id)
-        } else {
-            let declared = declared_shape.ok_or_else(|| {
-                ParseError::new("expected `:` or `=` in cell declaration", name_span)
-            })?;
-            let cell_id = self.build_default_cell(&declared, name_span, ctx)?;
-            (declared, cell_id)
-        };
-        ctx.cell_spans
-            .insert(cell_id, SourceSpan::from_proc_macro2(name_span));
-        ctx.cell_token_spans.insert(cell_id, name_span);
-
-        let filter = if ctx.is_keyword("filter") {
-            Some(self.parse_cell_filter(ctx, &name, name_span, &shape)?)
-        } else {
-            None
-        };
-
-        // Inserted before the `require` block is parsed (unlike `filter`, parsed just above with
-        // `name` not yet in `ctx.cell_names`) so a requirement can reference the cell's own name
-        // — e.g. `require { @positive x > 0; }` — exactly as `parse_out_decl`'s `require` block
-        // can already reference its own out cell's name.
-        ctx.cell_names.insert(name.clone(), (cell_id, shape));
-
-        let require_names_and_reqs: Vec<(Option<String>, Requirement)> =
-            if ctx.is_keyword("require") {
-                self.parse_requirement_block(ctx)?
-            } else {
-                Vec::new()
-            };
-
-        ctx.expect_punct(";")?;
-        if let Some(filter) = filter {
-            ctx.sheet
-                .add_filter(cell_id, filter)
-                .map_err(|e| Self::sheet_error(ctx, name_span, e))?;
-        }
-        for (req_name, requirement) in require_names_and_reqs {
-            Self::register_requirement(ctx, cell_id, req_name, requirement, name_span)?;
-        }
-        Ok(())
-    }
-
-    /// `source_decl = "source" identifier cell_type_init [ cell_filter ] [ "require" "{" {
-    /// requirement } "}" ] ";".`
-    ///
-    /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
-    ///
-    /// Mirrors [`Self::parse_cell_decl`] exactly — the declared cell is added via
-    /// [`Sheet::add_source`] instead of [`Sheet::add_cell`], so it is fixed as a planner source
-    /// and can never be claimed as a relationship's output.
-    fn parse_source_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
-        ctx.is_keyword("source"); // consume
-        let (name, name_span) = ctx.consume_ident()?;
-        if ctx.cell_names.contains_key(&name) {
-            return Err(ParseError::new(
-                format!("duplicate cell `{name}`"),
-                name_span,
-            ));
-        }
-
-        let declared_shape: Option<TypeShape> = if ctx.consume_punct(":") {
-            let type_expr = self.parse_type_expr(ctx)?;
-            Some(
-                self.types
-                    .resolve(&type_expr)
-                    .map_err(|(msg, span)| ParseError::new(msg, span))?,
-            )
-        } else {
-            None
-        };
-
-        let has_initializer = ctx.consume_punct("=");
-        let (shape, cell_id) = if has_initializer {
-            let segment = self.parse_cel_expression(ctx)?;
-            self.validate_initializer(
-                &segment,
-                declared_shape.as_ref(),
-                "source",
-                &name,
-                name_span,
-            )?;
-            let (actual_shape, cell_id) = self
-                .build_source_cell_from_segment(segment, ctx)
-                .map_err(|e| ParseError::new(e.message(), name_span))?;
-            (actual_shape, cell_id)
-        } else {
-            let declared = declared_shape.ok_or_else(|| {
-                ParseError::new("expected `:` or `=` in source declaration", name_span)
-            })?;
-            let cell_id = self.build_default_source_cell(&declared, name_span, ctx)?;
-            (declared, cell_id)
-        };
-        ctx.cell_spans
-            .insert(cell_id, SourceSpan::from_proc_macro2(name_span));
-        ctx.cell_token_spans.insert(cell_id, name_span);
-
-        let filter = if ctx.is_keyword("filter") {
-            Some(self.parse_cell_filter(ctx, &name, name_span, &shape)?)
-        } else {
-            None
-        };
-
-        // Inserted before the `require` block is parsed so a requirement can reference the
-        // cell's own name — e.g. `require { @positive x > 0; }` — exactly as `parse_cell_decl`.
-        ctx.cell_names.insert(name.clone(), (cell_id, shape));
-
-        let require_names_and_reqs: Vec<(Option<String>, Requirement)> =
-            if ctx.is_keyword("require") {
-                self.parse_requirement_block(ctx)?
-            } else {
-                Vec::new()
-            };
-
-        ctx.expect_punct(";")?;
-        if let Some(filter) = filter {
-            ctx.sheet
-                .add_filter(cell_id, filter)
-                .map_err(|e| Self::sheet_error(ctx, name_span, e))?;
-        }
-        for (req_name, requirement) in require_names_and_reqs {
-            Self::register_requirement(ctx, cell_id, req_name, requirement, name_span)?;
-        }
-        Ok(())
-    }
-
-    /// `cell_filter = "filter" expression.`
-    ///
-    /// Builds an [`adam_rs::Filter`] from a single deduced expression: `_` denotes the candidate
-    /// value being conformed (of `declared_shape`'s type); every other identifier that names an
-    /// already-declared cell is a deduced dependency, exactly as [`Self::parse_deduced_expr`]
-    /// resolves them for a `relationship` binding or `out` declaration — see
-    /// [`Self::parse_filter_expr`]. `cell_name`/`cell_span`/`declared_shape` describe the
-    /// *filtered cell* (for error-message context and the candidate value's type), already
-    /// resolved by the caller — [`Self::parse_cell_decl`], [`Self::parse_source_decl`], or
-    /// [`Self::parse_out_decl`]. The filtered cell's own `CellId` is not needed
-    /// here: the caller attaches the returned `Filter` to it afterwards, via `Sheet::add_filter`.
-    ///
-    /// # Errors
-    /// Returns `Err` if an identifier inside the expression names neither `_` nor an
-    /// already-declared cell, if `_`
-    /// is never referenced, if the expression's inferred type doesn't match `declared_shape`, or,
-    /// if the expression is `RangeInclusive`-typed, if its element type doesn't match
-    /// `declared_shape`.
-    ///
-    /// - Complexity: O(m) in the number of distinct cell identifiers the expression references,
-    ///   for this method's own bookkeeping (on top of the expression's own parse/compile cost).
-    fn parse_cell_filter(
-        &mut self,
-        ctx: &mut ParseContext,
-        cell_name: &str,
-        cell_span: Span,
-        declared_shape: &TypeShape,
-    ) -> Result<adam_rs::Filter> {
-        let (segment, inputs, underscore_used) = self.parse_filter_expr(ctx, declared_shape)?;
-
-        let value_type_id = cell_type_id(declared_shape);
-        let output_type_id = segment.peek_output_type_id().ok_or_else(|| {
-            ParseError::new(
-                format!("cell `{cell_name}`: filter produced no value"),
-                cell_span,
+        let path: crate::ModulePath = "input".parse().expect("fixed valid module path");
+        let mut modules = crate::ModuleSet::new();
+        modules
+            .insert_source(path.clone(), "<input>", source)
+            .map_err(|error| frontend_error(source, error))?;
+        let compiled = crate::module::compile::compile(self.environment.clone(), modules)
+            .map_err(|mut errors| frontend_error(source, errors.remove(0)))?;
+        let mut roots = compiled.roots(&path);
+        let name = roots.next().ok_or_else(|| {
+            frontend_error(
+                source,
+                crate::composition::diagnostic("expected one root sheet"),
             )
         })?;
-
-        let arg_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
-        let mut input_shapes = vec![declared_shape.clone()];
-        input_shapes.extend(inputs.iter().map(|(_, _, shape)| shape.clone()));
-
-        // A `RangeInclusive<T>`-shaped output is checked and built independently of
-        // `underscore_used`: a genuine range filter body (`lo..=hi`) essentially never references
-        // `_`, so gating this branch on `underscore_used` would make the more specific "range
-        // bounds must be" error unreachable for the primary mistake it exists to catch.
-        if let Some(range_shape) = self.types.range_entry(output_type_id) {
-            if range_shape.element_type_id != value_type_id {
-                return Err(ParseError::new(
-                    format!(
-                        "cell `{cell_name}`: filter range bounds must be `{}`",
-                        self.types.display_name(declared_shape)
-                    ),
-                    cell_span,
-                ));
-            }
-
-            return build_range_filter(
-                segment,
-                arg_ids,
-                &input_shapes[1..],
-                declared_shape,
-                &self.types,
-            )
-            .map_err(|e| ParseError::new(e.to_string(), cell_span));
-        }
-
-        if !underscore_used {
-            return Err(ParseError::new(
-                "filter must reference `_` (the value being filtered)",
-                cell_span,
-            ));
-        }
-
-        if !segment.peek_stack_infos(1)[0]
-            .value_type
-            .same_shape(&self.types.value_type(declared_shape))
-        {
-            return Err(ParseError::new(
-                format!(
-                    "cell `{cell_name}`: filter must produce `{}`",
-                    self.types.display_name(declared_shape)
-                ),
-                cell_span,
-            ));
-        }
-
-        build_value_filter(
-            segment,
-            arg_ids,
-            &input_shapes[1..],
-            declared_shape,
-            &self.types,
-        )
-        .map_err(|e| ParseError::new(e.to_string(), cell_span))
-    }
-
-    /// Prepares and evaluates a nullary expression into concrete leaf or canonical ownership.
-    ///
-    /// - Precondition: `segment` requires no pre-loaded arguments (a `cell` initializer never
-    ///   has an input-cell scope pushed, unlike a `relationship` binding's, `out` declaration's, or
-    ///   `require`ment's body).
-    ///
-    /// # Errors
-    /// Rejects unregistered leaves, missing cell capabilities, or evaluation errors.
-    /// - Complexity: O(n) preparation for n descriptor nodes, plus execution costs.
-    fn eval_segment_boxed(&self, segment: DynSegment) -> Result<(TypeShape, Box<dyn Any>)> {
-        let shape = self.segment_shape(&segment, Span::call_site(), format_args!(""))?;
-        let mut frame = Frame::new(
-            segment,
-            &[],
-            std::slice::from_ref(&shape),
-            false,
-            &self.types,
-        )
-        .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
-        let value = frame
-            .call(&[])
-            .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?
-            .pop()
-            .expect("one result");
-        Ok((shape, value))
-    }
-
-    /// Infers complete recursive identity without executing the expression.
-    ///
-    /// # Errors
-    /// Rejects absent results or unregistered leaves at `span`, prefixed by `context`.
-    /// - Complexity: O(n) in result descriptor nodes.
-    fn segment_shape(
-        &self,
-        segment: &DynSegment,
-        span: Span,
-        context: std::fmt::Arguments<'_>,
-    ) -> Result<TypeShape> {
-        let info = segment.peek_stack_infos(1).first().ok_or_else(|| {
-            ParseError::new(format!("{context}expression produced no value"), span)
-        })?;
-        self.types
-            .shape_of(&info.value_type)
-            .map_err(|message| ParseError::new(format!("{context}{message}"), span))
-    }
-
-    /// Validates an initializer's complete shape before any initializer effects.
-    ///
-    /// # Errors
-    /// Reports a ranged shape-inference error, type mismatch, or missing cell capability.
-    /// Shape-inference and mismatch errors identify `construct` and `name`.
-    /// - Complexity: O(n) in result descriptor nodes.
-    fn validate_initializer(
-        &self,
-        segment: &DynSegment,
-        declared: Option<&TypeShape>,
-        construct: &str,
-        name: &str,
-        span: Span,
-    ) -> Result<()> {
-        let actual = self.segment_shape(segment, span, format_args!("{construct} `{name}`: "))?;
-        if let Some(expected) = declared
-            && expected != &actual
-        {
-            return Err(ParseError::new(
-                format!(
-                    "{construct} `{name}`: type mismatch: expected `{}`, got `{}`",
-                    self.types.display_name(expected),
-                    self.types.display_name(&actual)
-                ),
-                span,
-            ));
-        }
-        if !matches!(actual, TypeShape::Named(_)) {
-            CellValue::validate(&self.types.value_type(&actual))
-                .map_err(|e| ParseError::new(e.to_string(), span))?;
-        }
-        Ok(())
-    }
-
-    /// Adds a prepared initializer as concrete leaf storage or private canonical ownership.
-    ///
-    /// - Precondition: see [`eval_segment_boxed`](Self::eval_segment_boxed).
-    ///
-    /// # Errors
-    /// See [`eval_segment_boxed`](Self::eval_segment_boxed).
-    fn build_cell_from_segment(
-        &self,
-        segment: DynSegment,
-        ctx: &mut ParseContext,
-    ) -> Result<(TypeShape, CellId)> {
-        let (shape, boxed) = self.eval_segment_boxed(segment)?;
-        let cell_id = match &shape {
-            TypeShape::Named(type_id) => {
-                let entry = self.types.entry_by_type_id(*type_id).expect("registered");
-                (entry.add_cell_fn)(&mut ctx.sheet, boxed)
-            }
-            _ => {
-                let value = *boxed.downcast::<CellValue>().expect("canonical compound");
-                ctx.sheet.add_cell(value)
-            }
-        };
-        Ok((shape, cell_id))
-    }
-
-    /// Returns one live tuple element's type name in the same registered naming scheme
-    /// [`TypeRegistry::display_name`] uses, recursing into nested tuples. Falls back to the
-    /// value's own Rust type path for an unregistered leaf, which has no registered name.
-    ///
-    /// - Complexity: O(n) in the number of (nested) elements.
-    fn associated_display_name(&self, elem: &cel_runtime::AssociatedType) -> String {
-        self.types
-            .shape_of(&elem.value_type)
-            .map(|shape| self.types.display_name(&shape))
-            .unwrap_or_else(|_| elem.value_type.type_name().to_string())
-    }
-
-    /// Validates an entire default cell before invoking any registered defaults.
-    ///
-    /// Missing defaults take precedence over missing clone/equality capabilities.
-    /// # Errors
-    /// Names the first missing default in source order, or an unavailable cell capability.
-    /// - Complexity: O(n) in shape nodes.
-    fn validate_default_cell(&self, shape: &TypeShape, span: Span) -> Result<()> {
-        self.types
-            .validate_default(shape)
-            .and_then(|()| CellValue::validate(&self.types.value_type(shape)))
-            .map_err(|error| ParseError::new(error.to_string(), span))
-    }
-
-    /// Builds a default-valued cell for `shape` (scalar or compound, recursively), adding it to
-    /// `ctx.sheet`.
-    ///
-    /// - Complexity: O(n) in shape nodes, plus registered default construction costs.
-    ///
-    /// # Errors
-    /// Rejects missing defaults or cell capabilities before invoking any defaults or adding a cell.
-    fn build_default_cell(
-        &self,
-        shape: &TypeShape,
-        span: Span,
-        ctx: &mut ParseContext,
-    ) -> Result<CellId> {
-        self.validate_default_cell(shape, span)?;
-        match shape {
-            TypeShape::Named(type_id) => {
-                let entry = self
-                    .types
-                    .entry_by_type_id(*type_id)
-                    .expect("build_default_cell: type registered (resolved via TypeRegistry)");
-                let default_fn = entry.default_fn.ok_or_else(|| {
-                    ParseError::new(
-                        format!("type `{}` has no default; provide `= ...`", entry.type_name),
-                        span,
-                    )
-                })?;
-                Ok((entry.add_cell_fn)(&mut ctx.sheet, default_fn()))
-            }
-            _ => {
-                let mut body = DynSegment::new::<()>();
-                self.types
-                    .emit_default(shape, &mut body)
-                    .map_err(|e| ParseError::new(e.to_string(), span))?;
-                self.build_cell_from_segment(body, ctx)
-                    .map(|(_, id)| id)
-                    .map_err(|error| ParseError::new(error.message(), span))
-            }
-        }
-    }
-
-    /// Evaluates `segment` and adds concrete leaf or canonical compound source storage.
-    /// Mirrors
-    /// [`build_cell_from_segment`](Self::build_cell_from_segment) exactly, routed through
-    /// `Sheet::add_source` instead of `Sheet::add_cell`.
-    ///
-    /// - Complexity: O(n) in shape nodes, plus registered default construction costs.
-    ///
-    /// - Precondition: see [`eval_segment_boxed`](Self::eval_segment_boxed).
-    ///
-    /// # Errors
-    /// See [`eval_segment_boxed`](Self::eval_segment_boxed).
-    fn build_source_cell_from_segment(
-        &self,
-        segment: DynSegment,
-        ctx: &mut ParseContext,
-    ) -> Result<(TypeShape, CellId)> {
-        let (shape, boxed) = self.eval_segment_boxed(segment)?;
-        let cell_id = match &shape {
-            TypeShape::Named(type_id) => {
-                let entry = self.types.entry_by_type_id(*type_id).expect("registered");
-                (entry.add_source_fn)(&mut ctx.sheet, boxed)
-            }
-            _ => {
-                let value = *boxed.downcast::<CellValue>().expect("canonical compound");
-                ctx.sheet.add_source(value)
-            }
-        };
-        Ok((shape, cell_id))
-    }
-
-    /// Builds a default-valued *source* cell for `shape` (scalar or compound, recursively), adding
-    /// it to `ctx.sheet` (see [`Sheet::add_source`]). Mirrors
-    /// [`build_default_cell`](Self::build_default_cell) exactly, routed through
-    /// `Sheet::add_source` instead of `Sheet::add_cell`.
-    ///
-    /// # Errors
-    /// Rejects missing defaults or cell capabilities before invoking any defaults or adding a cell.
-    fn build_default_source_cell(
-        &self,
-        shape: &TypeShape,
-        span: Span,
-        ctx: &mut ParseContext,
-    ) -> Result<CellId> {
-        self.validate_default_cell(shape, span)?;
-        match shape {
-            TypeShape::Named(type_id) => {
-                let entry = self.types.entry_by_type_id(*type_id).expect(
-                    "build_default_source_cell: type registered (resolved via TypeRegistry)",
-                );
-                let default_fn = entry.default_fn.ok_or_else(|| {
-                    ParseError::new(
-                        format!("type `{}` has no default; provide `= ...`", entry.type_name),
-                        span,
-                    )
-                })?;
-                Ok((entry.add_source_fn)(&mut ctx.sheet, default_fn()))
-            }
-            _ => {
-                let mut body = DynSegment::new::<()>();
-                self.types
-                    .emit_default(shape, &mut body)
-                    .map_err(|e| ParseError::new(e.to_string(), span))?;
-                self.build_source_cell_from_segment(body, ctx)
-                    .map(|(_, id)| id)
-                    .map_err(|error| ParseError::new(error.message(), span))
-            }
-        }
-    }
-
-    /// Delegates one `type_expr` to CELParser, sharing the token stream.
-    fn parse_type_expr(&mut self, ctx: &mut ParseContext) -> Result<crate::ast::TypeExpr> {
-        let tokens = ctx.cursor.take_tokens().expect("tokens present");
-        self.cel.set_lex_tokens(tokens);
-        let result = self.cel.parse_type_expression();
-        ctx.cursor
-            .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
-        result
-    }
-
-    /// `relationship_decl = "relationship" "{" { binding } "}".`
-    ///
-    /// - Postcondition: the returned `RelationshipId` identifies the relationship just added to
-    ///   `ctx.sheet`.
-    /// - Postcondition: on success, `ctx.method_spans` gains one entry per parsed binding,
-    ///   keyed by `(rel_id, binding_index)`, mapping to that binding's source span, and
-    ///   `ctx.relationship_spans` gains one entry mapping `rel_id` to the whole block's span.
-    /// - Postcondition: on failure, the returned error's span covers the first binding it
-    ///   implicates (or the whole block, if none), with every other resolvable
-    ///   binding/cell attached as a secondary label (see `error_labels::site_label`).
-    fn parse_relationship_decl(&mut self, ctx: &mut ParseContext) -> Result<RelationshipId> {
-        let block_start = ctx.peek_span();
-        ctx.is_keyword("relationship"); // consume
-        ctx.expect_open_brace()?;
-        let mut methods = Vec::new();
-        let mut spans: Vec<(Span, Span)> = Vec::new();
-        while !ctx.at_close_brace() {
-            let (method, start, end) = self.parse_binding(ctx)?;
-            methods.push(method);
-            spans.push((start, end));
-        }
-        let close_span = ctx.expect_close_brace()?;
-        match ctx.sheet.add_relationship(methods) {
-            Ok(rel_id) => {
-                ctx.relationship_spans.insert(
-                    rel_id,
-                    SourceSpan::from_proc_macro2_range(block_start, close_span),
-                );
-                for (idx, (start, end)) in spans.into_iter().enumerate() {
-                    ctx.method_spans.insert(
-                        (rel_id, idx),
-                        SourceSpan::from_proc_macro2_range(start, end),
-                    );
-                }
-                Ok(rel_id)
-            }
-            Err(e) => {
-                let by_id: HashMap<CellId, String> = ctx
-                    .cell_names
-                    .iter()
-                    .map(|(n, (id, _))| (*id, n.clone()))
-                    .collect();
-                let name = |id: CellId| by_id.get(&id).cloned();
-
-                // The primary site is the first binding this error implicates; every other
-                // resolvable site (another binding, or a cell recorded so far) becomes a
-                // secondary label. Falls back to the whole block when no site resolves — e.g.
-                // `InvalidMethod` for an empty relationship body carries no sites at all.
-                //
-                // Resolved strictly from `sites().first()`, not by scanning for the first
-                // `MethodIndex` anywhere in the list: every `Error` variant `add_relationship`
-                // currently returns with a `MethodIndex` identifying the primary offending
-                // binding. Making that dependence explicit means variants that lead with some
-                // other site kind fail safe here (fall back to the whole block) instead of this
-                // code silently treating a later, unrelated `MethodIndex` site as primary.
-                let primary_idx = match e.sites().first() {
-                    Some(ErrorSite::MethodIndex(i)) => Some(*i),
-                    _ => None,
-                };
-                let (start, end) = primary_idx
-                    .and_then(|i| spans.get(i).copied())
-                    .unwrap_or((block_start, close_span));
-                let secondary: Vec<cel_parser::SpanLabel> = e
-                    .sites()
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, s)| {
-                        let sp = match s {
-                            ErrorSite::MethodIndex(idx) if Some(*idx) != primary_idx => spans
-                                .get(*idx)
-                                .map(|(st, en)| SourceSpan::from_proc_macro2_range(*st, *en)),
-                            ErrorSite::Cell(c) => ctx.cell_spans.get(c).copied(),
-                            _ => None,
-                        }?;
-                        Some(cel_parser::SpanLabel {
-                            span: sp,
-                            label: crate::error_labels::site_label(&e, i, &name),
-                        })
-                    })
-                    .collect();
-                Err(ParseError::new_range(e.to_string(), start, end).with_secondary(secondary))
-            }
-        }
-    }
-
-    /// `binding = binding_target ":=" expression ";".`
-    ///
-    /// - Postcondition: the returned `Span`s bound the binding's full source range, from its
-    ///   first token through the terminating `;`, for use in error-location resolution.
-    fn parse_binding(&mut self, ctx: &mut ParseContext) -> Result<(Method, Span, Span)> {
-        let start_span = ctx.peek_span();
-        let (names, destructure) = parse_binding_target(ctx)?;
-        let mut outputs: NamedCells = Vec::with_capacity(names.len());
-        for (name, span) in names {
-            let (cell_id, shape) = ctx
-                .cell_names
-                .get(&name)
-                .cloned()
-                .ok_or_else(|| ParseError::new(format!("undeclared cell `{name}`"), span))?;
-            outputs.push((name, cell_id, shape));
-        }
-        ctx.expect_punct(":=")?;
-        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
-        let end_span = ctx.expect_punct(";")?;
-        let compiled = self.compile_outputs(ctx, &segment, &outputs, destructure, start_span)?;
-        Ok((
-            build_method(inputs, outputs, segment, compiled, &self.types)?,
-            start_span,
-            end_span,
-        ))
-    }
-
-    /// Parses an `expression` whose input cells are deduced from whichever already-declared
-    /// cell identifiers it references, rather than an explicit `cell_list` — the mechanism
-    /// shared by a conditional's match-subject expression ([`Self::parse_match_expr`]), a
-    /// `relationship` binding's right-hand side, an `out` declaration's initializer, and a
-    /// `require`ment body.
-    ///
-    /// Each 0-arity identifier lookup that names an already-declared cell is assigned the
-    /// next argument index on first reference within this expression and reuses it on repeat
-    /// reference (e.g. `a && a` allocates one argument slot, not two), via a scope pushed
-    /// onto the CEL operation lookup for the duration of this parse.
-    ///
-    /// # Errors
-    /// Returns `Err` if the expression fails to parse.
-    ///
-    /// - Complexity: O(k) in the number of distinct cell identifiers referenced, for this
-    ///   method's own bookkeeping (on top of `cel-parser`'s own parse cost).
-    fn parse_deduced_expr(&mut self, ctx: &mut ParseContext) -> Result<(DynSegment, NamedCells)> {
-        self.parse_deduced_expr_restricted(ctx, cel_parser::ExpressionRestriction::None)
-    }
-
-    /// Compiles a dependency-deducing expression with the enclosing header's brace reservation.
-    ///
-    /// - Postcondition: temporary dependency scope is removed on success and error.
-    /// - Complexity: O(k + n) for k declared cells and n expression tokens.
-    ///
-    /// # Errors
-    /// Returns expression syntax, unknown cell, or operation/type errors.
-    fn parse_deduced_expr_restricted(
-        &mut self,
-        ctx: &mut ParseContext,
-        restriction: cel_parser::ExpressionRestriction,
-    ) -> Result<(DynSegment, NamedCells)> {
-        // Precompute how to push each currently-declared cell, keyed by name. Built before
-        // the scope closure captures anything, since `push_scope` requires `'static` (the
-        // closure can't borrow `self.types`).
-        let push_table: std::collections::HashMap<String, (CellId, TypeShape, InputPush)> = ctx
-            .cell_names
-            .iter()
-            .map(|(name, (cell_id, shape))| {
-                let push = self.types.value_type(shape);
-                (name.clone(), (*cell_id, shape.clone(), push))
-            })
-            .collect();
-
-        let accumulator: Arc<Mutex<NamedCells>> = Arc::new(Mutex::new(Vec::new()));
-        let scope_accumulator = Arc::clone(&accumulator);
-
-        self.cel
-            .op_lookup_mut()
-            .push_scope(move |name, segment, arity, _span| {
-                if arity != 0 {
-                    return Ok(false);
-                }
-                let Some((cell_id, shape, push)) = push_table.get(name) else {
-                    return Ok(false);
-                };
-                let idx = {
-                    let mut acc = scope_accumulator.lock().expect("scope mutex not poisoned");
-                    match acc.iter().position(|(n, ..)| n == name) {
-                        Some(pos) => pos,
-                        None => {
-                            acc.push((name.to_string(), *cell_id, shape.clone()));
-                            acc.len() - 1
-                        }
-                    }
-                };
-                segment.push_argument(idx, push.clone())?;
-                Ok(true)
-            });
-
-        let result = self.parse_cel_expression_restricted(ctx, restriction);
-        self.cel.op_lookup_mut().pop_scope();
-        let segment = result?;
-
-        let inputs = accumulator
-            .lock()
-            .expect("scope mutex not poisoned")
-            .clone();
-        Ok((segment, inputs))
-    }
-
-    /// Parses a `filter` clause's body expression, deducing its dependencies exactly as
-    /// [`Self::parse_deduced_expr`] does, plus one reserved identifier: `_` always resolves to
-    /// argument slot 0 (the candidate value being conformed, of `declared_shape`'s type), ahead
-    /// of any cell-derived slots, which start at slot 1. Returns whether `_` was referenced at
-    /// least once, alongside the compiled segment and its deduced cell inputs — the caller
-    /// decides whether that occurrence count is acceptable.
-    ///
-    /// # Errors
-    /// Returns `Err` if the expression fails to parse.
-    ///
-    /// - Complexity: O(k) in the number of distinct cell identifiers referenced, for this
-    ///   method's own bookkeeping (on top of `cel-parser`'s own parse cost).
-    fn parse_filter_expr(
-        &mut self,
-        ctx: &mut ParseContext,
-        declared_shape: &TypeShape,
-    ) -> Result<(DynSegment, NamedCells, bool)> {
-        let push_table: std::collections::HashMap<String, (CellId, TypeShape, InputPush)> = ctx
-            .cell_names
-            .iter()
-            .map(|(name, (cell_id, shape))| {
-                let push = self.types.value_type(shape);
-                (name.clone(), (*cell_id, shape.clone(), push))
-            })
-            .collect();
-
-        let value_push = self.types.value_type(declared_shape);
-
-        let accumulator: Arc<Mutex<NamedCells>> = Arc::new(Mutex::new(Vec::new()));
-        let scope_accumulator = Arc::clone(&accumulator);
-        let underscore_used: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
-        let scope_underscore_used = Arc::clone(&underscore_used);
-
-        self.cel
-            .op_lookup_mut()
-            .push_scope(move |name, segment, arity, _span| {
-                if arity != 0 {
-                    return Ok(false);
-                }
-                if name == "_" {
-                    *scope_underscore_used
-                        .lock()
-                        .expect("scope mutex not poisoned") = true;
-                    segment.push_argument(0, value_push.clone())?;
-                    return Ok(true);
-                }
-                let Some((cell_id, shape, push)) = push_table.get(name) else {
-                    return Ok(false);
-                };
-                let idx = {
-                    let mut acc = scope_accumulator.lock().expect("scope mutex not poisoned");
-                    match acc.iter().position(|(n, ..)| n == name) {
-                        Some(pos) => pos + 1,
-                        None => {
-                            acc.push((name.to_string(), *cell_id, shape.clone()));
-                            acc.len()
-                        }
-                    }
-                };
-                segment.push_argument(idx, push.clone())?;
-                Ok(true)
-            });
-
-        let result = self.parse_cel_expression(ctx);
-        self.cel.op_lookup_mut().pop_scope();
-        let segment = result?;
-
-        let inputs = accumulator
-            .lock()
-            .expect("scope mutex not poisoned")
-            .clone();
-        let used = *underscore_used.lock().expect("scope mutex not poisoned");
-        Ok((segment, inputs, used))
-    }
-
-    /// Compiles a conditional's match-subject expression — a bare identifier (`mode`) is the
-    /// degenerate single-cell case; anything more (`a && b`) draws on however many
-    /// already-declared cells it references, via [`Self::parse_deduced_expr`].
-    ///
-    /// `match_span` is used to report errors raised by this method or the shape inference it
-    /// delegates to; the caller already has it (from before parsing the expression) for its own
-    /// error reporting, so it's threaded through rather than recomputed.
-    ///
-    /// # Errors
-    /// Returns `Err` if the expression fails to parse, produces no value, or contains a leaf
-    /// type that isn't registered in the `TypeRegistry`.
-    fn parse_match_expr(
-        &mut self,
-        ctx: &mut ParseContext,
-        match_span: proc_macro2::Span,
-    ) -> Result<(TypeShape, MatchExpr)> {
-        let (segment, inputs) = self.parse_deduced_expr_restricted(
-            ctx,
-            cel_parser::ExpressionRestriction::NoStructLiteral,
-        )?;
-        self.build_match_expr(segment, inputs, match_span)
-    }
-
-    /// Builds a `(TypeShape, MatchExpr)` from a compiled match-expression segment and its
-    /// deduced input cells, dispatching on the segment's inferred output shape — mirrors
-    /// `build_method`'s single-output dispatch (`CompiledOutputs::Single`/`SingleTuple`), but
-    /// for a match value read repeatedly across `propagate()` calls rather than written once
-    /// per method call.
-    ///
-    /// - Precondition: `segment` was compiled with no pre-loaded arguments (`push_arg`-based),
-    ///   matching every input in `inputs` by index.
-    ///
-    /// # Errors
-    /// Returns `Err` at `match_span` if the segment produces no value or contains a leaf type
-    /// that isn't registered in the `TypeRegistry`, prefixed by `match expression:`.
-    fn build_match_expr(
-        &self,
-        segment: DynSegment,
-        inputs: NamedCells,
-        match_span: proc_macro2::Span,
-    ) -> Result<(TypeShape, MatchExpr)> {
-        let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
-        let input_types: Vec<TypeId> = inputs
-            .iter()
-            .map(|(_, _, shape)| cell_type_id(shape))
-            .collect();
-
-        let shape = self.segment_shape(&segment, match_span, format_args!("match expression: "))?;
-        let eq_fn = match &shape {
-            TypeShape::Named(id) => {
-                self.types
-                    .entry_by_type_id(*id)
-                    .expect("registered")
-                    .eq_dyn_fn
-            }
-            _ => compound_eq,
-        };
-        let frame = RefCell::new(
-            Frame::new(
-                segment,
-                &inputs
-                    .iter()
-                    .map(|(_, _, shape)| shape.clone())
-                    .collect::<Vec<_>>(),
-                std::slice::from_ref(&shape),
-                false,
-                &self.types,
-            )
-            .map_err(|e| ParseError::new(e.to_string(), match_span))?,
-        );
-        let match_expr = MatchExpr::new(
-            input_ids,
-            input_types,
-            cell_type_id(&shape),
-            eq_fn,
-            move |args| Ok(frame.borrow_mut().call(args)?.pop().expect("one result")),
-        );
-        Ok((shape, match_expr))
-    }
-
-    /// `conditional_decl = "conditional" expression "{" { conditional_branch } "}".`
-    fn parse_conditional_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
-        ctx.is_keyword("conditional"); // consume
-        let match_span = ctx.peek_span();
-        let (match_shape, match_expr) = self.parse_match_expr(ctx, match_span)?;
-        ctx.expect_open_brace()?;
-
-        let mut branches: Vec<(Box<dyn Any>, Vec<RelationshipId>)> = Vec::new();
-        let mut default_rel_ids: Vec<RelationshipId> = Vec::new();
-
-        while !ctx.at_close_brace() {
-            // Check for default branch `_ => { ... }`
-            if matches!(ctx.peek_token(), Some(Token::Identifier(id)) if id == "_") {
-                ctx.advance(); // consume `_`
-                ctx.expect_punct("=>")?;
-                ctx.expect_open_brace()?;
-                let rel_ids = self.parse_branch_relationships(ctx)?;
-                ctx.expect_close_brace()?;
-                ctx.consume_punct(",");
-                default_rel_ids = rel_ids;
-                break; // default branch is always last
-            }
-
-            // Named branch: `literal_pattern "=>" "{" ... "}"` — a bare literal, optionally
-            // negated by a leading `-`, matching Rust's own `LiteralPattern` rule. CEL has no
-            // constant-expression syntax in pattern position (see
-            // https://doc.rust-lang.org/reference/patterns.html), so `0i32 + 1 =>` is rejected
-            // here exactly as it already is by the CST parser's `consume_literal_pattern`.
-            let branch_span = ctx.peek_span();
-            let segment = self.parse_literal_pattern(ctx)?;
-            let (branch_shape, branch_val) = self.eval_segment_boxed(segment)?;
-            if branch_shape != match_shape {
-                return Err(ParseError::new(
-                    format!(
-                        "conditional branch: type mismatch: expected `{}`, got `{}`",
-                        self.types.display_name(&match_shape),
-                        self.types.display_name(&branch_shape)
-                    ),
-                    branch_span,
-                ));
-            }
-            ctx.expect_punct("=>")?;
-            ctx.expect_open_brace()?;
-            let rel_ids = self.parse_branch_relationships(ctx)?;
-            ctx.expect_close_brace()?;
-            ctx.consume_punct(",");
-            branches.push((branch_val, rel_ids));
-        }
-        ctx.expect_close_brace()?;
-
-        match &match_shape {
-            TypeShape::Named(type_id) => {
-                let add_cond_fn: AddConditionalFn = self
-                    .types
-                    .entry_by_type_id(*type_id)
-                    .ok_or_else(|| {
-                        ParseError::new("match cell type not in TypeRegistry", match_span)
-                    })?
-                    .add_conditional_fn;
-                add_cond_fn(&mut ctx.sheet, match_expr, branches, default_rel_ids)
-                    .map_err(|e| Self::sheet_error(ctx, match_span, e))?;
-            }
-            _ => {
-                let typed_branches: Vec<(Vec<CellValue>, Vec<RelationshipId>)> = branches
-                    .into_iter()
-                    .map(|(val, rel_ids)| {
-                        let seq = *val.downcast::<CellValue>().expect("canonical compound");
-                        (vec![seq], rel_ids)
-                    })
-                    .collect();
-                ctx.sheet
-                    .add_conditional::<CellValue>(match_expr, typed_branches, default_rel_ids)
-                    .map_err(|e| Self::sheet_error(ctx, match_span, e))?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Turns a `Sheet` construction failure into a `ParseError` with `primary` as the primary
-    /// span and every one of `e`'s `Relationship`/`Cell` sites that resolves against `ctx`'s
-    /// span tables as a secondary label.
-    ///
-    /// - Complexity: O(s) in the number of `e`'s sites.
-    fn sheet_error(ctx: &ParseContext, primary: Span, e: adam_rs::Error) -> ParseError {
-        let by_id: HashMap<CellId, String> = ctx
-            .cell_names
-            .iter()
-            .map(|(n, (id, _))| (*id, n.clone()))
-            .collect();
-        let name = |id: CellId| by_id.get(&id).cloned();
-        let secondary: Vec<cel_parser::SpanLabel> = e
-            .sites()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let sp = match s {
-                    ErrorSite::Relationship(r) => ctx.relationship_spans.get(r).copied(),
-                    ErrorSite::Cell(c) => ctx.cell_spans.get(c).copied(),
-                    _ => None,
-                }?;
-                Some(cel_parser::SpanLabel {
-                    span: sp,
-                    label: crate::error_labels::site_label(&e, i, &name),
+        if roots.next().is_some() {
+            let labels = compiled
+                .roots(&path)
+                .filter_map(|name| {
+                    compiled
+                        .prepared_root(&path, name)
+                        .map(|root| root.definition_label().clone())
                 })
-            })
-            .collect();
-        let message = e.to_string();
-        ParseError::new(message, primary).with_secondary(secondary)
-    }
-
-    /// Turns a post-construction validation failure into a `ParseError`.
-    ///
-    /// The first resolvable site is the primary label, which for `DependencyCycle` is the
-    /// governed cell declaration. Remaining resolvable sites become secondary labels.
-    ///
-    /// - Complexity: O(C + s), where C is the number of declared cells (each name is
-    ///   copied into a lookup map) and s is the number of `e`'s sites.
-    fn validated_sheet_error(ctx: &ParseContext, e: adam_rs::Error) -> ParseError {
-        let by_id: HashMap<CellId, String> = ctx
-            .cell_names
-            .iter()
-            .map(|(n, (id, _))| (*id, n.clone()))
-            .collect();
-        let name = |id: CellId| by_id.get(&id).cloned();
-        let primary_index = e.sites().iter().position(|s| match s {
-            ErrorSite::Cell(c) => ctx.cell_token_spans.contains_key(c),
-            _ => false,
-        });
-        let primary = primary_index
-            .and_then(|i| match e.sites()[i] {
-                ErrorSite::Cell(c) => ctx.cell_token_spans.get(&c).copied(),
-                _ => None,
-            })
-            .unwrap_or_else(Span::call_site);
-        let secondary: Vec<cel_parser::SpanLabel> = e
-            .sites()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| Some(*i) != primary_index)
-            .filter_map(|(i, s)| {
-                let span = match s {
-                    ErrorSite::Relationship(r) => ctx.relationship_spans.get(r).copied(),
-                    ErrorSite::Cell(c) => ctx.cell_spans.get(c).copied(),
-                    _ => None,
-                }?;
-                Some(cel_parser::SpanLabel {
-                    span,
-                    label: crate::error_labels::site_label(&e, i, &name),
-                })
-            })
-            .collect();
-        ParseError::new(e.to_string(), primary).with_secondary(secondary)
-    }
-
-    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_decl }
-    /// "}"`, up to (not including) the closing `}`.
-    fn parse_branch_relationships(
-        &mut self,
-        ctx: &mut ParseContext,
-    ) -> Result<Vec<RelationshipId>> {
-        let mut rel_ids = Vec::new();
-        while !ctx.at_close_brace() {
-            if !matches!(ctx.peek_token(), Some(Token::Identifier(id)) if id == "relationship") {
-                return Err(ctx.err_at("expected `relationship`"));
-            }
-            rel_ids.push(self.parse_relationship_decl(ctx)?);
-        }
-        Ok(rel_ids)
-    }
-
-    /// `out_decl = "out" identifier [ ":" type_expr ] ":=" expression [ cell_filter ] [ "require"
-    /// "{" { requirement } "}" ] ";".`
-    fn parse_out_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
-        ctx.is_keyword("out"); // consume
-        let (name, name_span) = ctx.consume_ident()?;
-        if ctx.cell_names.contains_key(&name) {
-            return Err(ParseError::new(
-                format!("duplicate cell `{name}`"),
-                name_span,
+                .collect();
+            return Err(frontend_error(
+                source,
+                crate::ModuleDiagnostic {
+                    message: "ambiguous roots: expected one root sheet".into(),
+                    labels,
+                    cause: None,
+                },
             ));
         }
+        compiled
+            .instantiate_root(&path, name)
+            .map_err(|error| frontend_error(source, error))
+    }
+}
 
-        let declared_shape: Option<TypeShape> = if ctx.consume_punct(":") {
-            let type_expr = self.parse_type_expr(ctx)?;
-            Some(
-                self.types
-                    .resolve(&type_expr)
-                    .map_err(|(msg, span)| ParseError::new(msg, span))?,
-            )
-        } else {
-            None
-        };
-
-        ctx.expect_punct(":=")?;
-        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
-
-        // Unlike a `cell` initializer's segment (zero-argument, safe to evaluate once eagerly
-        // via `eval_segment_boxed`/`build_cell_from_segment`), an `out` writer's segment takes
-        // real cell inputs (via `push_arg`) and must stay live for repeated re-evaluation by the
-        // `Method` built below on every `Sheet::propagate` — so only its *shape* is inferred
-        // here, from stack info, never actually executed.
-        let actual_shape =
-            self.segment_shape(&segment, name_span, format_args!("out `{name}`: "))?;
-
-        let out_shape = match &declared_shape {
-            Some(declared) => {
-                if declared != &actual_shape {
-                    return Err(ctx.err_at(format!(
-                        "out `{name}`: type mismatch: expected `{}`, got `{}`",
-                        self.types.display_name(declared),
-                        self.types.display_name(&actual_shape)
-                    )));
+/// Adapts a module error to the existing single-source parser boundary without losing it.
+///
+/// Real token positions supply proc-macro spans; source-owning labels and concrete
+/// native causes remain available through `Error::source`.
+/// - Complexity: O(n + l) source tokens and diagnostic labels.
+fn frontend_error(source: &str, error: crate::ModuleDiagnostic) -> ParseError {
+    let location = error
+        .labels
+        .iter()
+        .find_map(|label| label.location.as_ref());
+    let mut first = Span::call_site();
+    let mut last = None;
+    match TokenStream::from_str(source) {
+        Ok(tokens) => {
+            if let Some(location) = location {
+                for token in LexLexer::new(tokens.into_iter()) {
+                    let span = token.span();
+                    if span.start() == location.span.start {
+                        first = span;
+                    }
+                    if span.end() == location.span.end {
+                        last = Some(span);
+                    }
                 }
-                declared.clone()
             }
-            None => actual_shape,
-        };
-
-        if !matches!(out_shape, TypeShape::Named(_)) {
-            CellValue::validate(&self.types.value_type(&out_shape))
-                .map_err(|error| ParseError::new(error.to_string(), name_span))?;
         }
-        let cell_id = self.build_default_cell(&out_shape, name_span, ctx)?;
-        ctx.cell_spans
-            .insert(cell_id, SourceSpan::from_proc_macro2(name_span));
-        ctx.cell_token_spans.insert(cell_id, name_span);
-
-        let filter = if ctx.is_keyword("filter") {
-            Some(self.parse_cell_filter(ctx, &name, name_span, &out_shape)?)
-        } else {
-            None
-        };
-
-        ctx.cell_names
-            .insert(name.clone(), (cell_id, out_shape.clone()));
-
-        let compiled = CompiledOutputs::Single;
-        let writer = build_method(
-            inputs,
-            vec![(name.clone(), cell_id, out_shape)],
-            segment,
-            compiled,
-            &self.types,
-        )?;
-
-        let requirements = if ctx.is_keyword("require") {
-            self.parse_requirement_block(ctx)?
-        } else {
-            Vec::new()
-        };
-
-        ctx.expect_punct(";")?;
-
-        let out_cell = ctx
-            .sheet
-            .add_out(writer, Vec::new())
-            .map_err(|e| ParseError::new(e.to_string(), name_span))?;
-        for (req_name, requirement) in requirements {
-            Self::register_requirement(ctx, out_cell, req_name, requirement, name_span)?;
+        Err(lexical) => {
+            let lexical = ParseError::from_lex_error(source, lexical);
+            first = lexical.span();
+            last = lexical.end_span();
         }
-        if let Some(filter) = filter {
-            ctx.sheet
-                .add_filter(out_cell, filter)
-                .map_err(|e| Self::sheet_error(ctx, name_span, e))?;
-        }
-        ctx.output_names.insert(name, out_cell);
-
-        Ok(())
     }
-
-    /// `requirement_block = "{" { requirement } "}".`
-    ///
-    /// # Errors
-    /// Returns a parse error for invalid requirements or repeated explicit labels within
-    /// this declaration; unnamed requirements do not participate in duplicate detection.
-    ///
-    /// - Complexity: Expected O(n) bookkeeping for n requirements, plus compilation cost.
-    fn parse_requirement_block(
-        &mut self,
-        ctx: &mut ParseContext,
-    ) -> Result<Vec<(Option<String>, Requirement)>> {
-        ctx.expect_open_brace()?;
-        let mut requirements = Vec::new();
-        let mut names = HashSet::new();
-        while !ctx.at_close_brace() {
-            let span = ctx
-                .peek_token()
-                .ok_or_else(|| ParseError::new("unexpected end of input", Span::call_site()))?
-                .span();
-            let (name, requirement) = self.parse_requirement(ctx)?;
-            if let Some(label) = &name
-                && !names.insert(label.clone())
-            {
-                return Err(ParseError::new(
-                    format!("duplicate requirement `{label}`"),
-                    span,
-                ));
-            }
-            requirements.push((name, requirement));
-        }
-        ctx.expect_close_brace()?;
-        Ok(requirements)
-    }
-
-    /// Attaches a requirement and records its explicit label against the returned ID.
-    ///
-    /// # Errors
-    /// Returns a parse error at `span` when sheet registration fails.
-    ///
-    /// - Complexity: The cost of `Sheet::add_requirement`, plus expected O(1) map insertion.
-    fn register_requirement(
-        ctx: &mut ParseContext,
-        cell: CellId,
-        name: Option<String>,
-        requirement: Requirement,
-        span: Span,
-    ) -> Result<()> {
-        let id = ctx
-            .sheet
-            .add_requirement(cell, requirement)
-            .map_err(|e| ParseError::new(e.to_string(), span))?;
-        if let Some(name) = name {
-            ctx.requirement_names.insert(id, name);
-        }
-        Ok(())
-    }
-
-    /// `requirement = [ "@" identifier ] expression ";".`
-    fn parse_requirement(
-        &mut self,
-        ctx: &mut ParseContext,
-    ) -> Result<(Option<String>, Requirement)> {
-        let name = if ctx.consume_punct("@") {
-            let (name, _name_span) = ctx.consume_ident()?;
-            Some(name)
-        } else {
-            None
-        };
-        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
-        ctx.expect_punct(";")?;
-
-        let bool_type_id = TypeId::of::<bool>();
-        let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
-            ctx.err_at(match &name {
-                Some(name) => format!("requirement `{name}`: expression produced no value"),
-                None => "requirement: expression produced no value".to_string(),
+    let mut adapted = if let Some(last) = last {
+        ParseError::new_range(error.message.clone(), first, last)
+    } else {
+        ParseError::new(error.message.clone(), first)
+    };
+    adapted = adapted.with_secondary(
+        error
+            .labels
+            .iter()
+            .skip(1)
+            .filter_map(|label| {
+                label
+                    .location
+                    .as_ref()
+                    .map(|location| cel_parser::SpanLabel {
+                        span: location.span,
+                        label: label.label.clone(),
+                    })
             })
-        })?;
-        if actual_type_id != bool_type_id {
-            let got = self
-                .types
-                .entry_by_type_id(actual_type_id)
-                .map(|e| e.type_name)
-                .unwrap_or("?");
-            return Err(ctx.err_at(match &name {
-                Some(name) => format!("requirement `{name}`: expected `bool`, got `{got}`"),
-                None => format!("requirement: expected `bool`, got `{got}`"),
-            }));
-        }
-
-        let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
-        let requirement = build_requirement(
-            segment,
-            input_ids,
-            &inputs
-                .iter()
-                .map(|(_, _, shape)| shape.clone())
-                .collect::<Vec<_>>(),
-            &self.types,
-        )
-        .map_err(|e| ctx.err_at(e.to_string()))?;
-
-        Ok((name, requirement))
-    }
-
-    /// Determines how to split a compiled body segment's result across `outputs`, given their
-    /// declared shapes — used by `parse_binding` to dispatch a `relationship` binding's direct-bind vs.
-    /// destructuring cases against a single compiled `expression`. Written generically so any
-    /// future N-output construct can reuse it; `out` declarations are always single-output,
-    /// never destructuring, and currently use their own simpler, separate dispatch instead.
-    ///
-    /// Direct bindings move the whole result, including source unit. Destructuring requires
-    /// a tuple of exactly matching recursive field shapes and moves its field owners.
-    /// Shape-inference errors identify the output at `binding_span`.
-    ///
-    /// # Errors
-    /// Returns `Err` if any output's declared shape doesn't structurally match the body's actual
-    /// result (scalar type mismatch, tuple arity mismatch, or tuple element shape mismatch, at
-    /// any nesting depth), or if a single non-destructuring output's
-    /// expression produced no value or contains an unregistered leaf type.
-    fn compile_outputs(
-        &self,
-        ctx: &mut ParseContext,
-        segment: &DynSegment,
-        outputs: &[(String, CellId, TypeShape)],
-        destructure: bool,
-        binding_span: Span,
-    ) -> Result<CompiledOutputs> {
-        if outputs.len() == 1 && !destructure {
-            let (out_name, _, out_shape) = &outputs[0];
-            let actual =
-                self.segment_shape(segment, binding_span, format_args!("output `{out_name}`: "))?;
-            if &actual != out_shape {
-                return Err(ctx.err_at(format!(
-                    "output `{out_name}`: type mismatch: expected `{}`, got `{}`",
-                    self.types.display_name(out_shape),
-                    self.types.display_name(&actual)
-                )));
-            }
-            Ok(CompiledOutputs::Single)
-        } else {
-            let arity = segment.peek_tuple_arity().unwrap_or(0);
-            if arity != outputs.len() {
-                return Err(ctx.err_at(format!(
-                    "output expression has arity {arity} but {} output(s) declared",
-                    outputs.len()
-                )));
-            }
-            let associated = segment.peek_stack_infos(1)[0]
-                .value_type
-                .tuple_elements()
-                .map(<[_]>::to_vec)
-                .unwrap_or_default();
-            for (i, ((out_name, _, out_shape), elem)) in outputs.iter().zip(&associated).enumerate()
-            {
-                if !self
-                    .types
-                    .value_type(out_shape)
-                    .same_shape(&elem.value_type)
-                {
-                    return Err(ctx.err_at(format!(
-                        "output {i} `{out_name}`: type mismatch: expected `{}`, got `{}`",
-                        self.types.display_name(out_shape),
-                        self.associated_display_name(elem)
-                    )));
-                }
-            }
-            Ok(CompiledOutputs::Tuple)
-        }
-    }
-
-    /// Delegates one `expression` to CELParser, sharing the token stream.
-    fn parse_cel_expression(&mut self, ctx: &mut ParseContext) -> Result<DynSegment> {
-        self.parse_cel_expression_restricted(ctx, cel_parser::ExpressionRestriction::None)
-    }
-
-    /// Delegates a header expression while leaving its body brace in the shared token stream.
-    ///
-    /// - Complexity: O(n) in expression tokens.
-    ///
-    /// # Errors
-    /// Returns the embedded CEL expression's syntax or type error.
-    fn parse_cel_expression_restricted(
-        &mut self,
-        ctx: &mut ParseContext,
-        restriction: cel_parser::ExpressionRestriction,
-    ) -> Result<DynSegment> {
-        let tokens = ctx.cursor.take_tokens().expect("tokens present");
-        self.cel.set_lex_tokens(tokens);
-        let result = self.cel.parse_expression_restricted(restriction);
-        ctx.cursor
-            .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
-        let mut segment = result?;
-        if let Some(info) = segment.peek_stack_infos(1).first() {
-            let enriched = self
-                .types
-                .enrich_value_type(&info.value_type)
-                .map_err(|error| ParseError::new(error.to_string(), Span::call_site()))?;
-            segment
-                .annotate_top(enriched)
-                .map_err(|error| ParseError::new(error.to_string(), Span::call_site()))?;
-        }
-        Ok(segment)
-    }
-
-    /// Delegates one `literal_pattern` (a bare literal, optionally negated by a leading `-`) to
-    /// CELParser, sharing the token stream.
-    fn parse_literal_pattern(&mut self, ctx: &mut ParseContext) -> Result<DynSegment> {
-        let tokens = ctx.cursor.take_tokens().expect("tokens present");
-        self.cel.set_lex_tokens(tokens);
-        let result = self.cel.parse_literal_pattern();
-        ctx.cursor
-            .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
-        result
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Free functions
-// ---------------------------------------------------------------------------
-
-/// Complete metadata for an input cell's canonical borrowed argument read.
-type InputPush = cel_runtime::ValueType;
-
-/// Compares private compound conditional keys at an already validated boundary.
-///
-/// - Complexity: O(v) for v contained values.
-fn compound_eq(a: &dyn Any, b: &dyn Any) -> bool {
-    a.downcast_ref::<CellValue>() == b.downcast_ref::<CellValue>()
-}
-
-/// How to turn one compiled `expression`'s result into per-output values.
-enum CompiledOutputs {
-    /// Moves the segment's whole result into one cell.
-    Single,
-    /// Moves the segment's tuple fields into source-ordered output cells.
-    Tuple,
-}
-
-/// Builds a [`Method`] from parsed inputs, outputs, the compiled body segment, and how
-/// to split its result across `outputs`.
-fn build_method(
-    inputs: NamedCells,
-    outputs: NamedCells,
-    segment: DynSegment,
-    compiled: CompiledOutputs,
-    types: &TypeRegistry,
-) -> Result<Method> {
-    let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
-    let output_ids: Vec<CellId> = outputs.iter().map(|(_, id, _)| *id).collect();
-    let input_types: Vec<TypeId> = inputs
-        .iter()
-        .map(|(_, _, shape)| cell_type_id(shape))
-        .collect();
-    let output_types: Vec<TypeId> = outputs
-        .iter()
-        .map(|(_, _, shape)| cell_type_id(shape))
-        .collect();
-
-    let frame = RefCell::new(
-        Frame::new(
-            segment,
-            &inputs.iter().map(|(_, _, s)| s.clone()).collect::<Vec<_>>(),
-            &outputs
-                .iter()
-                .map(|(_, _, s)| s.clone())
-                .collect::<Vec<_>>(),
-            matches!(compiled, CompiledOutputs::Tuple),
-            types,
-        )
-        .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?,
+            .collect(),
     );
-    Ok(Method::new(
-        input_ids,
-        output_ids,
-        input_types,
-        output_types,
-        move |inputs| frame.borrow_mut().call(inputs),
-    ))
-}
-
-/// Flattens a declared cell's `TypeShape` to the single `TypeId` `adam_rs` itself needs for its
-/// own (CEL-agnostic) storage bookkeeping. Compound shape identity remains separate from
-/// the private common storage carrier and is validated before constructing any adapter.
-pub(crate) fn cell_type_id(shape: &TypeShape) -> TypeId {
-    match shape {
-        TypeShape::Named(type_id) => *type_id,
-        _ => TypeId::of::<CellValue>(),
-    }
-}
-
-/// Checks a complete shape against an existing canonical descriptor without a registry.
-///
-/// - Complexity: O(n) descriptor nodes.
-fn shape_matches(shape: &TypeShape, value: &cel_runtime::ValueType) -> bool {
-    use cel_runtime::ValueKind;
-    match (shape, value.kind()) {
-        (TypeShape::Named(a), ValueKind::Leaf(b)) => a == b,
-        (TypeShape::Array(a), ValueKind::Array(b)) => shape_matches(a, b),
-        (TypeShape::Tuple(a), ValueKind::Tuple(b)) => {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b)
-                    .all(|(a, b)| shape_matches(a, &b.value_type))
-        }
-        (
-            TypeShape::Callable(a, ar),
-            ValueKind::Callable {
-                parameters: b,
-                result: br,
-            },
-        ) => {
-            a.len() == b.len()
-                && a.iter().zip(b).all(|(a, b)| shape_matches(a, b))
-                && shape_matches(ar, br)
-        }
-        _ => false,
-    }
-}
-
-/// Prepares a numeric range filter shared by parsed and native builders.
-///
-/// - Precondition: All named shapes are registered.
-/// # Errors
-/// Rejects missing/mismatched numeric ranges, unavailable defaults or invalid frames.
-/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
-pub(crate) fn build_range_filter(
-    body: DynSegment,
-    ids: Vec<CellId>,
-    inputs: &[TypeShape],
-    output: &TypeShape,
-    types: &TypeRegistry,
-) -> anyhow::Result<adam_rs::Filter> {
-    let id = body
-        .peek_output_type_id()
-        .ok_or_else(|| anyhow::anyhow!("filter has no result"))?;
-    let range = types
-        .range_entry(id)
-        .ok_or_else(|| anyhow::anyhow!("expected numeric range filter"))?;
-    let value_type = cell_type_id(output);
-    anyhow::ensure!(
-        range.element_type_id == value_type,
-        "filter range element mismatch"
-    );
-    let default = types
-        .entry_by_type_id(value_type)
-        .and_then(|entry| entry.default_fn)
-        .ok_or_else(|| anyhow::anyhow!("numeric range filter requires a default"))?;
-    let placeholder = default();
-    let result = body.peek_stack_infos(1)[0].value_type.clone();
-    let shapes: Vec<_> = std::iter::once(output.clone())
-        .chain(inputs.iter().cloned())
-        .collect();
-    let frame = std::rc::Rc::new(RefCell::new(RawFrame::new(body, &shapes, &result, types)?));
-    let clamp = frame.clone();
-    let clamp_fn = range.clamp_fn;
-    let bounds_fn = range.bounds_fn;
-    Ok(adam_rs::Filter::range(
-        value_type,
-        ids,
-        inputs.iter().map(cell_type_id).collect(),
-        move |value, args| clamp_fn(clamp.borrow_mut().call_with_prefix(value, args)?, value),
-        move |args| {
-            bounds_fn(
-                frame
-                    .borrow_mut()
-                    .call_checked_with_prefix(placeholder.as_ref(), args)
-                    .ok()?,
-            )
-            .ok()
-        },
-    ))
-}
-
-/// Prepares the common value-returning filter frame for parsed and native builders.
-///
-/// - Precondition: All named shapes are registered.
-/// # Errors
-/// Rejects incompatible emitted signatures or missing required cell capabilities.
-/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
-pub(crate) fn build_value_filter(
-    body: DynSegment,
-    ids: Vec<CellId>,
-    inputs: &[TypeShape],
-    output: &TypeShape,
-    types: &TypeRegistry,
-) -> anyhow::Result<adam_rs::Filter> {
-    let shapes: Vec<_> = std::iter::once(output.clone())
-        .chain(inputs.iter().cloned())
-        .collect();
-    let frame = RefCell::new(Frame::new(
-        body,
-        &shapes,
-        std::slice::from_ref(output),
-        false,
-        types,
-    )?);
-    Ok(adam_rs::Filter::new(
-        cell_type_id(output),
-        ids,
-        inputs.iter().map(cell_type_id).collect(),
-        move |value, args| Ok(frame.borrow_mut().call_with_prefix(value, args)?.remove(0)),
-    ))
-}
-
-/// Prepares the common bool-returning requirement frame for both builder paths.
-///
-/// - Precondition: All named shapes are registered.
-/// # Errors
-/// Rejects incompatible signatures or unavailable borrowed cloning.
-/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
-pub(crate) fn build_requirement(
-    body: DynSegment,
-    ids: Vec<CellId>,
-    inputs: &[TypeShape],
-    types: &TypeRegistry,
-) -> anyhow::Result<Requirement> {
-    let frame = RefCell::new(RawFrame::new(
-        body,
-        inputs,
-        &cel_runtime::ValueType::leaf::<bool>(),
-        types,
-    )?);
-    Ok(Requirement::new(
-        ids,
-        inputs.iter().map(cell_type_id).collect(),
-        move |args| {
-            let value = frame.borrow_mut().call(args)?;
-            // SAFETY: RawFrame bound the result to the complete concrete bool descriptor.
-            Ok(unsafe { value.into_typed_bound::<cel_runtime::Leaf<bool>>() })
-        },
-    ))
-}
-/// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
-///
-/// Returns the output names in declaration order alongside whether the left-hand side requests
-/// destructuring: `false` for a bare identifier or a single parenthesized identifier with no
-/// comma (mere grouping, matching Rust's `(a)` pattern); `true` for `(a,)` (a 1-tuple pattern,
-/// trailing comma mandatory) or `(a, b, ...)`.
-fn parse_binding_target(ctx: &mut ParseContext) -> Result<(Vec<(String, Span)>, bool)> {
-    if !ctx.at_open_paren() {
-        let (name, span) = ctx.consume_ident()?;
-        return Ok((vec![(name, span)], false));
-    }
-
-    ctx.expect_open_paren()?;
-    let (first_name, first_span) = ctx.consume_ident()?;
-    if ctx.at_close_paren() {
-        // Grouping: exactly one identifier, no comma -- same as the bare form.
-        ctx.expect_close_paren()?;
-        return Ok((vec![(first_name, first_span)], false));
-    }
-    if !ctx.consume_punct(",") {
-        return Err(ctx.err_at("expected ',' or closing parenthesis"));
-    }
-    if ctx.at_close_paren() {
-        // Single identifier + trailing comma: destructures a 1-tuple.
-        ctx.expect_close_paren()?;
-        return Ok((vec![(first_name, first_span)], true));
-    }
-    let mut outputs = vec![(first_name, first_span)];
-    loop {
-        let (name, span) = ctx.consume_ident()?;
-        outputs.push((name, span));
-        if ctx.at_close_paren() {
-            break;
-        }
-        if !ctx.consume_punct(",") {
-            return Err(ctx.err_at("expected ',' or closing parenthesis"));
-        }
-    }
-    ctx.expect_close_paren()?;
-    Ok((outputs, true))
+    adapted.with_cause(error)
 }
 
 // ---------------------------------------------------------------------------
@@ -2184,6 +701,7 @@ mod tests {
     use crate::TypeRegistry;
     use cel_parser::OpLookup;
     use cel_runtime::{ArrayOf, Leaf};
+    use std::any::Any;
 
     fn parser() -> AdamParser {
         AdamParser::new(TypeRegistry::new(), OpLookup::new())
@@ -3761,9 +2279,8 @@ mod tests {
     /// Verifies runtime conditional headers accept grouped records and deduce field dependencies.
     #[test]
     fn adam_registered_match_header_reserves_braces() {
-        let mut parser = parser();
-        parser
-            .op_lookup_mut()
+        let mut lookup = OpLookup::new();
+        lookup
             .register_record(cel_parser::RecordSchema {
                 ty: cel_parser::ResolvedLeafType::new(
                     "Gate",
@@ -3780,6 +2297,7 @@ mod tests {
                 emit: Box::new(|segment, _, _, _| segment.op1(|value: bool| value)),
             })
             .unwrap();
+        let mut parser = AdamParser::new(TypeRegistry::new(), lookup);
         let mut sheet = parser
             .parse_str(
                 "sheet s {

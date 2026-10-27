@@ -8,6 +8,436 @@ use adam_lang::type_registry::TypeShape;
 use adam_lang::{CompositionBuilder, ParsedSheet, TypeRegistry};
 use cel_runtime::{Array, ArrayOf, Cons, DynSegment, IntoCStackList, Leaf, Nil};
 
+/// Compiles a collection and explicitly constructs its named root.
+fn root(source: &str, name: &str) -> Result<ParsedSheet, adam_lang::ModuleDiagnostic> {
+    let path = "app".parse().unwrap();
+    let mut modules = adam_lang::ModuleSet::new();
+    modules.insert_source(path, "app.adm2", source)?;
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .compile(modules)
+        .map_err(|mut errors| errors.remove(0))?;
+    compiled.instantiate_root(&"app".parse().unwrap(), name)
+}
+
+/// Matches inline values, aspirations and diagnostics after identical public edits.
+#[test]
+fn composed_matches_manual_inline() {
+    let declarations = "
+        cell small: f64 = 2.0 filter 0.0..=100.0 require { @positive small > 0.0; };
+        cell large: f64 = 4.0;
+        source factor: f64 = 3.0;
+        cell product: f64 = 0.0;
+        cell other: f64 = 0.0;
+        cell left: f64 = 5.0;
+        cell right: f64 = 7.0;
+        out answer := product + other;
+    ";
+    let components = "
+        sheet ordered(lo: f64, hi: f64) {
+            relationship { hi := lo + 2.0; lo := hi - 2.0; }
+        }
+        sheet multiply(a: f64, b: f64, c: f64) {
+            relationship { c := a * b; a := c / b; b := c / a; }
+        }
+        sheet wrapper(a: f64, b: f64) {
+            cell helper: f64 = 1.0;
+            relationship { helper := a + 1.0; }
+            relationship { b := helper * 2.0; }
+        }
+    ";
+    let mut composed = root(
+        &format!(
+            "{components} sheet app {{ {declarations}
+        relationship ordered(lo: small, hi: large);
+        relationship multiply(a: small, b: factor, c: product);
+        relationship multiply(a: left, b: right, c: other);
+        relationship wrapper(a: large, b: left);
+    }}"
+        ),
+        "app",
+    )
+    .unwrap();
+    let mut manual = root(&format!("sheet app {{ {declarations}
+        relationship {{ large := small + 2.0; small := large - 2.0; }}
+        relationship {{ product := small * factor; small := product / factor; factor := product / small; }}
+        relationship {{ other := left * right; left := other / right; right := other / left; }}
+        cell helper: f64 = 1.0;
+        relationship {{ helper := large + 1.0; }}
+        relationship {{ left := helper * 2.0; }}
+    }}"), "app").unwrap();
+    assert!(!composed.cell_names.contains_key("helper"));
+    // Construction must not propagate output writers or relationships.
+    assert_eq!(
+        *composed
+            .read::<f64>(composed.cell_names["product"].0)
+            .unwrap(),
+        0.0
+    );
+    for edit in [
+        None,
+        Some(("small", 8.0)),
+        Some(("right", 11.0)),
+        Some(("small", -3.0)),
+    ] {
+        if let Some((name, value)) = edit {
+            let composed_id = composed.cell_names[name].0;
+            let manual_id = manual.cell_names[name].0;
+            composed.write(composed_id, value).unwrap();
+            manual.write(manual_id, value).unwrap();
+        }
+        assert_eq!(
+            composed.propagate().map_err(|e| e.to_string()),
+            manual.propagate().map_err(|e| e.to_string())
+        );
+        for name in [
+            "small", "large", "factor", "product", "other", "left", "right", "answer",
+        ] {
+            let composed_value = composed.cell_names[name].0;
+            let manual_value = manual.cell_names[name].0;
+            assert_eq!(
+                composed.read::<f64>(composed_value).unwrap(),
+                manual.read::<f64>(manual_value).unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                composed.source::<f64>(composed_value).unwrap(),
+                manual.source::<f64>(manual_value).unwrap(),
+                "{name}"
+            );
+            assert_eq!(
+                composed.is_source(composed_value),
+                manual.is_source(manual_value),
+                "{name}"
+            );
+            assert_eq!(
+                composed.cell_requirements_valid(composed_value),
+                manual.cell_requirements_valid(manual_value),
+                "{name}"
+            );
+        }
+    }
+}
+
+/// Allows transitive relationship-only uses and rejects private effects in inactive branches.
+#[test]
+fn conditional_uses_only_relationships() {
+    let definitions = "
+        sheet multiply(a: f64, b: f64, c: f64) { relationship { c := a * b; } }
+        sheet wrapper(a: f64, b: f64, c: f64) { relationship multiply(a: a, b: b, c: c); }
+    ";
+    let body = "cell mode: bool = true; source a: f64 = 2.0; source b: f64 = 3.0; cell c: f64;
+        conditional mode {
+            true => { relationship wrapper(a: a, b: b, c: c); }
+            _ => { relationship { c := 0.0; } }
+        }";
+    let mut parsed = root(&format!("{definitions} sheet app {{ {body} }}"), "app").unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<f64>(parsed.cell_names["c"].0).unwrap(), 6.0);
+    let mode = parsed.cell_names["mode"].0;
+    parsed.write(mode, false).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<f64>(parsed.cell_names["c"].0).unwrap(), 0.0);
+    for effect in [
+        "cell private: f64;",
+        "out private := a;",
+        "conditional true { true => { relationship { c := a; } } }",
+    ] {
+        let source = format!(
+            "sheet child(a: f64, c: f64) {{ {effect} }}
+            sheet wrapper(a: f64, c: f64) {{ relationship child(a: a, c: c); }}
+            sheet app {{ source a: f64 = 2.0; cell c: f64;
+                conditional true {{ true => {{ relationship {{ c := a; }} }}
+                    _ => {{ relationship wrapper(a: a, c: c); }} }}
+            }}"
+        );
+        let error = root(&source, "app").unwrap_err();
+        assert!(
+            error.labels.iter().any(|label| label.location.is_some()),
+            "{error:?}"
+        );
+    }
+}
+
+/// Rejects invalid named actuals with owning locations before any initializer executes.
+#[test]
+fn root_binding_diagnostics_precede_live_construction() {
+    for binding in [
+        "missing(a: a)",
+        "copy(a: unknown, b: b)",
+        "copy(unknown: a, b: b)",
+        "copy(a: a)",
+        "copy(a: a, a: b)",
+        "copy(a: a, b: a)",
+        "copy(a: a, b: output)",
+        "copy(a: a, b: b, extra: b)",
+    ] {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let mut lookup = cel_parser::OpLookup::new();
+        lookup.push_scope(move |name, segment, arity, _| {
+            if name != "tick" || arity != 0 {
+                return Ok(false);
+            }
+            let counter = counter.clone();
+            segment.op0(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                1i32
+            });
+            Ok(true)
+        });
+        let path = "app".parse().unwrap();
+        let mut modules = adam_lang::ModuleSet::new();
+        modules
+            .insert_source(
+                path,
+                "invalid.adm2",
+                &format!(
+                    "sheet copy(a: i32, b: i32) {{ relationship {{ b := a; }} }}
+             sheet app {{ cell a: i32 = tick; cell b: i32; out output := a;
+                relationship {binding}; }}"
+                ),
+            )
+            .unwrap();
+        let errors =
+            match adam_lang::ModuleCompiler::new(TypeRegistry::new(), lookup).compile(modules) {
+                Ok(_) => panic!("invalid binding accepted: {binding}"),
+                Err(errors) => errors,
+            };
+        assert!(!errors.is_empty());
+        assert!(
+            errors
+                .iter()
+                .all(|error| error.labels.iter().any(|label| label.location.is_some()))
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+}
+
+/// Keeps explicit selection, output maps, root ordering and repeated parser ownership.
+#[test]
+fn root_selection_and_parser_share_common_lowering() {
+    let source = "sheet copy(a: i32, b: i32) { relationship { b := a; } }
+        sheet first { source input: i32 = 7; cell result: i32;
+            relationship copy(a: input, b: result); out answer := result; }
+        sheet second { cell own: i32 = 9; }";
+    let mut parsed = root(source, "first").unwrap();
+    assert_eq!(
+        parsed
+            .cell_names
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["input", "result", "answer"]
+    );
+    assert_eq!(parsed.output_names["answer"], parsed.cell_names["answer"].0);
+    parsed.propagate().unwrap();
+    assert_eq!(
+        *parsed.read::<i32>(parsed.output_names["answer"]).unwrap(),
+        7
+    );
+    assert!(root(source, "absent").is_err());
+    let mut parser = adam_lang::AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
+    let ambiguity = parser.parse_str(source).unwrap_err();
+    let diagnostic = std::error::Error::source(&ambiguity)
+        .unwrap()
+        .downcast_ref::<adam_lang::ModuleDiagnostic>()
+        .unwrap();
+    assert_eq!(diagnostic.labels.len(), 2, "label every candidate root");
+    assert!(diagnostic.labels.iter().all(|label| {
+        label
+            .location
+            .as_ref()
+            .is_some_and(|location| location.source.text() == source)
+    }));
+    let one = "sheet copy(a: i32, b: i32) { relationship { b := a; } }
+        sheet app { source a: i32 = 4; cell b: i32; relationship copy(a: a, b: b); }";
+    for _ in 0..2 {
+        let mut parsed = parser.parse_str(one).unwrap();
+        parsed.propagate().unwrap();
+        assert_eq!(*parsed.read::<i32>(parsed.cell_names["b"].0).unwrap(), 4);
+    }
+    assert!(
+        parser.parse_str("sheet helper() {}").is_err(),
+        "no root must be rejected"
+    );
+}
+
+/// Keeps the frontend's original owning construction diagnostic and native cause.
+#[test]
+fn parser_errors_retain_sources_and_native_causes() {
+    use std::error::Error;
+    let source = "sheet child() { cell bad: i32 = 1 / 0; }
+        sheet app { relationship child(); }";
+    let error = adam_lang::AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .parse_str(source)
+        .unwrap_err();
+    let copy = error.clone();
+    drop(error);
+    let diagnostic = copy
+        .source()
+        .unwrap()
+        .downcast_ref::<adam_lang::ModuleDiagnostic>()
+        .unwrap();
+    assert!(diagnostic.labels.iter().any(|label| {
+        label
+            .location
+            .as_ref()
+            .is_some_and(|location| location.source.text() == source)
+    }));
+    assert!(diagnostic.source().unwrap().is::<adam_rs::TemplateError>());
+}
+
+/// Preserves lexical failure positions when no complete token stream exists.
+#[test]
+fn parser_syntax_errors_keep_lexical_locations() {
+    use std::str::FromStr;
+    for source in [
+        "sheet app {\n cell x: i32;\n",
+        "sheet app {\n cell x = \"unterminated;\n}",
+    ] {
+        let lexical = cel_parser::ParseError::from_lex_error(
+            source,
+            proc_macro2::TokenStream::from_str(source).unwrap_err(),
+        );
+        let error = adam_lang::AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+            .parse_str(source)
+            .unwrap_err();
+        assert_eq!(error.span().start(), lexical.span().start());
+        assert_eq!(error.span().end(), lexical.span().end());
+    }
+}
+
+/// Validates the final expanded graph without propagating or solving components alone.
+#[test]
+fn roots_validate_the_combined_guard_graph() {
+    use std::error::Error;
+    let error = root(
+        "sheet loop(a: i32, b: i32) {
+            conditional a { 0 => { relationship { a := b; b := a; } } }
+        }
+        sheet app { cell a: i32; cell b: i32; relationship loop(a: a, b: b); }",
+        "app",
+    )
+    .unwrap_err();
+    assert!(error.source().unwrap().is::<adam_rs::Error>());
+    assert!(error.labels.iter().all(|label| label.location.is_some()));
+}
+
+/// Keeps imported relationship sites when combined root validation fails.
+#[test]
+fn root_validation_retains_imported_relationship_sources() {
+    let mut modules = adam_lang::ModuleSet::new();
+    modules
+        .insert_source(
+            "library".parse().unwrap(),
+            "library.adm2",
+            "sheet copy(a: i32, b: i32) { relationship { b := a; } }",
+        )
+        .unwrap();
+    let path = "app".parse().unwrap();
+    modules
+        .insert_source(
+            path,
+            "app.adm2",
+            "use library::copy;
+         sheet app { cell a: i32; cell b: i32; cell p: i32;
+             relationship copy(a: a, b: p);
+             conditional p { 0 => { relationship copy(a: b, b: a); } }
+         }",
+        )
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .compile(modules)
+        .unwrap();
+    let error = compiled
+        .instantiate_root(&"app".parse().unwrap(), "app")
+        .unwrap_err();
+    drop(compiled);
+    for file in ["app.adm2", "library.adm2"] {
+        assert!(
+            error.labels.iter().any(|label| {
+                label
+                    .location
+                    .as_ref()
+                    .is_some_and(|location| location.source.file_name() == file)
+            }),
+            "{file}: {error:?}"
+        );
+    }
+}
+
+/// Preserves the actual imported conditional failure through public root construction.
+#[test]
+fn root_conditional_errors_keep_native_context_and_sources() {
+    use std::error::Error;
+    let mut lookup = cel_parser::OpLookup::new();
+    lookup.push_scope(|name, segment, arity, _| {
+        if name != "-" || arity != 1 {
+            return Ok(false);
+        }
+        segment.op1r(|_: i32| -> anyhow::Result<i32> {
+            Err(std::io::Error::other("deferred key failed").into())
+        })?;
+        Ok(true)
+    });
+    let mut modules = adam_lang::ModuleSet::new();
+    modules
+        .insert_source(
+            "library".parse().unwrap(),
+            "library.adm2",
+            "sheet child(a: i32, b: i32) {
+            conditional a { -1 => { relationship { b := a; } } }
+        }",
+        )
+        .unwrap();
+    let path = "app".parse().unwrap();
+    modules
+        .insert_source(
+            path,
+            "app.adm2",
+            "use library::child; sheet app {
+            source a: i32 = 0; cell b: i32;
+            relationship child(a: a, b: b);
+        }",
+        )
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), lookup)
+        .compile(modules)
+        .unwrap();
+    let error = compiled
+        .instantiate_root(&"app".parse().unwrap(), "app")
+        .unwrap_err();
+    drop(compiled);
+    let native = error
+        .source()
+        .unwrap()
+        .downcast_ref::<adam_rs::TemplateError>()
+        .unwrap();
+    assert!(
+        matches!(native, adam_rs::TemplateError::ConditionalConstruction {
+        conditional: 0, inclusions, ..
+    } if inclusions.len() == 1)
+    );
+    for file in ["app.adm2", "library.adm2"] {
+        assert!(error.labels.iter().any(|label| {
+            label
+                .location
+                .as_ref()
+                .is_some_and(|location| location.source.file_name() == file)
+        }));
+    }
+    let mut cause = error.source();
+    let mut found = false;
+    while let Some(error) = cause {
+        found |= error.is::<std::io::Error>();
+        cause = error.source();
+    }
+    assert!(
+        found,
+        "the concrete deferred operation error remains downcastable"
+    );
+}
+
 /// Returns the registered integer shape.
 fn int() -> TypeShape {
     TypeShape::Named(TypeId::of::<i32>())

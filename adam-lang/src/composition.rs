@@ -660,7 +660,7 @@ impl CompositionBuilder {
             .peek_output_type_id()
             .and_then(|id| types.range_entry(id));
         if let Some(range) = range {
-            if range.element_type_id != crate::parser::cell_type_id(&shape) {
+            if range.element_type_id != crate::cell_value::cell_type_id(&shape) {
                 return Err(diagnostic("filter range element mismatch"));
             }
             let result = body.peek_stack_infos(1)[0].value_type.clone();
@@ -684,9 +684,21 @@ impl CompositionBuilder {
                     .and_then(|id| types.range_entry(id))
                     .is_some()
                 {
-                    crate::parser::build_range_filter(body, ids.to_vec(), &shapes, &shape, &types)
+                    crate::cell_value::build_range_filter(
+                        body,
+                        ids.to_vec(),
+                        &shapes,
+                        &shape,
+                        &types,
+                    )
                 } else {
-                    crate::parser::build_value_filter(body, ids.to_vec(), &shapes, &shape, &types)
+                    crate::cell_value::build_value_filter(
+                        body,
+                        ids.to_vec(),
+                        &shapes,
+                        &shape,
+                        &types,
+                    )
                 }
             })
             .map_err(diagnostic)
@@ -727,7 +739,7 @@ impl CompositionBuilder {
         .map_err(diagnostic)?;
         self.native
             .require(&cell.native, &slots, move |ids| {
-                crate::parser::build_requirement(emit()?, ids.to_vec(), &shapes, &types)
+                crate::cell_value::build_requirement(emit()?, ids.to_vec(), &shapes, &types)
             })
             .map_err(diagnostic)
     }
@@ -1429,7 +1441,7 @@ pub(crate) fn diagnostic(error: impl std::fmt::Display) -> ModuleDiagnostic {
 ///
 /// - Complexity: O(i) shapes.
 pub(crate) fn storage_ids(shapes: &[TypeShape]) -> Vec<TypeId> {
-    shapes.iter().map(crate::parser::cell_type_id).collect()
+    shapes.iter().map(crate::cell_value::cell_type_id).collect()
 }
 
 /// Prepares a fresh canonical method frame and wraps the native callback boundary.

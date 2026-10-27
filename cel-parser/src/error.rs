@@ -451,9 +451,27 @@ pub struct ParseError {
     span: proc_macro2::Span,
     end_span: Option<proc_macro2::Span>,
     secondary: Vec<SpanLabel>,
+    cause: Option<std::rc::Rc<dyn std::error::Error>>,
 }
 
 impl ParseError {
+    /// Retains an immutable frontend cause without replacing its concrete error type.
+    ///
+    /// Cloning the parse error shares this cause. Conversion to [`CELError`] retains
+    /// only the message and primary span for thread-safe reporting.
+    ///
+    /// # Examples
+    /// ```
+    /// use std::error::Error;
+    /// let error = cel_parser::ParseError::new("frontend", proc_macro2::Span::call_site())
+    ///     .with_cause(std::io::Error::other("original"));
+    /// assert!(error.source().unwrap().is::<std::io::Error>());
+    /// ```
+    pub fn with_cause(mut self, cause: impl std::error::Error + 'static) -> Self {
+        self.cause = Some(std::rc::Rc::new(cause));
+        self
+    }
+
     /// Creates a new parse error with the given message and token span.
     ///
     /// # Examples
@@ -471,6 +489,7 @@ impl ParseError {
             span,
             end_span: None,
             secondary: Vec::new(),
+            cause: None,
         }
     }
 
@@ -503,6 +522,7 @@ impl ParseError {
             span: start,
             end_span: Some(end),
             secondary: Vec::new(),
+            cause: None,
         }
     }
 
@@ -678,7 +698,12 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-impl std::error::Error for ParseError {}
+impl std::error::Error for ParseError {
+    /// Borrows the retained original frontend cause, if present.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause.as_deref()
+    }
+}
 
 /// A runtime error context carrying the source span of the failing operation.
 ///
@@ -828,6 +853,28 @@ impl FormatRustcStyle for anyhow::Error {
 
 #[cfg(test)]
 mod tests {
+    /// Retains an immutable concrete cause through cloning and error-source traversal.
+    #[test]
+    fn parse_error_retains_owning_cause() {
+        use std::error::Error;
+        let error = ParseError::new("construction failed", proc_macro2::Span::call_site())
+            .with_cause(std::io::Error::other("original"));
+        let copy = error.clone();
+        assert_eq!(
+            copy.source()
+                .unwrap()
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .to_string(),
+            "original"
+        );
+        assert!(
+            ParseError::new("syntax", proc_macro2::Span::call_site())
+                .source()
+                .is_none()
+        );
+    }
+
     use super::*;
     use annotate_snippets::Renderer;
     use proc_macro2::Span;
