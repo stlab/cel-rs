@@ -24,6 +24,27 @@
 //! assert_eq!(instance.cells(), &[input, output]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! This path constructs native methods directly: it needs no CEL text, lexer,
+//! parser or operation lookup. For checked multiplication with a source-bound
+//! factor, run `cargo run -p adam-lang --example templates` in the workspace.
+//! That example's native path uses only this crate's recipe and sheet APIs.
+//!
+//! Named actuals must cover each parameter once, use distinct live cells from
+//! the destination sheet, and match the declared concrete types. Fixed sources
+//! specialize away every method that would write them. An empty specialized
+//! relationship fails before factories run. `out` cells cannot be actuals.
+//! Parameters keep caller-owned filters, requirements, strength and aspirations;
+//! component-owned policies may govern only private cells.
+//!
+//! Finished templates own their factories; each factory creates fresh execution
+//! state. Immutable captures may be shared. Live methods survive dropping both
+//! the template and its returned instance metadata. Instantiation runs factories
+//! but never propagates. On error, the destination remains safely discardable;
+//! instantiation does not promise rollback. [`TemplateError::Construction`]
+//! retains the actual native site and original cause without invented source spans.
+//! Conditional inclusion requires a transitively relationship-only component.
+//! Private state remains available to unconditional inclusions.
 
 mod builder;
 mod error;

@@ -1,0 +1,67 @@
+use image_constraints::pixel_axis;
+use image_constraints::crop_fit;
+
+// Numeric resampling only; the caller owns resample/aspect/UI policy.
+sheet resize_straighten {
+    // This caller conforms pixel requests to the existing 300000-pixel limit.
+    // The component does not install this policy or replace source aspirations.
+    cell width_pixels: i32 = 1600 filter min(_, 300000);
+    cell height_pixels: i32 = 1200 filter min(_, 300000);
+    cell width_inches: f64 = 5.333333333333333;
+    cell height_inches: f64 = 4.0;
+    source resolution: f64 = 300.0 require { resolution > 0.0; };
+    cell image: Rect = Rect {
+        origin: Point2D { x: 0.0, y: 0.0 },
+        size: Size2D { width: 1600.0, height: 1200.0 }
+    } require {
+        @valid_image image.is_finite() && image.width > 0.0 && image.height > 0.0
+            && image.max_x > image.min_x && image.max_y > image.min_y
+            && Point2D { x: image.max_x, y: image.max_y }.is_finite();
+        @width_max width_pixels <= 300000;
+        @height_max height_pixels <= 300000;
+    };
+    source transform: Transform2D = identity_transform();
+    cell crop: Rect = Rect {
+        origin: Point2D { x: 0.0, y: 0.0 },
+        size: Size2D { width: 1600.0, height: 1200.0 }
+    } require {
+        @positive_effective_crop crop.is_finite() && crop.width > 0.0 && crop.height > 0.0
+            && crop.max_x > crop.min_x && crop.max_y > crop.min_y
+            && Point2D { x: crop.max_x, y: crop.max_y }.is_finite();
+    };
+    cell shrink: f64 = 1.0 require {
+        @representable_shrink shrink > 0.0 && shrink <= 1.0
+            && 1.0 / shrink <= 1.7976931348623157e308;
+    };
+    cell precise: bool = true require { @sufficient_fit_and_presentation_precision precise; };
+    cell presentation: Transform2D = identity_transform() require {
+        @finite_presentation presentation.is_finite();
+    };
+
+    relationship pixel_axis(inches: width_inches, pixels: width_pixels, resolution: resolution);
+    relationship pixel_axis(pixels: height_pixels, resolution: resolution, inches: height_inches);
+    relationship {
+        image := Rect {
+            origin: Point2D { x: 0.0, y: 0.0 },
+            size: Size2D { width: width_pixels as f64, height: height_pixels as f64 }
+        };
+    }
+    relationship crop_fit(crop: crop, image: image, transform: transform,
+                          shrink: shrink, precise: precise, presentation: presentation);
+
+    // This root-local diagnostic uses the same closed-edge rounding budget.
+    out coverage: bool := (|b: Rect, i: Rect, e: f64|
+        b.min_x >= i.min_x - e && b.max_x <= i.max_x + e && b.min_y >= i.min_y - e
+            && b.max_y <= i.max_y + e)(
+        transform.inverse().outer_transformed_rect(crop),
+        image,
+        0.000000000000014210854715202004
+            * max(
+                max(image.width, image.height),
+                max(
+                    max(abs(image.min_x), abs(image.max_x)),
+                    max(abs(image.min_y), abs(image.max_y))
+                )
+            )
+    ) require { @closed_edges coverage; };
+}

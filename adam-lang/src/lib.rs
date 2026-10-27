@@ -42,6 +42,78 @@
 //! checks the final combined graph without propagation. [`check_module`] checks
 //! registered sources and imports without executing any expressions.
 //!
+//! # Reusable components and explicit roots
+//!
+//! A component aliases caller-owned cells; it does not copy their values. Formal
+//! parameters have concrete types and no initializers, filters or requirements.
+//! Each use supplies every formal exactly once, in any named order, with distinct
+//! actual cells of exactly matching complete types. Actuals may be ordinary cells
+//! or fixed sources, never `out` cells, expressions or literals. A component may
+//! allocate private cells and diagnostic outputs, but cannot attach policies to
+//! parameters or turn parameters into outputs. The caller owns boundary policies.
+//!
+//! The following example registers both the library and importing root. It uses
+//! builtin arithmetic only; hosts needing standard or custom functions install
+//! their operation libraries before moving the lookup into the immutable compiler.
+//!
+//! ```
+//! use adam_lang::{ModuleCompiler, ModuleSet, TypeRegistry};
+//! let mut modules = ModuleSet::new();
+//! modules.insert_source("numbers".parse()?, "numbers.adm2", r#"
+//!     sheet multiply(a: f64, b: f64, product: f64) {
+//!         relationship {
+//!             product := a * b;
+//!             a := product / b;
+//!             b := product / a;
+//!         }
+//!     }
+//! "#)?;
+//! modules.insert_source("app".parse()?, "app.adm2", r#"
+//!     use numbers::multiply as mul;
+//!     sheet app {
+//!         source factor: f64 = 3.0;
+//!         cell value: f64 = 2.0;
+//!         cell result: f64 = 0.0;
+//!         relationship mul(product: result, b: factor, a: value);
+//!     }
+//!     sheet other {}
+//! "#)?;
+//! let compiled = ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+//!     .compile(modules).map_err(|mut errors| errors.remove(0))?;
+//! let path = "app".parse()?;
+//! assert_eq!(compiled.roots(&path).collect::<Vec<_>>(), ["app", "other"]);
+//! let mut parsed = compiled.instantiate_root(&path, "app")?;
+//! drop(compiled); // Live methods and diagnostics retain their own resources.
+//! let value = parsed.cell_names["value"].0;
+//! let result = parsed.cell_names["result"].0;
+//! assert_eq!(*parsed.read::<f64>(result).unwrap(), 0.0); // No propagation yet.
+//! parsed.sheet.write(value, 7.0f64).unwrap();
+//! parsed.propagate().unwrap();
+//! assert_eq!(*parsed.read::<f64>(result).unwrap(), 21.0);
+//! parsed.sheet.write(result, 12.0f64).unwrap();
+//! parsed.propagate().unwrap();
+//! assert_eq!(*parsed.read::<f64>(value).unwrap(), 4.0);
+//! # Ok::<(), adam_lang::ModuleDiagnostic>(())
+//! ```
+//!
+//! Source specialization removes methods that write fixed sources, including
+//! through nested uses. It does not infer equations or inspect current values.
+//! An empty specialized relationship fails construction, even in an inactive
+//! conditional branch. Conditional uses must contain only relationships
+//! transitively: private cells, outputs and policies make a component ineligible.
+//! Unconditional uses may contain those private declarations.
+//!
+//! Compilation checks every definition without executing host expressions;
+//! construction runs defaults, initializers and factories but does not propagate.
+//! Runtime division and conversion errors still require handling. Requirements
+//! report validity, not propagation failure; inspect
+//! [`Sheet::cell_requirements_valid`](adam_rs::Sheet::cell_requirements_valid).
+//! Native instantiation failures leave the destination safely discardable, not
+//! necessarily unchanged. Owning [`ModuleDiagnostic`] labels identify real files;
+//! [`ParsedSheet::locate_error`] resolves runtime errors to definition/use sites.
+//! No filesystem loader, implicit module search or generic type parameter exists.
+//! Imports name declared components, not roots or imported aliases.
+//!
 //! The design spec for `cell_decl` also calls for an optional trailing `":=" expression`
 //! clause, not shown above because **this crate does not yet implement it** — see
 //! `docs/superpowers/specs/2026-08-19-adam-lang-syntax-design.md`'s "Explicitly out of scope"

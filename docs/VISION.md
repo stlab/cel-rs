@@ -74,7 +74,23 @@ relationships where writing one cell propagates derived values to others via whi
 method satisfies the relationship. This is what lets a bound UI behave correctly without
 imperative event handlers.
 
-**Current state:** conditional relationship groups (`when`/`otherwise`) have landed.
+**Current state:** conditional relationship groups (`when`/`otherwise`) and
+source-free native sheet templates have landed. `TemplateBuilder` owns repeatable
+factories, concrete formal parameters and nested inclusions. Instantiation aliases
+caller-owned actual cells, allocates fresh private state and specializes methods
+against fixed sources in one ordinary sheet. It does not propagate or infer
+equations. Caller policies and aspirations survive composition.
+
+`adam-lang` exposes the same composition through parameterized `sheet` definitions,
+named `relationship` uses and explicit `ModulePath` collections. Hosts register
+source owners and native exports, install operation libraries, compile without
+executing expressions and select roots explicitly. The source-free native example
+and parsed scalar examples live in `adam-lang/examples/{templates.rs,relationships.adm2,composed.adm2}`.
+The numeric `cel-euclid/examples/{image_constraints.adm2,resize_straighten.adm2}`
+composition retains the existing ties-even resize conversions and crop/straighten
+precision policy. Ordinary relationship-produced cells cross component boundaries;
+private diagnostic outputs do not become actuals. These are reusable library
+examples, not new `begin` defaults or a filesystem package-discovery system.
 
 **Directions being explored:**
 
