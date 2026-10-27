@@ -463,6 +463,7 @@ impl<'a> Checker<'a, '_> {
     ///
     /// The native validator remains authoritative; this error-only pass adds
     /// binding/declaration labels without constructing methods or another graph.
+    /// Only native equal/nested output-set rejections receive collision labels.
     /// - Precondition: `edges` correspond to `relationship` and fail native validation.
     /// - Complexity: O(m²e log m) error-only native validation and O(me) label work.
     fn relationship_error(
@@ -482,22 +483,27 @@ impl<'a> Checker<'a, '_> {
             label(self.owner, relationship.bindings[index].span, "method"),
         );
         let claimed: HashSet<_> = edges[index].1.iter().collect();
-        for (prior, (_, outputs)) in edges[..index].iter().enumerate() {
-            let overlap = outputs.iter().any(|id| claimed.contains(id));
+        for (prior, &method) in edges[..index].iter().enumerate() {
+            let collision = matches!(
+                adam_rs::template::check_relationship_edges(&[method, edges[index]]),
+                Err("relationship output sets are equal or nested")
+            );
             error.labels.push(label(
                 self.owner,
                 relationship.bindings[prior].span,
-                if overlap {
+                if collision {
                     "collides with this earlier method"
                 } else {
                     "earlier method declared here"
                 },
             ));
-            for &id in outputs.iter().filter(|id| claimed.contains(id)) {
-                let cell = &self.definitions[self.id].cells[id];
-                let mut site = cell.label.clone();
-                site.label = format!("output cell `{}` is claimed more than once", cell.name);
-                error.labels.push(site);
+            if collision {
+                for &id in method.1.iter().filter(|id| claimed.contains(id)) {
+                    let cell = &self.definitions[self.id].cells[id];
+                    let mut site = cell.label.clone();
+                    site.label = format!("output cell `{}` is claimed more than once", cell.name);
+                    error.labels.push(site);
+                }
             }
         }
         error
@@ -1274,6 +1280,104 @@ impl Checked<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// Keeps legal partial output overlap neutral when a later method changes the cell set.
+    #[test]
+    fn partial_output_overlap_keeps_cell_set_diagnostics_neutral() {
+        let prefix = "sheet app {\n\
+            cell a: i32; cell b: i32; cell c: i32; cell d: i32;\n\
+            relationship {\n\
+                (a, b) := (c, c);\n\
+                (b, c) := (a, a);\n";
+        let path: ModulePath = "app".parse().unwrap();
+        let mut valid = ModuleSet::new();
+        valid
+            .insert_source(path.clone(), "valid.adm2", &format!("{prefix}}}}}"))
+            .unwrap();
+        assert!(
+            check_module(&path, &valid, &TypeRegistry::new(), &OpLookup::new()).is_empty(),
+            "the first two alternatives are valid together"
+        );
+        let mut invalid = ModuleSet::new();
+        invalid
+            .insert_source(
+                path.clone(),
+                "invalid.adm2",
+                &format!("{prefix}(b, d) := (a, a);\n}}}}"),
+            )
+            .unwrap();
+        let errors = check_module(&path, &invalid, &TypeRegistry::new(), &OpLookup::new());
+        assert_eq!(errors.len(), 1);
+        let error = &errors[0];
+        assert!(error.message.contains("different cell sets"));
+        assert_eq!(
+            error.labels[0].location.as_ref().unwrap().span.start.line,
+            6
+        );
+        assert_eq!(error.labels.len(), 3);
+        assert!(
+            error.labels[1..]
+                .iter()
+                .all(|label| label.label == "earlier method declared here"),
+            "{error:?}"
+        );
+    }
+
+    /// Labels only equal/nested pairs when another earlier output set overlaps legally.
+    #[test]
+    fn nested_output_overlap_labels_only_forbidden_pairs() {
+        let path: ModulePath = "app".parse().unwrap();
+        let mut modules = ModuleSet::new();
+        modules
+            .insert_source(
+                path.clone(),
+                "nested.adm2",
+                "sheet app {
+                    cell a: i32; cell b: i32; cell c: i32; cell d: i32;
+                    relationship {
+                        (a, b, c) := (d, d, d);
+                        (b, c, d) := (a, a, a);
+                        (a, b) := (c, d);
+                    }
+                }",
+            )
+            .unwrap();
+        let errors = check_module(&path, &modules, &TypeRegistry::new(), &OpLookup::new());
+        assert_eq!(errors.len(), 1);
+        let error = &errors[0];
+        assert!(error.message.contains("equal or nested"));
+        assert_eq!(
+            error
+                .labels
+                .iter()
+                .filter(|label| label.label == "collides with this earlier method")
+                .count(),
+            1,
+            "{error:?}"
+        );
+        assert_eq!(
+            error
+                .labels
+                .iter()
+                .filter(|label| label.label == "earlier method declared here")
+                .count(),
+            1,
+            "{error:?}"
+        );
+        let claimed: Vec<_> = error
+            .labels
+            .iter()
+            .filter(|label| label.label.contains("claimed more than once"))
+            .map(|label| label.label.as_str())
+            .collect();
+        assert_eq!(
+            claimed,
+            [
+                "output cell `a` is claimed more than once",
+                "output cell `b` is claimed more than once"
+            ]
+        );
+    }
+
     /// Locates early, late and empty structural failures without accepting later methods.
     #[test]
     fn invalid_prefix_selects_the_first_authored_failure() {
