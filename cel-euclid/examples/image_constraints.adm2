@@ -9,6 +9,20 @@ sheet pixel_axis(inches: f64, pixels: i32, resolution: f64) {
     }
 }
 
+// Relates floating dimensions using the two multiplication directions retained
+// for a source-bound factor. Equal normalized width/height percentages in the
+// original image_resize sheet give width = height * original_width/original_height.
+// Preconditions: dimensions and ratio are positive finite values; selected
+// products/quotients remain representable. IEEE floating semantics are unchanged.
+// This relates physical dimensions; each pixel axis still rounds independently.
+// The caller chooses this relationship and owns its ratio source and policies.
+sheet aspect(width: f64, height: f64, ratio: f64) {
+    relationship {
+        width := height * ratio;
+        height := width / ratio;
+    }
+}
+
 // The numeric fit from crop_straighten.adm2, with caller-owned ordinary
 // boundaries. Callers require a valid image, positive crop/shrink, finite
 // presentation and sufficient precision. Rotation fixes the image point under

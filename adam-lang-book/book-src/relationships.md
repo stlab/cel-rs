@@ -168,9 +168,23 @@ them into an ordinary `adam_rs::Sheet`; it never parses source. The checked inte
 example uses Rust's truncating division, so exact inverse multiplication requires
 a divisible product. The parsed examples use `f64`.
 
-`cel-euclid/examples/image_constraints.adm2` extracts the active resampling axis
-and crop fit from the existing examples. `resize_straighten.adm2` binds two axis
-instances to caller width/height/resolution cells, then feeds an ordinary
+`cel-euclid/examples/image_constraints.adm2` extracts the active resampling axis,
+an aspect relationship and the crop fit from the existing examples.
+`resize_straighten.adm2` binds two axis instances and opts into
+`aspect(width: width_inches, height: height_inches, ratio: width_per_height)`.
+The caller supplies the positive finite `width_per_height` source, initially
+`1600.0 / 1200.0`. Equating the original width/height percentages gives
+`width = height * ratio`; the reverse direction divides width by that nonzero
+ratio. Changing only width to 4 inches derives height as 3 inches; changing only
+height back to 4 inches restores width to `1600.0 / 300.0` inches.
+Dimensions and selected products/quotients must stay positive, finite and
+representable. This relation constrains physical dimensions; the pixel axes still
+round independently, so integer pixel counts need not have an exact ratio.
+Ordinary derived dimensions update their raw source slots;
+edited source dimensions, filtered pixel requests and the self-referencing crop
+retain their caller aspirations under the ordinary sheet rules.
+
+The root feeds an ordinary
 relationship-produced image rectangle into the crop component. The caller owns
 sources, filters, requirements and the crop aspiration. Private anchor/coverage
 outputs remain diagnostics, never actual arguments.
@@ -179,8 +193,9 @@ This caller chooses filters that conform pixel requests to the original
 `begin` example instead reports that limit through requirements alone. The
 reusable axis installs neither policy, so other callers retain their own choice.
 
-The axis retains ties-even pixel rounding and checked casts; it does not implement
-the original example's resample toggle or aspect policy. The fit retains its
+The axis retains ties-even pixel rounding and checked casts. The caller selects
+the reusable aspect relation separately; neither component implements the original
+example's resample toggle or other UI machinery. The fit retains its
 8-epsilon inward guard, 32-epsilon cancellation check and 64-epsilon overlay and
 coverage budgets. The caller rotates about the image point under the requested
 crop center. Singular transforms fail checked inversion. Insufficient precision

@@ -193,7 +193,88 @@ fn assert_crop_contract(parsed: &ParsedSheet, requested_crop: Rect) {
     assert!((fitted.center().y - requested_crop.center().y).abs() <= tolerance);
 }
 
-/// Detects lost caller crop aspirations across numeric resizing, rotation and reversal.
+/// Detects an absent width-to-height constraint or overwritten edited/crop aspirations.
+#[test]
+fn aspect_width_edit_drives_height_and_preserves_sources() {
+    let mut parsed = root("resize_straighten");
+    let width = parsed.cell_names["width_inches"].0;
+    let height = parsed.cell_names["height_inches"].0;
+    let requested_crop = Rect::new(Point2D::new(0.0, 0.0), Size2D::new(1600.0, 1200.0));
+    parsed.sheet.write(width, 4.0f64).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<f64>(height).unwrap(), 3.0);
+    assert_eq!(
+        *parsed
+            .read::<i32>(parsed.cell_names["width_pixels"].0)
+            .unwrap(),
+        1200
+    );
+    assert_eq!(
+        *parsed
+            .read::<i32>(parsed.cell_names["height_pixels"].0)
+            .unwrap(),
+        900
+    );
+    assert_eq!(*parsed.source::<f64>(width).unwrap(), 4.0);
+    assert_eq!(
+        *parsed
+            .source::<f64>(parsed.cell_names["width_per_height"].0)
+            .unwrap(),
+        1600.0 / 1200.0
+    );
+    assert_crop_contract(&parsed, requested_crop);
+}
+
+/// Detects an absent height-to-width constraint or overwritten edited/crop aspirations.
+#[test]
+fn aspect_height_edit_drives_width_and_preserves_sources() {
+    let mut parsed = root("resize_straighten");
+    let width = parsed.cell_names["width_inches"].0;
+    let height = parsed.cell_names["height_inches"].0;
+    let requested_crop = Rect::new(Point2D::new(0.0, 0.0), Size2D::new(1600.0, 1200.0));
+    parsed.sheet.write(height, 3.0f64).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<f64>(width).unwrap(), 4.0);
+    assert_eq!(
+        *parsed
+            .read::<i32>(parsed.cell_names["width_pixels"].0)
+            .unwrap(),
+        1200
+    );
+    assert_eq!(
+        *parsed
+            .read::<i32>(parsed.cell_names["height_pixels"].0)
+            .unwrap(),
+        900
+    );
+    assert_eq!(*parsed.source::<f64>(height).unwrap(), 3.0);
+    assert_eq!(
+        *parsed
+            .source::<f64>(parsed.cell_names["width_per_height"].0)
+            .unwrap(),
+        1600.0 / 1200.0
+    );
+    assert_crop_contract(&parsed, requested_crop);
+}
+
+/// Detects a hard-coded aspect instead of a reusable caller-supplied ratio.
+#[test]
+fn aspect_uses_the_callers_ratio_source() {
+    let mut parsed = root("resize_straighten");
+    let width = parsed.cell_names["width_inches"].0;
+    let height = parsed.cell_names["height_inches"].0;
+    let ratio = parsed.cell_names["width_per_height"].0;
+    let requested_crop = Rect::new(Point2D::new(0.0, 0.0), Size2D::new(1600.0, 1200.0));
+    parsed.sheet.write(ratio, 2.0f64).unwrap();
+    parsed.sheet.write(width, 6.0f64).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<f64>(height).unwrap(), 3.0);
+    assert_eq!(*parsed.source::<f64>(width).unwrap(), 6.0);
+    assert_eq!(*parsed.source::<f64>(ratio).unwrap(), 2.0);
+    assert_crop_contract(&parsed, requested_crop);
+}
+
+/// Detects lost aspect propagation or crop aspirations across resize, rotation and reversal.
 #[test]
 fn resize_rotation_and_reversal_preserve_requested_crop() {
     let mut parsed = root("resize_straighten");
@@ -204,10 +285,6 @@ fn resize_rotation_and_reversal_preserve_requested_crop() {
     parsed
         .sheet
         .write(parsed.cell_names["width_inches"].0, 4.0f64)
-        .unwrap();
-    parsed
-        .sheet
-        .write(parsed.cell_names["height_inches"].0, 3.0f64)
         .unwrap();
     parsed.propagate().unwrap();
     assert_eq!(
@@ -236,10 +313,6 @@ fn resize_rotation_and_reversal_preserve_requested_crop() {
     parsed
         .sheet
         .write(parsed.cell_names["transform"].0, Transform2D::identity())
-        .unwrap();
-    parsed
-        .sheet
-        .write(parsed.cell_names["width_inches"].0, 1600.0f64 / 300.0)
         .unwrap();
     parsed
         .sheet

@@ -87,7 +87,8 @@ source owners and native exports, install operation libraries, compile without
 executing expressions and select roots explicitly. The source-free native example
 and parsed scalar examples live in `adam-lang/examples/{templates.rs,relationships.adm2,composed.adm2}`.
 The numeric `cel-euclid/examples/{image_constraints.adm2,resize_straighten.adm2}`
-composition retains the existing ties-even resize conversions and crop/straighten
+composition combines resolution axes with a caller-selected floating aspect
+relationship, retaining existing ties-even resize conversions and crop/straighten
 precision policy. Ordinary relationship-produced cells cross component boundaries;
 private diagnostic outputs do not become actuals. These are reusable library
 examples, not new `begin` defaults or a filesystem package-discovery system.
