@@ -95,9 +95,26 @@ pub struct InstanceOccurrence {
     pub(super) inclusion_site: Option<RelationshipSlot>,
     pub(super) cells: Range<usize>,
     pub(super) groups: Range<usize>,
+    pub(super) conditionals: Vec<crate::ConditionalId>,
 }
 
 impl InstanceOccurrence {
+    /// Borrows live conditional identities in this definition's authored order.
+    ///
+    /// These identities remain usable after the template is dropped.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let template = adam_rs::TemplateBuilder::new().finish()?;
+    /// let instance = template.instantiate(&mut adam_rs::Sheet::new(), &[])?;
+    /// assert!(instance.occurrences()[0].conditionals().is_empty());
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn conditionals(&self) -> &[crate::ConditionalId] {
+        &self.conditionals
+    }
+
     /// Borrows this occurrence's expansion-scoped identity.
     ///
     /// # Examples

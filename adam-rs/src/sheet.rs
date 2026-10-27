@@ -1329,8 +1329,12 @@ impl Sheet {
     /// # Errors
     ///
     /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
-    ///   returned an error.
-    fn evaluate_match_source(&self, cond: &ConditionalData) -> Result<MatchValue<'_>, Error> {
+    ///   returned an error; its site identifies the executing conditional.
+    fn evaluate_match_source(
+        &self,
+        id: ConditionalId,
+        cond: &ConditionalData,
+    ) -> Result<MatchValue<'_>, Error> {
         match &cond.source {
             MatchSource::Cell(id) => Ok(MatchValue::Ref(self.cells[*id].effective())),
             MatchSource::Expr(expr) => {
@@ -1341,7 +1345,7 @@ impl Sheet {
                     .collect();
                 let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
                     error,
-                    sites: vec![],
+                    sites: vec![ErrorSite::Conditional(id)],
                 })?;
                 Ok(MatchValue::Owned(value))
             }
@@ -1357,9 +1361,10 @@ impl Sheet {
     /// # Errors
     ///
     /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
-    ///   returned an error.
+    ///   returned an error; its site identifies the executing conditional.
     fn evaluate_match_source_staged<'a>(
         &'a self,
+        id: ConditionalId,
         cond: &ConditionalData,
         stage: &'a PropagationStage,
     ) -> Result<MatchValue<'a>, Error> {
@@ -1373,7 +1378,7 @@ impl Sheet {
                     .collect();
                 let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
                     error,
-                    sites: vec![],
+                    sites: vec![ErrorSite::Conditional(id)],
                 })?;
                 Ok(MatchValue::Owned(value))
             }
@@ -1410,8 +1415,8 @@ impl Sheet {
             .filter(|id| !self.conditional_relationships.contains(id))
             .collect();
 
-        for (_, cond) in &self.conditionals {
-            let value = self.evaluate_match_source_staged(cond, stage)?;
+        for (id, cond) in &self.conditionals {
+            let value = self.evaluate_match_source_staged(id, cond, stage)?;
             let value_ref = value.as_dyn();
             let eq_fn = self.match_eq_fn(cond);
 
@@ -2244,14 +2249,15 @@ impl Sheet {
     /// # Errors
     ///
     /// - `Error::MethodFailed` — `id` is a live, expression-sourced conditional whose
-    ///   function returned an error.
+    ///   function returned an error. The original cause and `ErrorSite::Conditional(id)`
+    ///   identify the failing execution.
     ///
     /// - Complexity: O(B·K) where B = branches, K = keys per branch.
     pub fn conditional_active_branch(&self, id: ConditionalId) -> Result<Option<usize>, Error> {
         let Some(cond) = self.conditionals.get(id) else {
             return Ok(None);
         };
-        let value = self.evaluate_match_source(cond)?;
+        let value = self.evaluate_match_source(id, cond)?;
         let value_ref = value.as_dyn();
         let eq_fn = self.match_eq_fn(cond);
         Ok(cond

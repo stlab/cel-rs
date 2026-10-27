@@ -5,8 +5,11 @@ Date: 2026-10-25
 Status: approved by the user on 2026-10-25. The linked implementation now supplies
 the contracts below, with public regression coverage and a local full-gate
 record in the [2026-10-26 implementation handoff](../2026-10-26-parameterized-sheets-handoff.md).
-The controller's independent whole-branch review and publication remain pending;
-this is not a merged/released completion claim.
+The independent whole-branch review found a conditional runtime provenance gap,
+inconsistent reserved-name acceptance and stale milestone status. The consolidated
+local fix wave addresses those findings without changing the approved semantics.
+Controller-scoped re-review and publication remain pending; this is not a
+merged/released completion claim.
 
 Issue: #29, v1.0. This replaces its original equation-inference scope.
 

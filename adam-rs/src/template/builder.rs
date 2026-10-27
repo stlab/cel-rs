@@ -636,7 +636,6 @@ impl TemplateBuilder {
                     super::instantiate::group_members(&default, groups, relationships)?;
                 sheet
                     .add_conditional(source, live_branches, live_default)
-                    .map(|_| ())
                     .map_err(TemplateError::Runtime)
             }),
         }));

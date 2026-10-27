@@ -463,7 +463,8 @@ mod tests {
     /// preserving traversal direction. Other diagnostics preserve their specified order.
     ///
     /// - Precondition: Every error site belongs to the fixture.
-    /// - Complexity: O(S(C + R)), for S sites, C cells, and R relationships.
+    /// - Complexity: O(S(C + R + K)), for S sites, C cells, R relationships,
+    ///   and K conditionals.
     fn error_sites(sheet: &Sheet, error: &Error) -> Vec<(u8, usize, usize)> {
         let cell = |id| {
             debug_assert!(sheet.cells.contains_key(id));
@@ -484,6 +485,17 @@ mod tests {
                 ErrorSite::Relationship(id) => (1, relationship(id), 0),
                 ErrorSite::Method(id, index) => (2, relationship(id), index),
                 ErrorSite::MethodIndex(index) => (3, index, 0),
+                ErrorSite::Conditional(id) => {
+                    debug_assert!(sheet.conditionals.contains_key(id));
+                    (
+                        4,
+                        sheet
+                            .conditionals()
+                            .position(|candidate| candidate == id)
+                            .unwrap(),
+                        0,
+                    )
+                }
             })
             .collect();
         if matches!(error, Error::Cycle { .. })
@@ -494,9 +506,31 @@ mod tests {
         sites
     }
 
+    /// Normalizes conditional execution sites by authored fixture order.
+    #[test]
+    fn conditional_error_sites_use_fixture_ordinals() {
+        let mut sheet = Sheet::new();
+        let subject = sheet.add_cell(true);
+        let first = sheet
+            .add_conditional::<bool>(MatchExpr::cell(subject), vec![], vec![])
+            .unwrap();
+        let second = sheet
+            .add_conditional::<bool>(MatchExpr::cell(subject), vec![], vec![])
+            .unwrap();
+        let error = Error::MethodFailed {
+            error: anyhow::anyhow!("conditional failure"),
+            sites: vec![
+                ErrorSite::Conditional(second),
+                ErrorSite::Conditional(first),
+            ],
+        };
+        assert_eq!(error_sites(&sheet, &error), [(4, 1, 0), (4, 0, 0)]);
+    }
+
     /// Propagates a pair and compares error variants, messages, and ordered diagnostic sites.
     ///
-    /// - Complexity: Propagation plus O(S(C + R) + error message lengths).
+    /// - Complexity: Propagation plus O(S(C + R + K) + error message lengths)
+    ///   for S sites, C cells, R relationships and K conditionals.
     fn assert_same_result(automatic: &mut Sheet, forced: &mut Sheet) {
         match (automatic.propagate(), propagate_forced_replan(forced)) {
             (Ok(()), Ok(())) => {}

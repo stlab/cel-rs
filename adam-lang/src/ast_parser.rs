@@ -175,7 +175,7 @@ impl AdamAstParser {
         Ok(module)
     }
 
-    /// `path = identifier { "::" identifier }.`
+    /// `path = module_identifier { "::" module_identifier }.`
     ///
     /// - Complexity: O(n) in path size.
     fn parse_path(&mut self, cursor: &mut TokenCursor) -> Result<Vec<(String, ast::ExprSpan)>> {
@@ -189,7 +189,7 @@ impl AdamAstParser {
         Ok(path)
     }
 
-    /// `module_identifier = identifier - ( "use" | "sheet" | "as" ).`
+    /// `module_identifier = ordinary_identifier - ( "_" | "use" | "sheet" | "as" ).`
     ///
     /// Leaves a following definition's keyword available for file-level recovery.
     fn parse_module_identifier(
@@ -197,14 +197,14 @@ impl AdamAstParser {
         cursor: &mut TokenCursor,
     ) -> Result<(String, proc_macro2::Span)> {
         use cel_parser::lex_lexer::Token;
-        if matches!(cursor.peek_token(), Some(Token::Identifier(id)) if id == "sheet" || id == "use" || id == "as")
+        if matches!(cursor.peek_token(), Some(Token::Identifier(id)) if !crate::module::valid_identifier(&id.to_string()))
         {
             return Err(cursor.err_at("expected module identifier"));
         }
         cursor.consume_ident()
     }
 
-    /// `use_decl = "use" path [ "as" identifier ] ";".`
+    /// `use_decl = "use" path [ "as" module_identifier ] ";".`
     ///
     /// - Precondition: the caller consumed `use` and retained its span in `start`.
     /// - Complexity: O(n) in import size.
@@ -273,13 +273,13 @@ impl AdamAstParser {
         Ok(Some(parameters))
     }
 
-    /// `sheet = "sheet" identifier [ parameters ] "{" { sheet_item } "}".`
+    /// `sheet = "sheet" module_identifier [ parameters ] "{" { sheet_item } "}".`
     fn parse_sheet(&mut self, cursor: &mut TokenCursor) -> Result<ast::Sheet> {
         let sheet_start = cursor.peek_span();
         if !cursor.is_keyword("sheet") {
             return Err(cursor.err_at("expected `sheet`"));
         }
-        let (name, name_span) = cursor.consume_ident()?;
+        let (name, name_span) = self.parse_module_identifier(cursor)?;
         let parameters = self.parse_parameters(cursor)?;
         let open_span = cursor.expect_open_brace()?;
         let mut items = Vec::new();

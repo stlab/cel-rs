@@ -195,7 +195,7 @@ type ConditionalFactory = dyn Fn(
     &[CellId],
     &[std::ops::Range<usize>],
     &[RelationshipId],
-) -> Result<(), TemplateError>;
+) -> Result<crate::ConditionalId, TemplateError>;
 
 /// Retains declared match inputs and a type-erased native conditional constructor.
 struct ConditionalRecipe {

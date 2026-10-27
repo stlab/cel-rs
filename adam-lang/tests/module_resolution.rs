@@ -52,6 +52,49 @@ fn module_paths_validate_complete_identifiers() {
     assert_ne!(original, path("image::other"));
 }
 
+/// Rejects reserved identifiers in every registered module path segment.
+#[test]
+fn reserved_module_path_names_are_rejected() {
+    for name in ["sheet", "use", "as"] {
+        for path in [
+            name.to_owned(),
+            format!("lib::{name}"),
+            format!("{name}::lib"),
+        ] {
+            assert!(path.parse::<ModulePath>().is_err(), "{path}");
+        }
+    }
+}
+
+/// Rejects reserved native exports while retaining valid Unicode exports and aliases.
+#[test]
+fn reserved_native_export_names_are_rejected() {
+    for name in ["sheet", "use", "as"] {
+        let mut modules = ModuleSet::new();
+        let template = CompositionBuilder::new(TypeRegistry::new())
+            .finish()
+            .unwrap();
+        assert!(
+            modules
+                .insert_template(path("lib"), name, template)
+                .is_err(),
+            "{name}"
+        );
+        let template = CompositionBuilder::new(TypeRegistry::new())
+            .finish()
+            .unwrap();
+        modules
+            .insert_template(path("lib"), "尺寸", template)
+            .unwrap();
+        insert(
+            &mut modules,
+            "app",
+            "use lib::尺寸 as 工作; sheet root { relationship 工作(); }",
+        );
+        modules.check_resolution().unwrap();
+    }
+}
+
 /// Resolves forward components and aliases without exporting those aliases.
 #[test]
 fn aliases_and_forward_definitions_resolve() {

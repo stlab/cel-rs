@@ -30,7 +30,7 @@ use crate::{
 
 /// Identifies a supplied module by nonempty, `::`-separated identifiers.
 ///
-/// Whitespace, raw identifiers, and `_` alone are not path segments.
+/// Whitespace, raw identifiers, `_` alone, and `sheet`, `use`, `as` are not path segments.
 /// See the [module example](self).
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ModulePath(Vec<String>);
@@ -67,11 +67,11 @@ impl fmt::Display for ModulePath {
     }
 }
 
-/// Checks one complete ordinary identifier without accepting surrounding whitespace.
+/// Checks one complete nonreserved module identifier without surrounding whitespace.
 ///
 /// - Complexity: O(n) identifier bytes.
-fn valid_identifier(name: &str) -> bool {
-    if name.is_empty() || name == "_" || name.starts_with("r#") {
+pub(crate) fn valid_identifier(name: &str) -> bool {
+    if matches!(name, "" | "_" | "sheet" | "use" | "as") || name.starts_with("r#") {
         return false;
     }
     let Ok(stream) = name.parse::<proc_macro2::TokenStream>() else {

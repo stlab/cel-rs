@@ -9,9 +9,9 @@ use crate::{AuthoredRole, ParsedSheet, SourceLabel, composition::OccurrenceOrigi
 
 /// Resolves native error identities to owning definition and actual invocation labels.
 ///
-/// Inner CEL coordinates belong only to the selected method's expression owner.
-/// - Complexity: O(o + m + c + q × a + l²) time and O(o + m + c + l) space
-///   for occurrences o, methods m, public cells c, visited occurrence/ancestor
+/// Inner CEL coordinates belong only to the executing method or conditional's owner.
+/// - Complexity: O(o + m + c + k + q × a + l²) time and O(o + m + c + k + l) space
+///   for occurrences o, methods m, public cells c, conditionals k, visited occurrence/ancestor
 ///   records q, local authored items a and returned labels l.
 pub(crate) fn locate_error(parsed: &ParsedSheet, error: &Error) -> Vec<SourceLabel> {
     let occurrences: HashMap<_, _> = parsed
@@ -25,6 +25,16 @@ pub(crate) fn locate_error(parsed: &ParsedSheet, error: &Error) -> Vec<SourceLab
         .iter()
         .map(|((relationship, _), origin)| (*relationship, origin))
         .collect();
+    let conditionals: HashMap<_, _> = occurrences
+        .values()
+        .flat_map(|occurrence| {
+            occurrence
+                .conditionals
+                .iter()
+                .enumerate()
+                .map(move |(index, id)| (*id, (*occurrence, index)))
+        })
+        .collect();
     let names: HashMap<_, _> = parsed
         .cell_names
         .iter()
@@ -36,6 +46,35 @@ pub(crate) fn locate_error(parsed: &ParsedSheet, error: &Error) -> Vec<SourceLab
             names.get(&id).map(|name| (*name).clone())
         });
         match site {
+            ErrorSite::Conditional(id) => {
+                if let Some((occurrence, ordinal)) = conditionals.get(id) {
+                    let item = occurrence
+                        .authored_items()
+                        .iter()
+                        .filter(|item| item.role == AuthoredRole::Conditional)
+                        .nth(*ordinal);
+                    let mut label = item.map_or(&occurrence.label, |item| &item.label).clone();
+                    if let Error::MethodFailed { error, .. } = error
+                        && index == 0
+                        && let Some(span) = error.downcast_ref::<cel_parser::SpanContext>()
+                        && let Some(location) = item
+                            .and_then(|item| item.expression.as_ref())
+                            .and_then(|label| label.location.as_ref())
+                    {
+                        label.location = Some(crate::SourceLocation {
+                            source: location.source.clone(),
+                            span: span.span(),
+                        });
+                    }
+                    label.label = if item.is_some() {
+                        text
+                    } else {
+                        format!("{text}: {}", label.label)
+                    };
+                    labels.push(label);
+                    labels.extend(invocations(occurrence, &occurrences));
+                }
+            }
             ErrorSite::Method(relationship, method) => {
                 if let Some(origin) = parsed.method_origins.get(&(*relationship, *method))
                     && let Some(occurrence) = occurrences.get(&origin.occurrence)
@@ -241,6 +280,7 @@ fn generic_site_label(site: &ErrorSite, cell_name: &impl Fn(CellId) -> Option<St
         ErrorSite::MethodIndex(_) => "this method".to_string(),
         ErrorSite::Method(..) => "this method".to_string(),
         ErrorSite::Relationship(_) => "this relationship".to_string(),
+        ErrorSite::Conditional(_) => "this conditional expression".to_string(),
         ErrorSite::Cell(c) => match cell_name(*c) {
             Some(name) => format!("cell `{name}`"),
             None => "this cell".to_string(),

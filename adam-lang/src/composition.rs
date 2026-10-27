@@ -112,6 +112,8 @@ pub struct OccurrenceOrigin {
     pub label: SourceLabel,
     /// Retains authored local metadata, independent of definition owners.
     pub authored: Rc<[AuthoredItem]>,
+    /// Maps authored conditional ordinals to their live execution identities.
+    pub conditionals: Vec<adam_rs::ConditionalId>,
 }
 
 impl OccurrenceOrigin {
@@ -1376,13 +1378,13 @@ impl TypedTemplate {
     /// Binding/structural rejection precedes all mutation. Later initializer/body
     /// factory errors leave the destination safely discardable, not rolled back.
     /// Private names never enter root lookup maps; full private shapes and flat
-    /// occurrence/method origins survive definition and returned instance drop.
+    /// occurrence, method and conditional origins survive definition and returned instance drop.
     /// # Errors
     /// Reports binding, native structural/capacity, initializer or body-factory failures.
     /// Native diagnostics retain span-free labels unless a real label was supplied.
-    /// - Complexity: Expected O(b + n + d + o + c + r + m + s) bindings, shape nodes,
+    /// - Complexity: Expected O(b + n + d + o + c + r + m + k + s) bindings, shape nodes,
     ///   unique metadata DAG size, occurrences, local cell mappings, relationships and
-    ///   surviving methods and previously retained sources s, plus native expansion
+    ///   surviving methods, conditional mappings k and previously retained sources s, plus native expansion
     ///   and factory costs.
     ///
     /// # Examples
@@ -1463,6 +1465,7 @@ impl TypedTemplate {
                 inclusion_site: occurrence.inclusion_site().cloned(),
                 label: definition.label.clone(),
                 authored: definition.authored.clone(),
+                conditionals: occurrence.conditionals().to_vec(),
             });
         }
         destination.method_origins.extend(

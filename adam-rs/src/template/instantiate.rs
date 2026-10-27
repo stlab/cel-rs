@@ -437,6 +437,7 @@ impl SheetTemplate {
             inclusion_site: None,
             cells: 0..0,
             groups: 0..0,
+            conditionals: Vec::new(),
         });
         stack.push(root);
         while let Some(frame) = stack.last_mut() {
@@ -506,8 +507,18 @@ impl SheetTemplate {
                 }
                 Item::Conditional(conditional) => {
                     let ids = edges(&conditional.inputs, &frame.cells)?;
-                    (conditional.make)(destination, &ids, &frame.groups, &instance.relationships)
-                        .map_err(|error| frame.conditional_error(error, instance))?;
+                    instance.occurrences[frame.occurrence]
+                        .conditionals
+                        .try_reserve(1)
+                        .map_err(|_| TemplateError::Capacity)?;
+                    let id = (conditional.make)(
+                        destination,
+                        &ids,
+                        &frame.groups,
+                        &instance.relationships,
+                    )
+                    .map_err(|error| frame.conditional_error(error, instance))?;
+                    instance.occurrences[frame.occurrence].conditionals.push(id);
                 }
                 Item::Relationship(index) => {
                     let start = instance.relationships.len();
@@ -628,6 +639,7 @@ impl SheetTemplate {
                                 }),
                                 cells: 0..0,
                                 groups: 0..0,
+                                conditionals: Vec::new(),
                             });
                             stack.push(next);
                         }

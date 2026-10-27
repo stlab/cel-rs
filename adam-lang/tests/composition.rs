@@ -8,6 +8,154 @@ use adam_lang::type_registry::TypeShape;
 use adam_lang::{CompositionBuilder, ParsedSheet, TypeRegistry};
 use cel_runtime::{Array, ArrayOf, Cons, DynSegment, IntoCStackList, Leaf, Nil};
 
+/// Locates a later conditional failure by execution identity, not coincident source spans.
+#[test]
+fn conditional_runtime_failure_retains_only_actual_nested_invocation() {
+    let definition = "sheet choose(value: i32, divisor: i32, output: i32) {
+    conditional divisor { 0 => {} _ => {} }
+    conditional 1 / divisor {
+        0 => { relationship { output := value; } }
+        _ => { relationship { output := value + 1; } }
+    }
+}";
+    let mut modules = adam_lang::ModuleSet::new();
+    for (path, file) in [("library", "library.adm2"), ("twin", "twin.adm2")] {
+        modules
+            .insert_source(path.parse().unwrap(), file, definition)
+            .unwrap();
+    }
+    modules
+        .insert_source(
+            "middle".parse().unwrap(),
+            "middle.adm2",
+            "use library::choose;
+sheet wrapper(value: i32, divisor: i32, output: i32) {
+    relationship choose(value: value, divisor: divisor, output: output);
+}",
+        )
+        .unwrap();
+    modules
+        .insert_source(
+            "app".parse().unwrap(),
+            "app.adm2",
+            "use middle::wrapper;
+use twin::choose as other;
+sheet app {
+    cell value: i32 = 3; cell good: i32 = 1; cell bad: i32 = 1;
+    cell first: i32; cell second: i32; cell third: i32;
+    relationship wrapper(value: value, divisor: good, output: first);
+    relationship wrapper(value: value, divisor: bad, output: second);
+    relationship other(value: value, divisor: good, output: third);
+}",
+        )
+        .unwrap();
+    let compiled = adam_lang::ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+        .compile(modules)
+        .unwrap();
+    let mut parsed = compiled
+        .instantiate_root(&"app".parse().unwrap(), "app")
+        .unwrap();
+    drop(compiled);
+    parsed.propagate().unwrap();
+    for name in ["first", "second", "third"] {
+        assert_eq!(*parsed.read::<i32>(parsed.cell_names[name].0).unwrap(), 4);
+    }
+    let bad = parsed.cell_names["bad"].0;
+    parsed.write(bad, 0i32).unwrap();
+    let error = parsed.propagate().unwrap_err();
+    let labels = parsed.locate_error(&error);
+    assert_eq!(labels.len(), 3, "{labels:?}");
+    let locations = labels
+        .iter()
+        .map(|label| label.location.as_ref().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(locations[0].source.file_name(), "library.adm2");
+    assert_eq!(
+        &locations[0].source,
+        parsed
+            .sources
+            .iter()
+            .find(|source| source.file_name() == "library.adm2")
+            .unwrap()
+    );
+    assert_eq!(locations[0].source.text(), definition);
+    assert_eq!(locations[0].span, cel_parser::SourceSpan::new(3, 16, 3, 27));
+    assert_eq!(locations[1].source.file_name(), "app.adm2");
+    assert_eq!(locations[1].span.start.line, 7);
+    assert_eq!(locations[2].source.file_name(), "middle.adm2");
+    assert_eq!(locations[2].span.start.line, 3);
+    let adam_rs::Error::MethodFailed { error, .. } = error else {
+        panic!("expected conditional failure")
+    };
+    assert!(error.downcast_ref::<cel_parser::SpanContext>().is_some());
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.to_string() == "division by zero")
+    );
+}
+
+/// Keeps public host conditional failures typed and source-free after recipe owners drop.
+#[test]
+fn conditional_runtime_native_adapter_retains_occurrence_without_source() {
+    let mut builder = CompositionBuilder::new(TypeRegistry::new());
+    builder.set_label(adam_lang::SourceLabel {
+        location: None,
+        label: "host conditional".into(),
+    });
+    let divisor = builder.parameter("divisor", int()).unwrap();
+    builder
+        .conditional::<i32, _>(
+            &[divisor],
+            || {
+                let mut segment = DynSegment::new::<()>();
+                segment.push_arg::<i32>(0);
+                segment.op1r(|divisor: i32| {
+                    1i32.checked_div(divisor)
+                        .ok_or_else(|| std::io::Error::other("host division").into())
+                })?;
+                Ok(segment)
+            },
+            vec![(vec![0], vec![])],
+            vec![],
+        )
+        .unwrap();
+    let template = builder.finish().unwrap();
+    let mut parsed = ParsedSheet::new();
+    let first = parsed.add_cell(1i32);
+    let second = parsed.add_cell(1i32);
+    for (name, id) in [("first", first), ("second", second)] {
+        parsed
+            .register_cell(name, id, int(), &TypeRegistry::new())
+            .unwrap();
+        let instance = template
+            .instantiate(&mut parsed, &[("divisor", id)])
+            .unwrap();
+        drop(instance);
+    }
+    drop(template);
+    parsed.propagate().unwrap();
+    parsed.write(second, 0i32).unwrap();
+    let error = parsed.propagate().unwrap_err();
+    assert_eq!(
+        error.sites(),
+        &[adam_rs::ErrorSite::Conditional(
+            parsed.instance_origins[1].occurrences[0].conditionals[0]
+        )]
+    );
+    let labels = parsed.locate_error(&error);
+    assert_eq!(labels.len(), 1, "{labels:?}");
+    assert!(labels[0].location.is_none());
+    assert!(labels[0].label.contains("host conditional"));
+    let adam_rs::Error::MethodFailed { error, .. } = error else {
+        panic!()
+    };
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().to_string(),
+        "host division"
+    );
+}
+
 /// Compiles a collection and explicitly constructs its named root.
 fn root(source: &str, name: &str) -> Result<ParsedSheet, adam_lang::ModuleDiagnostic> {
     let path = "app".parse().unwrap();

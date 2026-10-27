@@ -644,6 +644,64 @@ relationship divide(a: bad, b: second);
         assert!(!rendered.contains("WRONG CALLER TEXT"), "{rendered}");
     }
 
+    /// Renders a post-edit conditional failure using its retained imported source and use site.
+    #[test]
+    fn labels_render_imported_conditional_runtime_after_edit() {
+        let mut modules = adam_lang::ModuleSet::new();
+        modules
+            .insert_source(
+                "library".parse().unwrap(),
+                "library.adm2",
+                "sheet choose(divisor: i32) {\nconditional 1 / divisor { 0 => {} _ => {} }\n}",
+            )
+            .unwrap();
+        modules
+            .insert_source(
+                "app".parse().unwrap(),
+                "app.adm2",
+                "use library::choose;
+sheet app {
+cell first: i32 = 1; cell second: i32 = 1;
+relationship choose(divisor: first);
+relationship choose(divisor: second);
+}",
+            )
+            .unwrap();
+        let compiled = adam_lang::ModuleCompiler::new(
+            adam_lang::TypeRegistry::new(),
+            cel_parser::OpLookup::new(),
+        )
+        .compile(modules)
+        .unwrap();
+        let mut parsed = compiled
+            .instantiate_root(&"app".parse().unwrap(), "app")
+            .unwrap();
+        drop(compiled);
+        parsed.propagate().unwrap();
+        let second = parsed.cell_names["second"].0;
+        parsed.write(second, 0i32).unwrap();
+        let error = parsed.propagate().unwrap_err();
+        let rendered = format_adam_error(
+            &error,
+            &parsed,
+            "WRONG TEXT",
+            "wrong.adm2",
+            &Renderer::plain(),
+        );
+        for expected in [
+            "division by zero",
+            "library.adm2:2:13",
+            "app.adm2:5:1",
+            "conditional 1 / divisor",
+            "divisor: second",
+        ] {
+            assert!(rendered.contains(expected), "{rendered}");
+        }
+        for excluded in ["wrong.adm2", "WRONG TEXT", "divisor: first", "app.adm2:4:1"] {
+            assert!(!rendered.contains(excluded), "{rendered}");
+        }
+    }
+
     /// Parses `src` into a `ParsedSheet` via the standard adam-lang pipeline, for tests that
     /// need a real (rather than hand-built) span table to resolve `Error` sites against.
     fn parse(src: &str) -> adam_lang::ParsedSheet {

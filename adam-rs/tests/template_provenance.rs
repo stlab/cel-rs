@@ -4,6 +4,71 @@ use std::rc::Rc;
 
 use adam_rs::{CellSlot, Method, MethodRecipe, Sheet, TemplateBuilder, TemplateError};
 
+/// Retains native conditional identity and the original cause after construction-owner drops.
+#[test]
+fn native_conditional_runtime_failures_name_the_executing_conditional() {
+    let mut builder = TemplateBuilder::new();
+    let divisor = builder.parameter::<i32>("divisor").unwrap();
+    builder
+        .conditional::<i32, _>(
+            &[divisor],
+            |ids| {
+                Ok(adam_rs::MatchExpr::new(
+                    ids.to_vec(),
+                    vec![std::any::TypeId::of::<i32>()],
+                    std::any::TypeId::of::<i32>(),
+                    |a, b| a.downcast_ref::<i32>() == b.downcast_ref::<i32>(),
+                    |args| {
+                        let divisor = args[0].downcast_ref::<i32>().unwrap();
+                        let result = 1i32
+                            .checked_div(*divisor)
+                            .ok_or_else(|| std::io::Error::other("native division"))?;
+                        Ok(Box::new(result))
+                    },
+                ))
+            },
+            vec![(vec![0], vec![])],
+            vec![],
+        )
+        .unwrap();
+    let template = builder.finish().unwrap();
+    let mut sheet = Sheet::new();
+    let first = sheet.add_cell(1i32);
+    let second = sheet.add_cell(1i32);
+    let mut recorded = Vec::new();
+    for divisor in [first, second] {
+        let instance = template
+            .instantiate(&mut sheet, &[("divisor", divisor)])
+            .unwrap();
+        let ids = instance.occurrences()[0].conditionals();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(sheet.conditional_match_cells(ids[0]), Some(&[divisor][..]));
+        recorded.push(ids[0]);
+        drop(instance);
+    }
+    assert_ne!(recorded[0], recorded[1]);
+    drop(template);
+    sheet.propagate().unwrap();
+    let conditional = recorded[1];
+    sheet.write(second, 0i32).unwrap();
+    for error in [
+        sheet.conditional_active_branch(conditional).unwrap_err(),
+        sheet.propagate().unwrap_err(),
+    ] {
+        assert_eq!(
+            error.sites(),
+            &[adam_rs::ErrorSite::Conditional(conditional)]
+        );
+        let adam_rs::Error::MethodFailed { error, .. } = error else {
+            panic!()
+        };
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().to_string(),
+            "native division"
+        );
+    }
+}
+
 /// Creates an identity writer without capturing live execution state.
 fn copy(input: &CellSlot, output: &CellSlot) -> MethodRecipe {
     MethodRecipe::new(

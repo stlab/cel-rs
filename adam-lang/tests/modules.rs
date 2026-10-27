@@ -2,6 +2,40 @@
 
 use adam_lang::{AdamAstParser, ast};
 
+/// Rejects reserved declaration, alias and reference names while recovering later sheets.
+#[test]
+fn reserved_module_identifiers_reject_consistently_and_recover() {
+    for name in ["sheet", "use", "as"] {
+        for broken in [
+            format!("sheet {name}() {{}}"),
+            format!("sheet {name} {{}}"),
+            format!("use lib::helper as {name};"),
+            format!("use {name}::helper;"),
+            format!("use lib::{name};"),
+            format!("sheet root {{ relationship {name}(); }}"),
+            format!("sheet root {{ relationship lib::{name}(); }}"),
+        ] {
+            let source = format!("{broken}\nsheet next {{}}");
+            let module = AdamAstParser::new().parse_module_str(&source).unwrap();
+            assert!(!module.errors.is_empty(), "{source}");
+            assert!(
+                module.items.iter().any(|item| matches!(item,
+                ast::ModuleItem::Sheet(sheet) if sheet.name == "next")),
+                "{source}"
+            );
+            assert!(adam_lang::format_source(&source).is_err(), "{source}");
+        }
+    }
+    let source = "sheet 尺寸() {} sheet root { relationship 尺寸(); }";
+    assert!(
+        AdamAstParser::new()
+            .parse_module_str(source)
+            .unwrap()
+            .errors
+            .is_empty()
+    );
+}
+
 /// Retains ordered imports, forward references, typed signatures, and distinct roots.
 #[test]
 fn module_structural_shapes() {

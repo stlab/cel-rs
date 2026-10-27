@@ -4,14 +4,49 @@ Status as of 2026-10-26: the approved #29 implementation is present in the
 `toward-v1-1` linked worktree. Tasks 1–9 received independent task-scoped reviews
 and approved corrections. Task 10 audited the public contracts, added missing
 boundary coverage, corrected source-only Unicode diagnostic columns, and ran
-the complete local gate. The controller's independent **whole-branch review has
-not run**. No push, pull request, merge, issue update or release is claimed.
+the complete local gate. The independent whole-branch review then found one
+Important and two actionable Minor findings. The consolidated local fix wave
+addresses all three; the controller's scoped re-review remains pending.
+No push, pull request, merge, issue update or release is claimed.
 
 The approved semantic authority is
 [`specs/2026-10-25-parameterized-sheets-design.md`](specs/2026-10-25-parameterized-sheets-design.md).
 The original implementation plan remains unchanged by Task 10.
 The branch merge base is `844ef48e32126a1db3198524a72ca2b04a60e800`;
 Task 10 began at `1409d0d3b10e02f515fe04a671626ecd5f6a6fea`.
+The final fix wave began at `f67a79a0579ab6947e2f02c9b204fdff5d6a5a14`.
+
+## Broad review and consolidated fixes
+
+The broad review covered all 88 branch paths and confirmed a post-construction
+conditional failure that retained the CEL span but lost its executing occurrence.
+Both native live and staged match evaluation now attach the actual
+`ErrorSite::Conditional` identity without changing the original error cause.
+Native occurrence records retain conditional IDs in authored order. The language
+adapter owns those mappings alongside definition sources and parent links, so
+the locator selects the exact expression and only its actual inclusion chain.
+Neither adapter guesses from input cells or coincident spans.
+
+Public regressions first failed with empty conditional labels/sites. They now
+exercise successful propagation, owner drops and a later zero-divisor edit:
+repeated nested imported instances, identical definition text/spans in separate
+modules, the second authored conditional, the public host adapter, source-free
+native execution and the shared renderer. Existing construction/key and method
+error contracts remain covered.
+
+The namespace fix consistently rejects reserved `sheet`, `use` and `as` at
+module-path/native-export registration, sheet declarations, aliases and
+references. The existing ordinary-identifier restrictions also apply at source
+boundaries; Unicode names remain valid and file-level recovery retains following
+definitions. The milestone summary now distinguishes local implementation and
+review fixes from pending scoped re-review/publication.
+
+The complete fix-wave report and distinct raw logs live under
+`.superpowers/sdd/2026-10-25-parameterized-sheets/final-fix-report.md`.
+They record RED/GREEN evidence, exact final-gate statuses, changed paths and
+commit identities. The controller must inspect that report before scoped
+re-review. This implementation self-review is not an independent re-review.
+All seven rulings and all deferred boundaries below remain unchanged.
 
 ## What's done
 
@@ -170,13 +205,47 @@ raw-log references are in the local Task 10 report.
 
 ## Verification
 
+### Consolidated final fix wave
+
+The final exact gate ran from `2026-10-27T05:29:02Z` through `05:30:24Z`
+(October 26 locally). All commands listed below exited **0**, including both
+desktop/default-feature checks for Begin and ez-adam. Distinct raw logs use
+`final-fix-final-*.log`; `final-fix-final-gate-status.tsv` retains all 15 statuses
+beside the fix report.
+
+- Workspace: **2,968 passed, 0 failed, 4 existing ignored**, across 106 result
+  groups: 2,585 non-documentation tests and 383 doctests. The separate explicit
+  doctest command repeats those 383 passing and four ignored cases; do not add
+  them again.
+- Extension: **19 passed**, no failures, skips or cancellations.
+- Feature-enabled Euclid: **81 passed**, including its 13 doctests; this
+  feature selector overlaps workspace coverage and is reported separately.
+- Focused language, native template, renderer and cached diagnostic selectors
+  passed 77, 52, 25 and one test respectively; these overlap the final workspace
+  total.
+- Plain workspace build/test emitted no project compiler warnings. The existing
+  third-party `block v0.1.6` future-incompatibility notice remains.
+
+The first gate attempt exposed a missing exhaustive conditional arm in the
+test-only cached-plan diagnostic comparator. The fix adds fixture-ordinal
+normalization and its regression. Its failed logs/statuses remain under
+`final-fix-*`; both subsequent complete gates passed and have distinct prefixes.
+No prior Task 10 or review evidence was overwritten.
+
+Only a renderer contract test changes `adam-web-ui`; renderer/UI production
+code is unchanged. The new post-edit conditional rendering test checks the
+actual shared renderer, imported source/caret and only the failing use.
+Task 7's screenshots below remain reused evidence, not a new browser run.
+
+### Historical Task 10 gate
+
 The Task 10 report records commands, terminal exit markers, output summaries,
 the complete coverage ledger and the task/branch manifests:
 `.superpowers/sdd/2026-10-25-parameterized-sheets/task-10-report.md`.
 Raw logs and `task-10-gate-status.tsv` live beside it. These ignored local
 artifacts are not published repository files.
 
-Every command below exited **0** on the final source state. The complete gate
+Every command below exited **0** on the Task 10 source state. The Task 10 gate
 ran from `2026-10-27T04:53:16Z` through `04:53:54Z` (October 26 locally).
 
 ```sh
@@ -244,10 +313,11 @@ installation or new mdBook distribution build is claimed.
 
 ## What's left
 
-The controller must dispatch the sole independent whole-branch review, address
-its findings, and repeat affected/full verification as required. Only then
-should it publish the branch/PR and update #29's design-stage issue body and the
-milestone with the verified local implementation/review status. #29 remains
+The sole independent whole-branch review is complete. The controller must inspect
+the consolidated fix report and supply the scoped re-review before publication.
+Only after that confirmation should it publish the branch/PR and update #29's
+design-stage issue body and the milestone with the verified local
+implementation/review status. #29 remains
 open, titled “parameterized sheets”, in v1.0. No automatic closure or merged
 status follows from this handoff. Publishing, merging and release remain
 separate authorized actions. Existing #261–#264 exclusions are unchanged.
