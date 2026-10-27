@@ -28,6 +28,7 @@
 mod builder;
 mod error;
 mod instantiate;
+mod provenance;
 
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
@@ -37,6 +38,7 @@ use crate::{CellId, CellKind, Method, RelationshipId, Sheet};
 
 pub use builder::TemplateBuilder;
 pub use error::TemplateError;
+pub use provenance::{InstanceOccurrence, MethodOrigin, OccurrenceId, TemplateId};
 
 /// Identifies a cell declaration within exactly one owning builder/template.
 ///
@@ -233,6 +235,19 @@ impl Drop for SheetTemplate {
 }
 
 impl SheetTemplate {
+    /// Returns this recipe's immutable identity without retaining its factories or children.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let template = adam_rs::TemplateBuilder::new().finish()?;
+    /// assert_eq!(template.id(), template.id());
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn id(&self) -> TemplateId {
+        TemplateId(self.owner.clone())
+    }
+
     /// Returns whether expansion contains only relationships and parameter declarations.
     ///
     /// Private cells, policies, outputs and conditionals disqualify a recipe transitively.
@@ -277,12 +292,19 @@ impl TemplateInclusion {
 /// included private cells in inline expansion order. Bound child formals introduce
 /// no duplicate cell entries. Relationships follow inline expansion order and
 /// remain distinct even when their recipe belongs to a group.
+/// Occurrence records retain local mappings and immutable identity tokens, not
+/// template factories or recursively owned inclusion edges.
 /// See the [module example](self).
 #[derive(Debug)]
 pub struct Instance {
     _identity: Rc<()>,
     cells: Vec<CellId>,
     relationships: Vec<RelationshipId>,
+    occurrences: Vec<InstanceOccurrence>,
+    local_cells: Vec<CellId>,
+    local_groups: Vec<std::ops::Range<usize>>,
+    relationship_origins: Vec<provenance::RelationshipOrigin>,
+    authored_methods: Vec<usize>,
 }
 
 impl Instance {

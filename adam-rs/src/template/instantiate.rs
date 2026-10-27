@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
+use super::provenance::RelationshipOrigin;
 use super::{
-    CellSlot, Instance, Item, MethodRecipe, RelationshipRecipe, RelationshipSlot, SheetTemplate,
-    TemplateError,
+    CellSlot, Instance, InstanceOccurrence, Item, MethodRecipe, OccurrenceId, RelationshipRecipe,
+    RelationshipSlot, SheetTemplate, TemplateError,
 };
 use crate::{CellId, CellKind, Method, RelationshipId, Sheet};
 
@@ -82,19 +83,25 @@ struct LiveFrame<'a> {
     groups: Vec<Range<usize>>,
     next: usize,
     incoming: Option<usize>,
+    occurrence: usize,
 }
 
 impl<'a> LiveFrame<'a> {
     /// Allocates one occurrence's local mappings using fallible reservation.
     ///
     /// - Complexity: O(c + r) time and space for local cells c and groups r.
-    fn new(recipe: &'a SheetTemplate, incoming: Option<usize>) -> Result<Self, TemplateError> {
+    fn new(
+        recipe: &'a SheetTemplate,
+        incoming: Option<usize>,
+        occurrence: usize,
+    ) -> Result<Self, TemplateError> {
         Ok(Self {
             recipe,
             cells: storage(recipe.cells.len(), CellId::default())?,
             groups: storage(recipe.relationships.len(), 0..0)?,
             next: 0,
             incoming,
+            occurrence,
         })
     }
 }
@@ -122,7 +129,7 @@ impl SheetTemplate {
     /// on checked-size overflow or failed expansion reservation.
     /// A failed match-expression factory returns [`TemplateError::ConditionalFactory`].
     ///
-    /// - Complexity: Expected O(d + c + b + Σ(m² × e)) time and O(c + b + e + r + h)
+    /// - Complexity: Expected O(d + c + b + Σ(m² × e)) time and O(d + c + b + e + r + h)
     ///   additional space for expanded declarations d, cells c, bindings b,
     ///   relationships r, depth h, and each relationship's m methods of at most e
     ///   edges, excluding factory costs.
@@ -156,6 +163,11 @@ impl SheetTemplate {
             _identity: Rc::new(()),
             cells: Vec::new(),
             relationships: Vec::new(),
+            occurrences: Vec::new(),
+            local_cells: Vec::new(),
+            local_groups: Vec::new(),
+            relationship_origins: Vec::new(),
+            authored_methods: Vec::new(),
         };
         instance
             .cells
@@ -163,6 +175,26 @@ impl SheetTemplate {
             .map_err(|_| TemplateError::Capacity)?;
         instance
             .relationships
+            .try_reserve(size)
+            .map_err(|_| TemplateError::Capacity)?;
+        instance
+            .occurrences
+            .try_reserve(size)
+            .map_err(|_| TemplateError::Capacity)?;
+        instance
+            .local_cells
+            .try_reserve(size)
+            .map_err(|_| TemplateError::Capacity)?;
+        instance
+            .local_groups
+            .try_reserve(size)
+            .map_err(|_| TemplateError::Capacity)?;
+        instance
+            .relationship_origins
+            .try_reserve(size)
+            .map_err(|_| TemplateError::Capacity)?;
+        instance
+            .authored_methods
             .try_reserve(size)
             .map_err(|_| TemplateError::Capacity)?;
         self.preflight_sources(destination, &bound)?;
@@ -234,15 +266,16 @@ impl SheetTemplate {
     /// Replays ordered registration using an explicit stack and contiguous group ranges.
     ///
     /// - Precondition: Source and binding preflight succeeded and instance storage is reserved.
-    /// - Complexity: O(c + r + e + Σ(m² × e)) time and O(c + r + h + e) space
-    ///   for expanded cells c, relationships r, edges e and depth h, excluding factories.
+    /// - Complexity: O(d + c + r + e + Σ(m² × e)) time and O(d + c + r + h + e) space
+    ///   for expanded declarations d, cells c, relationships r, edges e and depth h,
+    ///   excluding factories.
     fn expand(
         &self,
         destination: &mut Sheet,
         bound: &HashMap<usize, CellId>,
         instance: &mut Instance,
     ) -> Result<(), TemplateError> {
-        let mut root = LiveFrame::new(self, None)?;
+        let mut root = LiveFrame::new(self, None, 0)?;
         for (&index, &actual) in bound {
             root.cells[index] = actual;
         }
@@ -251,10 +284,28 @@ impl SheetTemplate {
         stack
             .try_reserve(self.depth.ok_or(TemplateError::Capacity)?)
             .map_err(|_| TemplateError::Capacity)?;
+        instance.occurrences.push(InstanceOccurrence {
+            id: OccurrenceId {
+                owner: instance._identity.clone(),
+                index: 0,
+            },
+            template: self.id(),
+            parent: None,
+            inclusion_site: None,
+            cells: 0..0,
+            groups: 0..0,
+        });
         stack.push(root);
         while let Some(frame) = stack.last_mut() {
             let Some(item) = frame.recipe.items.get(frame.next) else {
                 let finished = stack.pop().unwrap();
+                let cells_start = instance.local_cells.len();
+                instance.local_cells.extend_from_slice(&finished.cells);
+                let groups_start = instance.local_groups.len();
+                instance.local_groups.extend_from_slice(&finished.groups);
+                let record = &mut instance.occurrences[finished.occurrence];
+                record.cells = cells_start..instance.local_cells.len();
+                record.groups = groups_start..instance.local_groups.len();
                 if let Some(index) = finished.incoming {
                     stack.last_mut().unwrap().groups[index].end = instance.relationships.len();
                 } else {
@@ -292,6 +343,7 @@ impl SheetTemplate {
                     frame.groups[*index] = start..start;
                     match &frame.recipe.relationships[*index] {
                         RelationshipRecipe::Methods(recipes) => {
+                            let methods_start = instance.authored_methods.len();
                             let mut methods = Vec::new();
                             methods
                                 .try_reserve(recipes.len())
@@ -300,11 +352,17 @@ impl SheetTemplate {
                             for recipe in recipes {
                                 methods.push(recipe.instantiate(destination, &frame.cells)?);
                             }
+                            let mut authored_index = 0;
                             methods.retain(|method| {
-                                method
+                                let survives = method
                                     .outputs
                                     .iter()
-                                    .all(|id| destination.cell_kind(*id) != Some(CellKind::Source))
+                                    .all(|id| destination.cell_kind(*id) != Some(CellKind::Source));
+                                if survives {
+                                    instance.authored_methods.push(authored_index);
+                                }
+                                authored_index += 1;
+                                survives
                             });
                             debug_assert!(!methods.is_empty());
                             instance.relationships.push(
@@ -312,6 +370,11 @@ impl SheetTemplate {
                                     .add_relationship(methods)
                                     .map_err(TemplateError::Runtime)?,
                             );
+                            instance.relationship_origins.push(RelationshipOrigin {
+                                occurrence: frame.occurrence,
+                                slot: *index,
+                                methods: methods_start..instance.authored_methods.len(),
+                            });
                             frame.groups[*index].end = instance.relationships.len();
                         }
                         RelationshipRecipe::Out(writer) => {
@@ -320,13 +383,35 @@ impl SheetTemplate {
                                 .add_out_writer(method)
                                 .map_err(TemplateError::Runtime)?;
                             instance.relationships.push(relationship);
+                            let methods_start = instance.authored_methods.len();
+                            instance.authored_methods.push(0);
+                            instance.relationship_origins.push(RelationshipOrigin {
+                                occurrence: frame.occurrence,
+                                slot: *index,
+                                methods: methods_start..instance.authored_methods.len(),
+                            });
                             frame.groups[*index].end = instance.relationships.len();
                         }
                         RelationshipRecipe::Include { child, bindings } => {
-                            let mut next = LiveFrame::new(child, Some(*index))?;
+                            let occurrence = instance.occurrences.len();
+                            let mut next = LiveFrame::new(child, Some(*index), occurrence)?;
                             for (i, slot) in bindings {
                                 next.cells[*i] = frame.cells[slot.index];
                             }
+                            instance.occurrences.push(InstanceOccurrence {
+                                id: OccurrenceId {
+                                    owner: instance._identity.clone(),
+                                    index: occurrence,
+                                },
+                                template: child.id(),
+                                parent: Some(instance.occurrences[frame.occurrence].id.clone()),
+                                inclusion_site: Some(RelationshipSlot {
+                                    owner: frame.recipe.owner.clone(),
+                                    index: *index,
+                                }),
+                                cells: 0..0,
+                                groups: 0..0,
+                            });
                             stack.push(next);
                         }
                     }

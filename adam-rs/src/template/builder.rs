@@ -715,7 +715,9 @@ impl TemplateBuilder {
             .cells
             .len()
             .checked_add(self.recipe.items.len())
-            .and_then(|n| n.checked_add(self.recipe.relationships.len()));
+            .and_then(|n| n.checked_add(self.recipe.relationships.len()))
+            // Every occurrence needs a record, even when its recipe is empty.
+            .and_then(|n| n.checked_add(1));
         let mut depth = Some(1usize);
         for relationship in &self.recipe.relationships {
             match relationship {

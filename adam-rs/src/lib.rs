@@ -188,6 +188,6 @@ pub use relationship::{Method, RelationshipId};
 pub use requirement::{Requirement, RequirementId};
 pub use sheet::Sheet;
 pub use template::{
-    CellSlot, Instance, MethodRecipe, RelationshipSlot, SheetTemplate, TemplateBuilder,
-    TemplateError, TemplateInclusion,
+    CellSlot, Instance, InstanceOccurrence, MethodOrigin, MethodRecipe, OccurrenceId,
+    RelationshipSlot, SheetTemplate, TemplateBuilder, TemplateError, TemplateId, TemplateInclusion,
 };
