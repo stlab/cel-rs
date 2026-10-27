@@ -1,8 +1,32 @@
 //! Exercises nonexecuting module checking through the public source-owning interface.
 
-use adam_lang::{ModulePath, ModuleSet, TypeRegistry, check_module};
+use adam_lang::{ModuleCompiler, ModulePath, ModuleSet, TypeRegistry, check_module};
 use cel_parser::OpLookup;
 use std::cell::Cell;
+
+/// Checks and compiles a compact, representable native DAG without expanding live occurrences.
+#[test]
+fn native_empty_dag_checks_and_compiles_without_instantiation() {
+    let types = TypeRegistry::new();
+    let mut template = adam_lang::CompositionBuilder::new(types.clone())
+        .finish()
+        .unwrap();
+    for _ in 0..usize::BITS - 4 {
+        let mut builder = adam_lang::CompositionBuilder::new(types.clone());
+        builder.include(&template, &[]).unwrap();
+        builder.include(&template, &[]).unwrap();
+        template = builder.finish().unwrap();
+    }
+    let path: ModulePath = "native".parse().unwrap();
+    let mut modules = ModuleSet::new();
+    modules
+        .insert_template(path.clone(), "empty", template)
+        .unwrap();
+    assert!(check_module(&path, &modules, &types, &OpLookup::new()).is_empty());
+    ModuleCompiler::new(types, OpLookup::new())
+        .compile(modules)
+        .unwrap();
+}
 
 /// Checks a registered file without creating a live sheet.
 fn check(source: &str) -> Vec<adam_lang::ModuleDiagnostic> {
@@ -147,28 +171,33 @@ fn module_analysis_never_executes_host_code() {
     }
     let mut types = TypeRegistry::new();
     types.register::<Host>("Host");
-    let mut lookup = OpLookup::new();
-    lookup.push_scope(move |name, segment, arity, _| {
-        if arity != 0 {
-            return Ok(false);
-        }
-        match name {
-            "host" => {
-                segment.op0(|| {
-                    CALLS.with(|count| count.set(count.get() + 1));
-                    Host(0)
-                });
+    /// Registers counted, correctly typed host operations without evaluating them.
+    fn operations() -> OpLookup {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(move |name, segment, arity, _| {
+            if arity != 0 {
+                return Ok(false);
             }
-            "probe" => {
-                segment.op0(|| {
-                    CALLS.with(|count| count.set(count.get() + 1));
-                    1i32
-                });
+            match name {
+                "host" => {
+                    segment.op0(|| {
+                        CALLS.with(|count| count.set(count.get() + 1));
+                        Host(0)
+                    });
+                }
+                "probe" => {
+                    segment.op0(|| {
+                        CALLS.with(|count| count.set(count.get() + 1));
+                        1i32
+                    });
+                }
+                _ => return Ok(false),
             }
-            _ => return Ok(false),
-        }
-        Ok(true)
-    });
+            Ok(true)
+        });
+        lookup
+    }
+    let lookup = operations();
     for body in [
         "relationship host_copy(a: left, b: right);",
         "cell default: Host; cell initial: Host = host; out result := host;",
@@ -215,6 +244,14 @@ fn module_analysis_never_executes_host_code() {
         ("cell value: Host;", false),
         ("cell values: [Host];", true),
         ("source value: Host = host;", true),
+        ("cell value: Host = host;", true),
+        ("out value: Host := host;", false),
+        (
+            "out value: (i32, (Host, bool)) := (1, (host, true));",
+            false,
+        ),
+        ("out value: [Host] := [host];", true),
+        ("out value: (i32, [Host]) := (1, [host]);", true),
     ] {
         let path: ModulePath = "defaults".parse().unwrap();
         let mut modules = ModuleSet::new();
@@ -222,11 +259,21 @@ fn module_analysis_never_executes_host_code() {
             .insert_source(
                 path.clone(),
                 "defaults.adm2",
-                &format!("sheet s() {{ {body} }}"),
+                &format!("sheet unused() {{ {body} }} sheet root {{}}"),
             )
             .unwrap();
         let errors = check_module(&path, &modules, &types, &lookup);
         assert_eq!(errors.is_empty(), valid, "{errors:?}");
+        if !valid {
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message.contains("has no default")),
+                "{errors:?}"
+            );
+        }
+        let compiled = ModuleCompiler::new(types.clone(), operations()).compile(modules);
+        assert_eq!(compiled.is_ok(), valid, "{body}");
         CALLS.with(|count| assert_eq!(count.get(), 1));
         DEFAULTS.with(|count| assert_eq!(count.get(), 1));
     }

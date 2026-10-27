@@ -12,6 +12,12 @@ use super::{
 };
 use crate::{CellId, CellKind, Method, RelationshipId, Sheet};
 
+#[cfg(test)]
+thread_local! {
+    /// Counts entered source-check frames to verify the specialization complexity bound.
+    static SOURCE_PREFLIGHT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Allocates initialized traversal storage without infallible reservation.
 ///
 /// - Complexity: O(n) time and space for n elements.
@@ -267,8 +273,11 @@ impl SheetTemplate {
     /// Source status flows through checked child bindings; private sources remain fixed.
     /// Cached sizes reject oversized DAGs before this traversal.
     ///
-    /// - Complexity: O(c + e + r) time and O(c + h) space for expanded cells c,
-    ///   edges e, relationships r and nesting depth h.
+    /// - Complexity: expected O(w) time and O(k + h) space, where w counts local
+    ///   cells, relationships, method outputs and child masks across distinct
+    ///   (recipe, complete source mask) specializations; k counts specializations
+    ///   and their mask cells, and h is inclusion depth. Distinct masks can still
+    ///   grow exponentially.
     fn preflight_sources(
         &self,
         destination: &Sheet,
@@ -292,8 +301,10 @@ impl SheetTemplate {
     /// # Errors
     /// Rejects missing, unknown or repeated names, capacity overflow, or a constituent
     /// relationship left without a method, including inactive branches.
-    /// - Complexity: O(bc + e) time and O(c + h) space for b bindings, c expanded
-    ///   cells, e expanded edges, and inclusion depth h.
+    /// - Complexity: expected O(bc + w) time and O(k + h) space for b bindings,
+    ///   c root cells, and local checking work w across distinct (recipe, complete
+    ///   source mask) specializations. k counts specializations and their mask
+    ///   cells, and h is inclusion depth. Distinct masks can still grow exponentially.
     ///
     /// # Examples
     /// ```
@@ -337,14 +348,22 @@ impl SheetTemplate {
         self.preflight_source_mask(sources)
     }
 
-    /// Traverses whole-method source specialization from a checked local mask.
+    /// Checks each distinct recipe and complete source mask once by iterative DFS.
     ///
     /// - Precondition: The mask covers this recipe's local cells.
     /// # Errors
     /// Returns capacity failure or an emptied constituent relationship.
-    /// - Complexity: O(c + e + r) time and O(c + h) space in expanded structure.
+    /// Successful completions alone enter the cache; failures retain their active
+    /// inclusion ancestry. Live expansion remains occurrence-specific.
+    ///
+    /// - Complexity: expected O(w) time and O(k + h) space, where w counts local
+    ///   cells, relationships, method outputs and child masks across distinct
+    ///   specializations, k counts specializations and their mask cells, and h is
+    ///   inclusion depth.
+    ///   Distinct complete masks can still grow exponentially.
     fn preflight_source_mask(&self, sources: Vec<bool>) -> Result<(), TemplateError> {
         debug_assert_eq!(sources.len(), self.cells.len());
+        let mut complete = HashSet::new();
         let mut stack = Vec::new();
         stack
             .try_reserve(self.depth.ok_or(TemplateError::Capacity)?)
@@ -356,8 +375,16 @@ impl SheetTemplate {
             incoming: None,
         });
         while let Some(frame) = stack.last_mut() {
+            #[cfg(test)]
+            if frame.next == 0 {
+                SOURCE_PREFLIGHT_VISITS.with(|visits| visits.set(visits.get() + 1));
+            }
             let Some(relationship) = frame.recipe.relationships.get(frame.next) else {
-                stack.pop();
+                let frame = stack.pop().expect("active source frame");
+                complete
+                    .try_reserve(1)
+                    .map_err(|_| TemplateError::Capacity)?;
+                complete.insert((frame.recipe.id(), frame.sources));
                 continue;
             };
             frame.next += 1;
@@ -390,13 +417,17 @@ impl SheetTemplate {
                         sources[i] = cell.kind == CellKind::Source
                             || bindings.get(&i).is_some_and(|s| frame.sources[s.index]);
                     }
+                    let key = (child.id(), sources);
+                    if complete.contains(&key) {
+                        continue;
+                    }
                     let incoming = Some(RelationshipSlot {
                         owner: frame.recipe.owner.clone(),
                         index: frame.next - 1,
                     });
                     stack.push(SourceFrame {
                         recipe: child,
-                        sources,
+                        sources: key.1,
                         next: 0,
                         incoming,
                     });
@@ -680,5 +711,34 @@ impl MethodRecipe {
             });
         }
         Ok(method)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SOURCE_PREFLIGHT_VISITS;
+    use crate::TemplateBuilder;
+    use std::rc::Rc;
+
+    /// Checks work by distinct immutable specializations rather than expanded occurrences.
+    #[test]
+    fn source_preflight_checks_shared_dag_specializations_once() {
+        let depth = 12;
+        let mut template = Rc::new(TemplateBuilder::new().finish().unwrap());
+        for _ in 0..depth {
+            let mut builder = TemplateBuilder::new();
+            builder.include(template.clone(), &[]).unwrap();
+            builder.include(template, &[]).unwrap();
+            template = Rc::new(builder.finish().unwrap());
+        }
+        SOURCE_PREFLIGHT_VISITS.with(|visits| visits.set(0));
+        template.check_source_bindings(&[]).unwrap();
+        SOURCE_PREFLIGHT_VISITS.with(|visits| {
+            assert!(
+                visits.get() <= 2 * (depth + 1),
+                "visited {} frames",
+                visits.get()
+            );
+        });
     }
 }

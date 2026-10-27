@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadModuleSources, createModuleSourceRefresh, createModuleSourceHandlers, errorMessage, isConfiguredModuleFile } from '../src/moduleSources';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import * as path from 'node:path';
 
@@ -11,6 +12,7 @@ function options(modules: unknown = { constraints: 'constraints.adm2' }) {
     modules,
     workspaceRoot: '/workspace',
     toUri: (file: string) => pathToFileURL(file).href,
+    realPath: async (file: string) => file,
     readText: async () => 'sheet ordered(a: f64, b: f64) {}',
   };
 }
@@ -23,6 +25,89 @@ test('configured paths produce the exact caller-owned initialization wire record
     uri: definitionUri,
     text: 'sheet ordered(a: f64, b: f64) {}',
   }]);
+});
+
+test('physical workspace containment rejects file and directory escapes and recovers visibly', async () => {
+  const fixture = path.resolve(`.module-source-fixture-${randomUUID()}`);
+  const workspace = path.join(fixture, 'workspace');
+  const outside = path.join(fixture, 'outside');
+  await mkdir(workspace, { recursive: true });
+  try {
+    await mkdir(outside);
+    await writeFile(path.join(outside, 'private.adm2'), 'NONSECRET_EXTERNAL_SENTINEL');
+    await writeFile(path.join(workspace, 'inside.adm2'), 'sheet inside() {}');
+    await symlink(path.join(outside, 'private.adm2'), path.join(workspace, 'escape.adm2'), 'file');
+    await symlink(outside, path.join(workspace, 'escape-dir'), 'dir');
+    await symlink(path.join(workspace, 'inside.adm2'), path.join(workspace, 'internal.adm2'), 'file');
+    await mkdir(path.join(workspace, 'directory'));
+    await writeFile(path.join(workspace, 'directory', 'nested.adm2'), 'sheet nested() {}');
+    await symlink(path.join(workspace, 'directory'), path.join(workspace, 'internal-dir'), 'dir');
+    await symlink(workspace, path.join(fixture, 'linked-root'), 'dir');
+    const root = path.join(fixture, 'linked-root');
+    let file = 'escape.adm2';
+    const snapshots: unknown[] = [];
+    const errors: string[] = [];
+    const configuration = () => ({
+      modules: { lib: file },
+      workspaceRoot: root,
+      toUri: (value: string) => pathToFileURL(value).href,
+      realPath: realpath,
+      readText: async (value: string) => readFile(value, 'utf8'),
+    });
+
+    const load = () => loadModuleSources(configuration());
+    const refresh = createModuleSourceRefresh(load, async (value) => { snapshots.push(value); }, (value) => { errors.push(value); });
+    for (const escape of ['escape.adm2', 'escape-dir/private.adm2']) {
+      file = escape;
+      await assert.rejects(load(), /inside the workspace/);
+      await refresh();
+      assert.match(errors.at(-1)!, /inside the workspace/);
+      assert.ok('moduleSourcesError' in (snapshots.at(-1) as object));
+      assert.ok(!JSON.stringify(snapshots).includes('NONSECRET_EXTERNAL_SENTINEL'));
+    }
+    file = 'internal.adm2';
+    await refresh();
+    assert.deepEqual(snapshots.at(-1), { moduleSources: [{
+      path: 'lib', uri: pathToFileURL(path.join(root, file)).href, text: 'sheet inside() {}',
+    }] });
+    file = 'internal-dir/nested.adm2';
+    await refresh();
+    assert.deepEqual(snapshots.at(-1), { moduleSources: [{
+      path: 'lib', uri: pathToFileURL(path.join(root, file)).href, text: 'sheet nested() {}',
+    }] });
+    file = 'missing.adm2';
+    await assert.rejects(load(), /Cannot read module/);
+    await refresh();
+    assert.ok('moduleSourcesError' in (snapshots.at(-1) as object));
+    await writeFile(path.join(workspace, file), 'sheet recovered() {}');
+    await refresh();
+    assert.deepEqual(snapshots.at(-1), { moduleSources: [{
+      path: 'lib', uri: pathToFileURL(path.join(root, file)).href, text: 'sheet recovered() {}',
+    }] });
+    await rm(root);
+    await refresh();
+    assert.ok('moduleSourcesError' in (snapshots.at(-1) as object));
+    await symlink(workspace, root, 'dir');
+    await refresh();
+    assert.deepEqual(snapshots.at(-1), { moduleSources: [{
+      path: 'lib', uri: pathToFileURL(path.join(root, file)).href, text: 'sheet recovered() {}',
+    }] });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test('loader reads the approved canonical target while keeping the lexical overlay URI', async () => {
+  const records = await loadModuleSources({
+    ...options({ lib: 'linked.adm2' }),
+    realPath: async (file) => file === '/workspace' ? '/physical' : '/physical/approved.adm2',
+    readText: async (file) => {
+      assert.equal(file, '/physical/approved.adm2');
+      return 'sheet approved() {}';
+    },
+  });
+  assert.equal(records[0].uri, 'file:///workspace/linked.adm2');
+  assert.equal(records[0].text, 'sheet approved() {}');
 });
 
 test('configuration and read failures reject rather than manufacture empty successful sources', async () => {

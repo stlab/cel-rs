@@ -22,6 +22,8 @@ use crate::{
 /// including inactive branches. No initializer, default, method, filter, requirement,
 /// or match expression executes. Whole-graph planning and guard independence remain
 /// construction-time checks; this operation does not require isolated solvability.
+/// Checks default availability for every output's backing cell, even with a writer;
+/// initialized ordinary cells and sources do not require a default.
 ///
 /// Returns diagnostics for unknown selection, names, complete types, bodies, bindings,
 /// branch eligibility and source-specialized empty relationships. Labels own genuine
@@ -707,18 +709,20 @@ impl<'a> Checker<'a, '_> {
             .types
             .checked_value_type(&shape)
             .map_err(|error| failure(error, site.clone()))?;
-        if let Some((expression, _, _)) = &compiled {
-            if expression.shape != shape {
-                return Err(failure(
-                    format!(
-                        "{context}: initializer type mismatch: expected `{}`, got `{}`",
-                        self.types.display_name(&shape),
-                        self.types.display_name(&expression.shape)
-                    ),
-                    site.clone(),
-                ));
-            }
-        } else {
+        if let Some((expression, _, _)) = &compiled
+            && expression.shape != shape
+        {
+            return Err(failure(
+                format!(
+                    "{context}: initializer type mismatch: expected `{}`, got `{}`",
+                    self.types.display_name(&shape),
+                    self.types.display_name(&expression.shape)
+                ),
+                site.clone(),
+            ));
+        }
+        // Outputs allocate a default private cell before installing their writer.
+        if compiled.is_none() || kind == Kind::Out {
             self.types
                 .validate_default(&shape)
                 .map_err(|error| failure(error, site.clone()))?;

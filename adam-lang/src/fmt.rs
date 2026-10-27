@@ -280,7 +280,7 @@ fn point_span(span: proc_macro2::Span) -> ast::ExprSpan {
 /// end of line) wraps — ending the gap with a newline plus `indent(depth + 1)` so whatever the
 /// caller appends next starts on a fresh line rather than being swallowed into the comment.
 ///
-/// - Postcondition: an *operator* gap (`expected` non-empty) always emits every `expected` token,
+/// - Postcondition: an *operator* gap (`expected` non-empty) emits every required `expected` token,
 ///   even when `source` is empty or the positions don't resolve (a hand-built declaration with
 ///   synthetic spans still gets its `=`/`:=`), and ends with a separating space so the caller's
 ///   next token (the initializer) is not glued on. A *comment-only* gap (`expected` empty) returns
@@ -288,6 +288,8 @@ fn point_span(span: proc_macro2::Span) -> ast::ExprSpan {
 ///   terminator (`;`) or keyword directly.
 ///   Comment-free module paths and parameter/argument lists use compact punctuation and omit
 ///   optional trailing commas.
+///   The closing-list pattern `[",", ")"]` treats its comma as optional and preserves
+///   every comment on either side of the closing parenthesis.
 ///
 /// `depth` is the caller's own indent depth (the declaration's, not the gap's).
 fn emit_decl_gap(
@@ -297,18 +299,26 @@ fn emit_decl_gap(
     expected: &[&'static str],
     depth: usize,
 ) -> String {
-    use cel_parser::trivia::{GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
-    // `scan_gap` re-synthesizes every `expected` token even on an empty or non-resolving gap, so a
+    use cel_parser::trivia::{
+        GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap,
+        scan_gap_with_optional_prefix,
+    };
+    // Nonempty list closers accept a trailing comma, but do not require one.
+    let scan = |gap| match expected {
+        [",", ")"] => scan_gap_with_optional_prefix(gap, ",", &[")"]),
+        _ => scan_gap(gap, expected),
+    };
+    // The scanner re-synthesizes required tokens even on an empty or non-resolving gap, so a
     // hand-built declaration (empty `source`) still renders its operator.
     let pieces = if source.is_empty() {
-        scan_gap("", expected)
+        scan("")
     } else {
         let line_starts = line_start_byte_offsets(source);
         let start = line_column_to_byte(source, &line_starts, prev_end.end.end());
         let end = line_column_to_byte(source, &line_starts, next_start.start.start());
         match source.get(start..end) {
-            Some(gap) => scan_gap(gap, expected),
-            None => scan_gap("", expected),
+            Some(gap) => scan(gap),
+            None => scan(""),
         }
     };
     if pieces

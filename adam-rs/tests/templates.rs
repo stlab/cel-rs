@@ -8,6 +8,63 @@ use adam_rs::{
     TemplateBuilder, TemplateError,
 };
 
+/// Keeps complete masks distinct and reports the active failing inclusion path.
+#[test]
+fn source_preflight_distinguishes_masks_and_preserves_failure_ancestry() {
+    let mut leaf = TemplateBuilder::new();
+    let input = leaf.parameter::<i32>("input").unwrap();
+    let output = leaf.parameter::<i32>("output").unwrap();
+    let relationship = leaf
+        .relationship(vec![
+            MethodRecipe::new(&[input], &[output], |_, _| {
+                panic!("source checking must not run method factories")
+            })
+            .unwrap(),
+        ])
+        .unwrap();
+    let leaf = Rc::new(leaf.finish().unwrap());
+    let leaf_id = leaf.id();
+    let mut wrapper = TemplateBuilder::new();
+    let a = wrapper.parameter::<i32>("a").unwrap();
+    let b = wrapper.parameter::<i32>("b").unwrap();
+    let inner = wrapper
+        .include(leaf, &[("input", a), ("output", b)])
+        .unwrap();
+    let inner_site = inner.relationships()[0].clone();
+    let wrapper = Rc::new(wrapper.finish().unwrap());
+    let mut root = TemplateBuilder::new();
+    let x = root.parameter::<i32>("x").unwrap();
+    let y = root.parameter::<i32>("y").unwrap();
+    root.include(wrapper.clone(), &[("a", y.clone()), ("b", x.clone())])
+        .unwrap();
+    let failing = root.include(wrapper, &[("a", x), ("b", y)]).unwrap();
+    let failing_site = failing.relationships()[0].clone();
+    let root = root.finish().unwrap();
+    for _ in 0..2 {
+        let error = root
+            .check_source_bindings(&[("x", false), ("y", true)])
+            .unwrap_err();
+        let TemplateError::Construction {
+            template,
+            site,
+            inclusions,
+            source,
+        } = error
+        else {
+            panic!("expected located empty relationship");
+        };
+        assert_eq!(template, leaf_id);
+        let adam_rs::template::ConstructionSite::Relationship(site) = site else {
+            panic!("expected failed leaf relationship");
+        };
+        assert_eq!(site, relationship);
+        assert_eq!(inclusions, [failing_site.clone(), inner_site.clone()]);
+        assert!(matches!(*source, TemplateError::EmptyRelationship));
+    }
+    root.check_source_bindings(&[("x", false), ("y", false)])
+        .unwrap();
+}
+
 /// Creates an ordinary identity writer for two local declarations.
 fn copy_recipe(input: &adam_rs::CellSlot, output: &adam_rs::CellSlot) -> MethodRecipe {
     MethodRecipe::new(

@@ -51,6 +51,10 @@ source files, paths outside the workspace, invalid UTF-8 and read failures show
 visible errors; none become successful empty sources. File create/change/delete
 events refresh mapped files, and configuration/workspace-folder changes refresh
 the complete mapping. Open text takes precedence over disk snapshots until close.
+The loader resolves filesystem links in the workspace root and each mapped file.
+Internal links and symlinked workspace roots work; file or directory links outside
+the canonical root report a read error. Reads use the approved canonical target,
+while source URIs retain the configured path so editor overlays keep their identity.
 Module checking never runs initializers, methods, defaults or conditional keys.
 The Problems panel includes definition/use-site related locations across files.
 Formatting supports imports, aliases, parameter types and named bindings, and

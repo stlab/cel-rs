@@ -18,6 +18,63 @@ The branch merge base is `844ef48e32126a1db3198524a72ca2b04a60e800`;
 Task 10 began at `1409d0d3b10e02f515fe04a671626ecd5f6a6fea`.
 The final fix wave began at `f67a79a0579ab6947e2f02c9b204fdff5d6a5a14`.
 
+## PR-review-fix addendum — 2026-10-27
+
+The local-only status above records the prior milestone. PR #265 now exists,
+and its published review snapshot is
+`736b1a0a4ceb1d7fd00370b82d8c1ed0050bad00`. A consolidated local fix wave
+addresses all four challenge-validated findings from Talos review 5675830937:
+
+- The extension canonicalizes both the workspace root and each mapped target,
+  rejects file/directory link escapes, and reads the approved canonical path.
+  Lexical URIs still identify editor overlays. Tests cover internal links,
+  symlinked workspace roots, explicit failure snapshots, and recovery.
+- The formatter scans optional trailing commas separately from required list
+  closers. Declaration and invocation tests assert block/line comments survive
+  on both sides of `)`, including the LSP whole-document replacement.
+- Nonexecuting module checking validates output backing-cell defaults even
+  when a writer exists. Counted host-type tests verify recursive shape rules,
+  unused definitions, compiler agreement, and no default/writer execution.
+- Native source preflight iteratively memoizes successful recipe/complete-mask
+  specializations. It preserves actual failing ancestry, distinct masks,
+  inactive-branch checks, and occurrence-specific live expansion. A deterministic
+  counter catches repeated work; a public check/compile test handles a compact
+  doubled empty DAG with 60 inclusion levels on a 64-bit host. Distinct complete
+  masks can still grow exponentially; the API documents that cost.
+
+Each reproduction failed through a real behavioral assertion before its fix
+and passed after recompilation. The sole final-product full gate ran from
+`2026-10-27T23:36:49Z` through `23:38:37Z`; all 15 selectors exited **0**:
+workspace formatting/build/test/doctest, all five all-target Clippy variants,
+strict library docs, extension compile/tests, feature-enabled Euclid, and final
+formatting/whitespace checks. Additional no-default-feature Begin/ez-adam tests
+and Begin's npm tests all exited **0** by `23:38:48Z`.
+
+- Workspace: **2,974 passed, 0 failed, 4 existing ignored**, across 106 result
+  groups: 2,590 non-documentation tests and 384 doctests. The explicit doctest
+  command repeats those 384 passing and four ignored cases.
+- Extension: **21 passed**. Feature-enabled Euclid: **81 passed**, including
+  doctests; that selector overlaps workspace coverage.
+- Additional selectors: Begin without default features **20 passed**; ez-adam
+  without default features **103 passed**; Begin npm **65 passed** in two files.
+  Feature variants and focused regressions overlap the workspace total.
+- No project compiler warnings appeared. The existing third-party
+  `block v0.1.6` future-incompatibility notice remains separately disclosed.
+
+Raw logs and `talos-265-fix-gate-status.tsv` live under
+`.superpowers/sdd/2026-10-25-parameterized-sheets/`. The controller's session
+artifact `files/pr-265-fix-report.md` records roots/fixes, exact RED/GREEN
+commands and outputs, changed files, validation counts, and commit identity.
+This wave changes no production renderer and makes no live VS Code claim.
+Distribution checks still require CI's mdbook/wasm-pack tooling.
+
+The implementation self-review is scoped to these four fixes, not an independent
+re-review. Publication of this wave, re-review, and review-thread resolution
+remain pending for the controller. No push or GitHub write occurred in this
+fix wave. Pre-existing Scout memory and instruction-file changes remain
+untouched and unstaged. The approved semantics and all deferred boundaries below
+remain unchanged.
+
 ## Broad review and consolidated fixes
 
 The broad review covered all 88 branch paths and confirmed a post-construction

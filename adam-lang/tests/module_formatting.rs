@@ -2,6 +2,38 @@
 
 use adam_lang::{AdamAstParser, attach_module_trivia, format_module, format_source};
 
+/// Preserves comments on both sides of list closers with or without a trailing comma.
+#[test]
+fn closing_lists_preserve_comments_without_mandatory_trailing_comma() {
+    for comma in ["", ","] {
+        for (before, after) in [
+            ("/* KEEP_BEFORE */", "/* KEEP_AFTER */"),
+            ("// KEEP_BEFORE\n", "// KEEP_AFTER\n"),
+            ("/* KEEP_BEFORE */", "// KEEP_AFTER\n"),
+            ("// KEEP_BEFORE\n", "/* KEEP_AFTER */"),
+        ] {
+            for source in [
+                format!("sheet helper(a: i32 {comma} {before}) {after} {{}}"),
+                format!("sheet app {{ relationship helper(a: x {comma} {before}) {after}; }}"),
+            ] {
+                let formatted = format_source(&source).unwrap();
+                for marker in ["KEEP_BEFORE", "KEEP_AFTER"] {
+                    assert_eq!(
+                        formatted.matches(marker).count(),
+                        1,
+                        "{source}\n{formatted}"
+                    );
+                }
+                assert!(formatted.find("KEEP_BEFORE") < formatted.find(')'));
+                assert!(formatted.find(')') < formatted.find("KEEP_AFTER"));
+                let parsed = AdamAstParser::new().parse_module_str(&formatted).unwrap();
+                assert!(parsed.errors.is_empty(), "{formatted}: {:?}", parsed.errors);
+                assert_eq!(format_source(&formatted).unwrap(), formatted);
+            }
+        }
+    }
+}
+
 /// Preserves all documentation-to-keyword comments and documentation order on imports and components.
 #[test]
 fn documentation_regions_preserve_interspersed_comments() {

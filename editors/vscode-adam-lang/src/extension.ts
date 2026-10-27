@@ -56,6 +56,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     modules: vscode.workspace.getConfiguration('adam-lang').get<unknown>('modules', {}),
     workspaceRoot: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
     toUri: (file: string) => vscode.Uri.file(file).toString(),
+    realPath: (file: string) => fs.promises.realpath(file),
     readText: async (file: string) => new TextDecoder('utf-8', { fatal: true }).decode(await vscode.workspace.fs.readFile(vscode.Uri.file(file))),
   });
   /** Loads one current snapshot through the contract-tested explicit mapping adapter. */

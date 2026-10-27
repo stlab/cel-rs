@@ -13,12 +13,15 @@ export interface ModuleSource {
 
 /**
  * Supplies explicit workspace-relative module mappings and fallible tooling IO.
- * Example: { modules: { lib: "lib.adm2" }, workspaceRoot, toUri, readText }.
+ * Example: { modules: { lib: "lib.adm2" }, workspaceRoot, toUri, realPath, readText }.
  */
 export interface ModuleSourceOptions {
   readonly modules: unknown;
   readonly workspaceRoot: string | undefined;
   readonly toUri: (absolutePath: string) => string;
+  /** Resolves filesystem links to the canonical absolute path, rejecting IO failures. */
+  readonly realPath: (absolutePath: string) => Promise<string>;
+  /** Reads the approved canonical path, not the original lexical mapping. */
   readonly readText: (absolutePath: string) => Promise<string>;
 }
 
@@ -40,20 +43,38 @@ export type ModuleSourceSnapshot =
 
 /**
  * Loads only explicitly configured modules into independently owned wire records.
- * Rejects invalid mappings, ambiguous URIs, paths outside the workspace and read failures.
- * Time/space: O(n + t) plus IO for n configured modules and t source bytes.
- * Example: await loadModuleSources({ modules: { lib: "lib.adm2" }, workspaceRoot, toUri, readText }).
+ * Rejects invalid mappings, ambiguous URIs, lexical/physical escapes and IO failures.
+ * Retains lexical URIs for editor overlays; reads only approved canonical targets.
+ * Time/space: O(p + t) plus IO for p configured/canonical path bytes and t source bytes.
+ * Example: await loadModuleSources({ modules: { lib: "lib.adm2" }, workspaceRoot, toUri, realPath, readText }).
  */
 export async function loadModuleSources(options: ModuleSourceOptions): Promise<readonly ModuleSource[]> {
   const records: ModuleSource[] = [];
-  for (const { modulePath, file, absolute, uri } of resolveModuleFiles(options)) {
+  const files = resolveModuleFiles(options);
+  if (files.length === 0) { return records; }
+  // Resolve the root too: the workspace folder itself may be a valid symlink.
+  const root = await options.realPath(options.workspaceRoot!);
+  for (const { modulePath, file, absolute, uri } of files) {
     try {
-      records.push({ path: modulePath, uri, text: await options.readText(absolute) });
+      const target = await options.realPath(absolute);
+      if (!isContained(root, target)) {
+        throw new Error('module target must stay inside the workspace');
+      }
+      records.push({ path: modulePath, uri, text: await options.readText(target) });
     } catch (error: unknown) {
       throw new Error(`Cannot read module "${modulePath}" (${file}): ${errorMessage(error)}`);
     }
   }
   return records;
+}
+
+/**
+ * Reports whether an absolute target remains within an absolute root.
+ * Time/space: O(p) path bytes.
+ */
+function isContained(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 /**
@@ -122,8 +143,7 @@ function resolveModuleFiles(options: ModuleSourceOptions): readonly ModuleFile[]
       throw new Error(`Module "${modulePath}" requires a workspace-relative file path`);
     }
     const absolute = path.resolve(workspaceRoot, file);
-    const relative = path.relative(workspaceRoot, absolute);
-    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    if (!isContained(workspaceRoot, absolute)) {
       throw new Error(`Module "${modulePath}" must stay inside the workspace`);
     }
     const uri = toUri(absolute);
