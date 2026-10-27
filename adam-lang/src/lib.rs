@@ -196,6 +196,7 @@ mod cell_value;
 pub mod composition;
 mod error_labels;
 mod fmt;
+pub mod module;
 mod parser;
 pub mod source_map;
 mod token_cursor;
@@ -213,6 +214,7 @@ pub use composition::{
     TypedTemplate,
 };
 pub use fmt::{FormatSourceError, format_module, format_sheet, format_source};
+pub use module::{ModulePath, ModuleSet};
 pub use parser::{AdamParser, ParsedSheet};
 pub use source_map::{ModuleDiagnostic, SourceId, SourceLabel, SourceLocation, SourceMap};
 pub use trivia::{attach_module_trivia, attach_trivia};

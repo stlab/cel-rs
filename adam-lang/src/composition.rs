@@ -887,6 +887,18 @@ pub struct TypedTemplate {
 }
 
 impl TypedTemplate {
+    /// Borrows the authored definition label, including span-free native labels.
+    ///
+    /// # Examples
+    /// ```
+    /// let template = adam_lang::CompositionBuilder::new(adam_lang::TypeRegistry::new()).finish()?;
+    /// assert!(template.definition_label().location.is_none());
+    /// # Ok::<(), adam_lang::ModuleDiagnostic>(())
+    /// ```
+    pub fn definition_label(&self) -> &SourceLabel {
+        &self.metadata.label
+    }
+
     /// Instantiates into an existing source-free or parsed destination.
     ///
     /// Named bindings must be complete, distinct, registered in the destination and
