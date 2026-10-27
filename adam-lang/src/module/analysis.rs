@@ -1063,6 +1063,249 @@ impl Checked<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell_value::Frame;
+
+    /// Emits candidate-first filters with distinct, first-use-ordered, repeated dependencies.
+    #[test]
+    fn checked_emission_preserves_filter_candidate_and_dependency_order() {
+        let mut modules = ModuleSet::new();
+        modules
+            .insert_source(
+                "filters".parse().unwrap(),
+                "filters.adm2",
+                "
+            sheet filters {
+                cell left: i32;
+                cell right: i32;
+                cell first: i32 filter right * 100 + _ * 10 + left + right;
+                cell second: i32 filter left * 100 + right * 10 + _ + left;
+            }
+        ",
+            )
+            .unwrap();
+        let types = TypeRegistry::new();
+        let lookup = OpLookup::new();
+        let checked =
+            analyze(&modules, &types, &lookup).unwrap_or_else(|errors| panic!("{errors:?}"));
+        let definition = &checked.definitions[0];
+        let scalar = TypeShape::Named(TypeId::of::<i32>());
+        let inputs = vec![scalar.clone(); 3];
+        let mut filters = 0;
+        for item in &definition.items {
+            let Body::Filter {
+                cell,
+                expression,
+                range,
+            } = &item.body
+            else {
+                continue;
+            };
+            assert!(!range);
+            assert_eq!(expression.candidate, Some(*cell));
+            let (names, cases) = match definition.cells[*cell].name {
+                "first" => (["right", "left"], [(3, 5, 7, 542), (11, 13, 17, 1440)]),
+                "second" => (["left", "right"], [(3, 7, 5, 760), (11, 17, 13, 1858)]),
+                name => panic!("unexpected filter {name}"),
+            };
+            assert_eq!(
+                expression
+                    .inputs
+                    .iter()
+                    .map(|input| definition.cells[*input].name)
+                    .collect::<Vec<_>>(),
+                names
+            );
+            let mut frame = Frame::new(
+                expression.emit(&definition.cells, &types, &lookup).unwrap(),
+                &inputs,
+                std::slice::from_ref(&scalar),
+                false,
+                &types,
+            )
+            .unwrap();
+            for (candidate, first, second, expected) in cases {
+                let result = frame
+                    .call(&[&candidate, &first, &second])
+                    .unwrap()
+                    .pop()
+                    .unwrap();
+                assert_eq!(*result.downcast::<i32>().unwrap(), expected);
+            }
+            assert!(
+                Frame::new(
+                    expression.emit(&definition.cells, &types, &lookup).unwrap(),
+                    &inputs,
+                    &[TypeShape::Named(TypeId::of::<f64>())],
+                    false,
+                    &types
+                )
+                .is_err()
+            );
+            filters += 1;
+        }
+        assert_eq!(filters, 2);
+    }
+
+    /// Re-emits an exact range descriptor with candidate and repeated reordered input reads.
+    #[test]
+    fn checked_emission_retains_exact_range_result() {
+        let mut modules = ModuleSet::new();
+        modules
+            .insert_source(
+                "ranges".parse().unwrap(),
+                "ranges.adm2",
+                "
+            sheet ranges {
+                cell left: i32;
+                cell right: i32;
+                cell bounded: i32 filter (right - _ + left - left)..=(left + right - left);
+            }
+        ",
+            )
+            .unwrap();
+        let types = TypeRegistry::new();
+        let lookup = OpLookup::new();
+        let checked =
+            analyze(&modules, &types, &lookup).unwrap_or_else(|errors| panic!("{errors:?}"));
+        let definition = &checked.definitions[0];
+        let (cell, expression, range) = definition
+            .items
+            .iter()
+            .find_map(|item| match &item.body {
+                Body::Filter {
+                    cell,
+                    expression,
+                    range,
+                } => Some((*cell, expression, *range)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(range);
+        assert_eq!(expression.candidate, Some(cell));
+        assert_eq!(
+            expression
+                .inputs
+                .iter()
+                .map(|input| definition.cells[*input].name)
+                .collect::<Vec<_>>(),
+            ["right", "left"]
+        );
+        let expected = cel_runtime::ValueType::cloneable_leaf::<std::ops::RangeInclusive<i32>>();
+        let wrong = cel_runtime::ValueType::cloneable_leaf::<std::ops::RangeInclusive<f64>>();
+        assert!(expression.descriptor.same_shape(&expected));
+        assert!(!expression.descriptor.same_shape(&wrong));
+        let inputs = vec![TypeShape::Named(TypeId::of::<i32>()); 3];
+        let emitted = expression.emit(&definition.cells, &types, &lookup).unwrap();
+        assert!(
+            emitted.peek_stack_infos(1)[0]
+                .value_type
+                .same_shape(&expected)
+        );
+        let mut frame = RawFrame::new(emitted, &inputs, &expected, &types).unwrap();
+        for (candidate, right, left, expected) in
+            [(3i32, 20i32, 5i32, 17..=20), (7, 40, 11, 33..=40)]
+        {
+            let result = frame
+                .call(&[&candidate, &right, &left])
+                .unwrap()
+                .try_into_typed::<cel_runtime::Leaf<std::ops::RangeInclusive<i32>>>()
+                .unwrap();
+            assert_eq!(result, expected);
+        }
+        assert!(
+            RawFrame::new(
+                expression.emit(&definition.cells, &types, &lookup).unwrap(),
+                &inputs,
+                &wrong,
+                &types
+            )
+            .is_err()
+        );
+    }
+
+    /// Executes one-field destructuring separately from assigning a whole one-element tuple.
+    #[test]
+    fn checked_emission_preserves_one_element_output_patterns() {
+        let mut modules = ModuleSet::new();
+        modules
+            .insert_source(
+                "patterns".parse().unwrap(),
+                "patterns.adm2",
+                "
+            sheet patterns(a: i32, b: i32, whole: (i32,)) {
+                relationship { (a,) := (b,); }
+                relationship { whole := (b,); }
+            }
+        ",
+            )
+            .unwrap();
+        let types = TypeRegistry::new();
+        let lookup = OpLookup::new();
+        let checked =
+            analyze(&modules, &types, &lookup).unwrap_or_else(|errors| panic!("{errors:?}"));
+        let definition = &checked.definitions[0];
+        let scalar = TypeShape::Named(TypeId::of::<i32>());
+        let mut methods = 0;
+        for item in &definition.items {
+            let Body::Method {
+                outputs,
+                destructure,
+                expression,
+            } = &item.body
+            else {
+                continue;
+            };
+            assert_eq!(outputs.len(), 1);
+            let output = &definition.cells[outputs[0]];
+            assert_eq!(*destructure, output.name == "a");
+            let mut frame = Frame::new(
+                expression.emit(&definition.cells, &types, &lookup).unwrap(),
+                std::slice::from_ref(&scalar),
+                std::slice::from_ref(&output.shape),
+                *destructure,
+                &types,
+            )
+            .unwrap();
+            for input in [19i32, 31] {
+                let result = frame.call(&[&input]).unwrap().pop().unwrap();
+                let actual = if *destructure {
+                    *result.downcast::<i32>().unwrap()
+                } else {
+                    let compound = *result.downcast::<CellValue>().unwrap();
+                    let mut fields = compound.0.into_fields().unwrap();
+                    assert_eq!(fields.len(), 1);
+                    fields
+                        .pop()
+                        .unwrap()
+                        .try_into_typed::<cel_runtime::Leaf<i32>>()
+                        .unwrap()
+                };
+                assert_eq!(actual, input);
+            }
+            assert!(
+                Frame::new(
+                    expression.emit(&definition.cells, &types, &lookup).unwrap(),
+                    std::slice::from_ref(&scalar),
+                    std::slice::from_ref(&output.shape),
+                    !*destructure,
+                    &types
+                )
+                .is_err()
+            );
+            assert!(
+                Frame::new(
+                    expression.emit(&definition.cells, &types, &lookup).unwrap(),
+                    std::slice::from_ref(&scalar),
+                    &[TypeShape::Named(TypeId::of::<f64>())],
+                    *destructure,
+                    &types
+                )
+                .is_err()
+            );
+            methods += 1;
+        }
+        assert_eq!(methods, 2);
+    }
 
     /// Retains borrowed environments, local ordinals, syntax, direction order and real labels.
     #[test]

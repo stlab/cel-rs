@@ -355,3 +355,22 @@ fn module_analysis_does_not_run_an_isolated_planner() {
         .is_empty()
     );
 }
+
+/// Distinguishes one-field destructuring from whole-tuple assignment with shape controls.
+#[test]
+fn module_analysis_checks_one_element_output_patterns() {
+    for source in [
+        "sheet good(a: i32,b: i32) { relationship { (a,) := (b,); } }",
+        "sheet good(a: (i32,),b: i32) { relationship { a := (b,); } }",
+    ] {
+        assert!(check(source).is_empty(), "{source}");
+    }
+    for source in [
+        "sheet bad(a: i32,b: i32) { relationship { a := (b,); } }",
+        "sheet bad(a: (i32,),b: i32) { relationship { (a,) := (b,); } }",
+        "sheet bad(a: i32,b: i32) { relationship { (a,) := b; } }",
+        "sheet bad(a: (i32,),b: i32) { relationship { a := b; } }",
+    ] {
+        assert!(!check(source).is_empty(), "{source}");
+    }
+}
