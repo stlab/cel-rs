@@ -887,6 +887,38 @@ pub struct TypedTemplate {
 }
 
 impl TypedTemplate {
+    /// Borrows complete formal signatures in declaration order without running factories.
+    ///
+    /// - Complexity: O(c) traversal for c local declarations, with expected O(1) lookup per formal.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut builder = adam_lang::CompositionBuilder::new(adam_lang::TypeRegistry::new());
+    /// builder.parameter("x", adam_lang::type_registry::TypeShape::Named(std::any::TypeId::of::<i32>()))?;
+    /// let template = builder.finish()?;
+    /// assert_eq!(template.parameters().next().unwrap().0, "x");
+    /// # Ok::<(), adam_lang::ModuleDiagnostic>(())
+    /// ```
+    pub fn parameters(&self) -> impl Iterator<Item = (&str, &TypeShape)> {
+        self.native
+            .parameter_names()
+            .map(|name| (name, self.metadata.formals[name].shape()))
+    }
+
+    /// Checks complete formal source statuses through native whole-method preflight.
+    ///
+    /// # Errors
+    /// Reports invalid binding names, capacity failure, or an emptied relationship.
+    /// - Complexity: Native source preflight plus O(n) diagnostic bytes on failure.
+    pub(crate) fn check_source_bindings(
+        &self,
+        bindings: &[(&str, bool)],
+    ) -> Result<(), ModuleDiagnostic> {
+        self.native
+            .check_source_bindings(bindings)
+            .map_err(|error| self.error(error))
+    }
+
     /// Borrows the authored definition label, including span-free native labels.
     ///
     /// # Examples

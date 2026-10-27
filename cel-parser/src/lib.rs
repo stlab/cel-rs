@@ -560,6 +560,28 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
     push_literal_token(&mut DynSegmentContext::new_context(), lit.clone())
 }
 
+/// Converts one syntax literal into retained expression syntax without executing code.
+///
+/// Preserves the token's source span and concrete numeric width using the same validation
+/// as expression parsing.
+///
+/// # Errors
+/// Rejects unsupported literal kinds, invalid suffixes, and out-of-range values.
+/// - Complexity: O(n) literal bytes.
+///
+/// # Examples
+/// ```
+/// let token: syn::Lit = syn::parse_str("42i32")?;
+/// assert!(matches!(cel_parser::literal_expr(&token)?,
+///     cel_parser::Expr::Literal { value: cel_parser::Literal::I32(42), .. }));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn literal_expr(lit: &CelLiteral) -> Result<Expr> {
+    let mut context = AstContext::new_context();
+    push_literal_token(&mut context, lit.clone())?;
+    Ok(context.into_expr())
+}
+
 /// Resolves a closure annotation through the configured registry without erasing its shape.
 ///
 /// # Errors

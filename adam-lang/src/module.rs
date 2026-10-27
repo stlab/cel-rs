@@ -1,4 +1,4 @@
-//! Collects supplied modules and checks definition lookup without filesystem access.
+//! Collects supplied modules and checks names and retained bodies without filesystem access.
 //!
 //! ```
 //! use adam_lang::{ModulePath, ModuleSet};
@@ -9,7 +9,10 @@
 //! # Ok::<(), adam_lang::ModuleDiagnostic>(())
 //! ```
 
+mod analysis;
 mod resolve;
+
+pub use analysis::check_module;
 
 use std::{collections::HashMap, fmt, str::FromStr};
 
@@ -79,6 +82,7 @@ fn valid_identifier(name: &str) -> bool {
 /// A module has at most one source file and may also contain native definitions.
 /// Insertion parses syntax only. [`Self::check_resolution`] checks names and cycles,
 /// not types, actual cells, executable bodies or graph solvability.
+/// [`check_module`] adds borrowed, nonexecuting signature and body analysis.
 /// See the [module example](self).
 #[derive(Default)]
 pub struct ModuleSet {

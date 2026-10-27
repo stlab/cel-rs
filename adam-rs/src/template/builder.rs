@@ -252,31 +252,14 @@ impl TemplateBuilder {
                 slot: Some(slot.clone()),
             });
         }
-        let cell_sets: Vec<HashSet<usize>> = methods
+        let edges: Vec<_> = methods
             .iter()
-            .map(|m| m.inputs.iter().chain(&m.outputs).map(|s| s.index).collect())
+            .map(|method| (method.inputs.as_slice(), method.outputs.as_slice()))
             .collect();
-        if cell_sets.iter().any(|set| set != &cell_sets[0]) {
-            return Err(TemplateError::InvalidDefinition {
-                detail: "relationship methods reference different cell sets",
-                slot: Some(methods[0].outputs[0].clone()),
-            });
-        }
-        let outputs: Vec<HashSet<usize>> = methods
-            .iter()
-            .map(|m| m.outputs.iter().map(|s| s.index).collect())
-            .collect();
-        if outputs.iter().enumerate().any(|(i, set)| {
-            outputs[..i]
-                .iter()
-                .any(|other| set.is_subset(other) || other.is_subset(set))
-        }) {
-            return Err(TemplateError::InvalidDefinition {
-                detail: "relationship output sets are equal or nested",
-                slot: Some(methods[0].outputs[0].clone()),
-            });
-        }
-        Ok(())
+        super::check_relationship_edges(&edges).map_err(|detail| TemplateError::InvalidDefinition {
+            detail,
+            slot: Some(methods[0].outputs[0].clone()),
+        })
     }
 
     /// Rejects a local reference not owned by this recipe.

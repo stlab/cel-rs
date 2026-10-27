@@ -235,6 +235,24 @@ impl Drop for SheetTemplate {
 }
 
 impl SheetTemplate {
+    /// Borrows formal names in declaration order, excluding private cells.
+    ///
+    /// - Complexity: O(c) traversal for c local declarations.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut builder = adam_rs::TemplateBuilder::new();
+    /// builder.parameter::<i32>("value")?;
+    /// assert_eq!(builder.finish()?.parameter_names().collect::<Vec<_>>(), ["value"]);
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn parameter_names(&self) -> impl Iterator<Item = &str> {
+        self.cells
+            .iter()
+            .filter(|cell| cell.make.is_none())
+            .map(|cell| cell.name.as_str())
+    }
+
     /// Returns this recipe's immutable identity without retaining its factories or children.
     ///
     /// # Examples
@@ -247,7 +265,53 @@ impl SheetTemplate {
     pub fn id(&self) -> TemplateId {
         TemplateId(self.owner.clone())
     }
+}
 
+/// Checks ordinary relationship edge structure without constructing methods or a live sheet.
+///
+/// Every method must have distinct, nonempty outputs and reference the same union of
+/// input/output cells. Output sets of different methods cannot be equal or nested.
+/// Inputs may overlap outputs. This check neither specializes sources nor plans a graph.
+///
+/// # Errors
+/// Returns the violated structural rule.
+/// - Complexity: O(m²e) time and O(me) space for m methods of at most e edges.
+///
+/// # Examples
+/// ```
+/// use adam_rs::template::check_relationship_edges;
+/// assert!(check_relationship_edges(&[(&[0usize][..], &[1usize][..]),
+///     (&[1usize][..], &[0usize][..])]).is_ok());
+/// ```
+pub fn check_relationship_edges<C: Eq + std::hash::Hash>(
+    methods: &[(&[C], &[C])],
+) -> Result<(), &'static str> {
+    if methods.is_empty() {
+        return Err("empty relationship");
+    }
+    let mut cells = Vec::with_capacity(methods.len());
+    let mut outputs = Vec::with_capacity(methods.len());
+    for (input, output) in methods {
+        let output_set: HashSet<_> = output.iter().collect();
+        if output.is_empty() || output_set.len() != output.len() {
+            return Err("a method requires distinct nonempty outputs");
+        }
+        let cell_set: HashSet<_> = input.iter().chain(output.iter()).collect();
+        if cells.first().is_some_and(|first| first != &cell_set) {
+            return Err("relationship methods reference different cell sets");
+        }
+        if outputs.iter().any(|previous: &HashSet<&C>| {
+            previous.is_subset(&output_set) || output_set.is_subset(previous)
+        }) {
+            return Err("relationship output sets are equal or nested");
+        }
+        cells.push(cell_set);
+        outputs.push(output_set);
+    }
+    Ok(())
+}
+
+impl SheetTemplate {
     /// Returns whether expansion contains only relationships and parameter declarations.
     ///
     /// Private cells, policies, outputs and conditionals disqualify a recipe transitively.

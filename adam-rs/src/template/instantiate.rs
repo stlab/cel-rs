@@ -1,7 +1,7 @@
 //! Checked binding and expansion through existing native graph mutators.
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -221,6 +221,70 @@ impl SheetTemplate {
                     .get(&i)
                     .is_some_and(|id| destination.cell_kind(*id) == Some(CellKind::Source));
         }
+        self.preflight_source_mask(sources)
+    }
+
+    /// Checks complete named formal source statuses without constructing a live sheet.
+    ///
+    /// Uses the same whole-method pruning preflight as [`Self::instantiate`].
+    /// No initializer, method, policy, or conditional factory executes.
+    ///
+    /// # Errors
+    /// Rejects missing, unknown or repeated names, capacity overflow, or a constituent
+    /// relationship left without a method, including inactive branches.
+    /// - Complexity: O(bc + e) time and O(c + h) space for b bindings, c expanded
+    ///   cells, e expanded edges, and inclusion depth h.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut builder = adam_rs::TemplateBuilder::new();
+    /// builder.parameter::<i32>("x")?;
+    /// builder.finish()?.check_source_bindings(&[("x", true)])?;
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn check_source_bindings(&self, bindings: &[(&str, bool)]) -> Result<(), TemplateError> {
+        self.expanded_size.ok_or(TemplateError::Capacity)?;
+        let mut sources = storage(self.cells.len(), false)?;
+        let mut seen = HashSet::new();
+        for &(name, source) in bindings {
+            let Some(index) = self
+                .cells
+                .iter()
+                .position(|cell| cell.make.is_none() && cell.name == name)
+            else {
+                return Err(TemplateError::InvalidDefinition {
+                    detail: "unknown source-binding parameter",
+                    slot: None,
+                });
+            };
+            if !seen.insert(index) {
+                return Err(TemplateError::InvalidDefinition {
+                    detail: "repeated source-binding parameter",
+                    slot: None,
+                });
+            }
+            sources[index] = source;
+        }
+        if seen.len() != self.parameter_names().count() {
+            return Err(TemplateError::InvalidDefinition {
+                detail: "missing source-binding parameter",
+                slot: None,
+            });
+        }
+        for (index, cell) in self.cells.iter().enumerate() {
+            sources[index] |= cell.kind == CellKind::Source;
+        }
+        self.preflight_source_mask(sources)
+    }
+
+    /// Traverses whole-method source specialization from a checked local mask.
+    ///
+    /// - Precondition: The mask covers this recipe's local cells.
+    /// # Errors
+    /// Returns capacity failure or an emptied constituent relationship.
+    /// - Complexity: O(c + e + r) time and O(c + h) space in expanded structure.
+    fn preflight_source_mask(&self, sources: Vec<bool>) -> Result<(), TemplateError> {
+        debug_assert_eq!(sources.len(), self.cells.len());
         let mut stack = Vec::new();
         stack
             .try_reserve(self.depth.ok_or(TemplateError::Capacity)?)

@@ -214,7 +214,7 @@ pub use composition::{
     TypedTemplate,
 };
 pub use fmt::{FormatSourceError, format_module, format_sheet, format_source};
-pub use module::{ModulePath, ModuleSet};
+pub use module::{ModulePath, ModuleSet, check_module};
 pub use parser::{AdamParser, ParsedSheet};
 pub use source_map::{ModuleDiagnostic, SourceId, SourceLabel, SourceLocation, SourceMap};
 pub use trivia::{attach_module_trivia, attach_trivia};
