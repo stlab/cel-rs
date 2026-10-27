@@ -175,6 +175,124 @@ fn stop_modules(client: &Connection, thread: std::thread::JoinHandle<anyhow::Res
     thread.join().unwrap().unwrap();
 }
 
+/// Preserves parsed Unicode token locations through owning diagnostics and UTF-16 transport.
+#[test]
+fn transport_unicode_binding_locations_match_original_tokens() {
+    let definition = "// retained first line\n/* 😀 é */ sheet copy(entrée: f64, b: f64) {}";
+    let caller = "// independent first line\n/* 🦀 é */ use library::copy; sheet app { cell café: i32; cell y: f64; relationship copy(entrée: café, b: y); }";
+    let mut modules = ModuleSet::new();
+    modules
+        .insert_source(
+            "library".parse().unwrap(),
+            "file:///unicode-library.adm2",
+            definition,
+        )
+        .unwrap();
+    modules
+        .insert_source("app".parse().unwrap(), "file:///unicode-app.adm2", caller)
+        .unwrap();
+    let errors = diagnostics_for_module(&"app".parse().unwrap(), &modules);
+    drop(modules);
+    let error = errors
+        .iter()
+        .find(|error| error.message == "component argument type mismatch")
+        .unwrap();
+    for (uri, text, token) in [
+        ("file:///unicode-library.adm2", definition, "entrée"),
+        ("file:///unicode-app.adm2", caller, "café"),
+    ] {
+        let location = error
+            .labels
+            .iter()
+            .filter_map(|label| label.location.as_ref())
+            .find(|location| location.source.file_name() == uri)
+            .unwrap();
+        assert_eq!(location.source.text(), text);
+        assert_eq!(&text[location.span.to_byte_range(text)], token);
+        let offset = text.rfind(token).unwrap();
+        let line = text[..offset].rsplit('\n').next().unwrap();
+        assert_eq!(location.span.start.line, 2);
+        assert_eq!(location.span.start.column, line.chars().count());
+        assert_eq!(
+            location.span.end.column,
+            line.chars().count() + token.chars().count()
+        );
+    }
+
+    let (client, thread) = start_modules(json!([
+        {"path":"library","uri":"file:///unicode-library.adm2","text":definition},
+        {"path":"app","uri":"file:///unicode-app.adm2","text":caller}
+    ]));
+    notify(
+        &client,
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":"file:///unicode-app.adm2","languageId":"adam-lang","version":1,"text":caller}}),
+    );
+    let output = publications(&client);
+    stop_modules(&client, thread);
+    for (uri, text, token) in [
+        ("file:///unicode-library.adm2", definition, "entrée"),
+        ("file:///unicode-app.adm2", caller, "café"),
+    ] {
+        let diagnostic = output[uri]
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.message == error.message)
+            .unwrap();
+        let offset = text.rfind(token).unwrap();
+        let column = text[..offset]
+            .rsplit('\n')
+            .next()
+            .unwrap()
+            .encode_utf16()
+            .count() as u32;
+        let expected = lsp_types::Range::new(
+            lsp_types::Position::new(1, column),
+            lsp_types::Position::new(1, column + token.encode_utf16().count() as u32),
+        );
+        assert_eq!(diagnostic.range, expected, "{uri}");
+        let related = diagnostic.related_information.as_ref().unwrap();
+        assert_eq!(related.len(), 2);
+        assert!(
+            related
+                .iter()
+                .any(|related| related.location.uri.as_str() == uri
+                    && related.location.range == expected),
+            "{related:?}"
+        );
+    }
+}
+
+/// Publishes exact UTF-16 error ranges for documents outside the explicit module snapshot.
+#[test]
+fn transport_unregistered_unicode_source_uses_utf16() {
+    let source = "// first line\n/* 😀 é */ sheet app { cell café: i32 = 1.0; }";
+    let (client, thread) = start_modules(json!([]));
+    notify(
+        &client,
+        "textDocument/didOpen",
+        json!({"textDocument":{"uri":"file:///standalone.adm2","languageId":"adam-lang","version":1,"text":source}}),
+    );
+    let output = publications(&client);
+    stop_modules(&client, thread);
+    let diagnostics = &output["file:///standalone.adm2"].diagnostics;
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let offset = source.find("1.0").unwrap();
+    let column = source[..offset]
+        .rsplit('\n')
+        .next()
+        .unwrap()
+        .encode_utf16()
+        .count() as u32;
+    assert_eq!(
+        diagnostics[0].range,
+        lsp_types::Range::new(
+            lsp_types::Position::new(1, column),
+            lsp_types::Position::new(1, column + 3),
+        )
+    );
+}
+
 /// A malformed definition cannot clear independent registered errors or hide incomplete checking.
 #[test]
 fn transport_malformed_definition_preserves_independent_errors_and_recovers() {

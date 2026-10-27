@@ -46,6 +46,9 @@ fn module_recovery_preserves_following_definition() {
     for broken in [
         "use constraints:: as ord;",
         "sheet broken(a i32) {}",
+        "sheet broken(a) {}",
+        "sheet broken(source a: i32) {}",
+        "sheet broken(out a: i32) {}",
         "sheet broken { relationship foo(a x); }",
         "sheet broken { relationship foo(x); }",
         "use constraints::*;",
@@ -54,6 +57,8 @@ fn module_recovery_preserves_following_definition() {
         "sheet broken { relationship foo(a: x) cell y: i32; }",
         "sheet broken<T>() {}",
         "sheet broken { relationship foo(a: x + 1); }",
+        "sheet broken { relationship foo(a: x.field); }",
+        "sheet broken { relationship foo(a: (x, y)); }",
     ] {
         let source = format!("{broken}\nsheet next {{}}");
         let module = AdamAstParser::new().parse_module_str(&source).unwrap();

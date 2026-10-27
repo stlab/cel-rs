@@ -574,6 +574,7 @@ fn conditional_uses_only_relationships() {
     assert_eq!(*parsed.read::<f64>(parsed.cell_names["c"].0).unwrap(), 0.0);
     for effect in [
         "cell private: f64;",
+        "source private: f64 = 1.0;",
         "out private := a;",
         "conditional true { true => { relationship { c := a; } } }",
     ] {

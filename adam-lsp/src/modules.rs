@@ -8,11 +8,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use adam_lang::{AdamAstParser, ModuleDiagnostic, ModulePath, ModuleSet, SourceLocation, ast};
 use lsp_types::{
-    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, Position, Range, Uri,
+    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, Range, Uri,
 };
 use serde_json::Value;
 
-use crate::diagnostics::{diagnostics_for_module, diagnostics_for_source};
+use crate::diagnostics::{diagnostics_for_module, diagnostics_for_source, source_range};
 
 /// Owns one validated wire record; paths and absolute URIs are unique in its snapshot.
 struct ModuleSource {
@@ -386,23 +386,7 @@ fn append_module_diagnostic(
 ///
 /// - Complexity: O(n) time for the source prefix ending at the span.
 fn location_range(location: &SourceLocation) -> Range {
-    let position = |line: usize, column: usize| {
-        let character = location
-            .source
-            .text()
-            .lines()
-            .nth(line.saturating_sub(1))
-            .unwrap_or("")
-            .chars()
-            .take(column)
-            .map(char::len_utf16)
-            .sum::<usize>();
-        Position::new(line.saturating_sub(1) as u32, character as u32)
-    };
-    Range::new(
-        position(location.span.start.line, location.span.start.column),
-        position(location.span.end.line, location.span.end.column),
-    )
+    source_range(location.source.text(), location.span)
 }
 
 #[cfg(test)]
@@ -410,6 +394,7 @@ mod tests {
     use super::*;
     use adam_lang::{SourceLabel, SourceMap};
     use cel_parser::SourceSpan;
+    use lsp_types::Position;
     use serde_json::json;
 
     /// Only initialization permits absent module options, preserving the source-only host.

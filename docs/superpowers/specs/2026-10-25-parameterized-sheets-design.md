@@ -2,8 +2,11 @@
 
 Date: 2026-10-25
 
-Status: approved by the user on 2026-10-25 after a builder check found no
-important unanswered questions. No implementation is claimed.
+Status: approved by the user on 2026-10-25. The linked implementation now supplies
+the contracts below, with public regression coverage and a local full-gate
+record in the [2026-10-26 implementation handoff](../2026-10-26-parameterized-sheets-handoff.md).
+The controller's independent whole-branch review and publication remain pending;
+this is not a merged/released completion claim.
 
 Issue: #29, v1.0. This replaces its original equation-inference scope.
 
