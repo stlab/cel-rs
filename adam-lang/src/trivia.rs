@@ -46,6 +46,11 @@ use crate::ast::{
 
 /// An AST node that can carry recovered leading trivia, attached by [`attach_gaps`].
 trait TriviaTarget {
+    /// Returns storage for complete opening-gap comments when this node supports it.
+    fn opening_comments_mut(&mut self) -> Option<&mut Vec<crate::ast::Comment>> {
+        None
+    }
+
     fn span(&self) -> ExprSpan;
     fn set_leading_comment(&mut self, comment: crate::ast::Comment);
     /// Sets a `//`/`/* */` comment recovered on the same source line as this node's own last
@@ -56,6 +61,14 @@ trait TriviaTarget {
 }
 
 impl TriviaTarget for crate::ast::SheetItem {
+    /// Returns the complete opening-comment sequence for a named relationship use.
+    fn opening_comments_mut(&mut self) -> Option<&mut Vec<crate::ast::Comment>> {
+        match self {
+            Self::RelationshipUse(call) => Some(&mut call.opening_comments),
+            _ => None,
+        }
+    }
+
     fn span(&self) -> ExprSpan {
         crate::ast::SheetItem::span(self)
     }
@@ -101,6 +114,14 @@ impl TriviaTarget for RelationshipDecl {
 }
 
 impl TriviaTarget for crate::ast::BranchItem {
+    /// Returns the complete opening-comment sequence for a named relationship use.
+    fn opening_comments_mut(&mut self) -> Option<&mut Vec<crate::ast::Comment>> {
+        match self {
+            Self::RelationshipUse(call) => Some(&mut call.opening_comments),
+            _ => None,
+        }
+    }
+
     /// Returns the inline relationship or component use span.
     fn span(&self) -> ExprSpan {
         match self {
@@ -574,7 +595,19 @@ fn attach_opening<T: TriviaTarget>(
     if let Some(first) = items.first_mut() {
         let start = after_open_brace(source, line_starts, open.end);
         let end = line_column_to_byte(source, line_starts, first.span().start.start());
-        let (comment, blank, _) = analyze_gap(source.get(start..end).unwrap_or(""));
+        let gap = source.get(start..end).unwrap_or("");
+        if let Some(comments) = first.opening_comments_mut() {
+            use cel_parser::trivia::{GapPiece, scan_gap};
+            *comments = scan_gap(gap, &[])
+                .into_iter()
+                .filter_map(|piece| match piece {
+                    GapPiece::Comment(comment) => Some(comment),
+                    GapPiece::Punct(_) => None,
+                })
+                .collect();
+            return;
+        }
+        let (comment, blank, _) = analyze_gap(gap);
         if let Some(comment) = comment {
             first.set_leading_comment(comment);
         }

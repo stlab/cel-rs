@@ -550,6 +550,7 @@ impl AdamAstParser {
             keyword_span: point(start),
             path,
             arguments,
+            opening_comments: Vec::new(),
             leading_comment: None,
             doc_comment: None,
             trailing_line_comment: None,

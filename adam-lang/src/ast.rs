@@ -108,6 +108,9 @@ pub struct RelationshipUse {
     pub path: Vec<(String, ExprSpan)>,
     /// Named cell arguments in source order.
     pub arguments: Vec<NamedArgument>,
+    /// Every comment in the opening-brace gap when this use is the first body item.
+    /// Empty for a later item; its ordinary sibling trivia uses `leading_comment` instead.
+    pub opening_comments: Vec<Comment>,
     /// A recovered leading comment.
     pub leading_comment: Option<Comment>,
     /// A leading documentation comment.

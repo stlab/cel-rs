@@ -6,7 +6,8 @@
 //! Expression layout targets 100 columns including declaration prefixes and punctuation. Nested
 //! lists, records and closure bodies use four spaces; binary continuations lead with operators.
 //! Type annotations are re-emitted via `Span::source_text()` directly
-//! via `TypeExpr::span()`, and branch-match literals via `ConditionalBranch::literal_span` — see
+//! via `TypeExpr::span()`; parameter annotations borrow their complete source range so applied
+//! named types retain arguments and comments. Branch-match literals use `ConditionalBranch::literal_span` — see
 //! the design doc for why no `Literal` value is needed. Conditional branches omit the grammar's
 //! optional trailing `,`, matching `begin/assets/demo.adm2`'s existing style.
 //!
@@ -194,6 +195,67 @@ fn write_line_end(
 /// why no `Literal` value is needed here).
 fn source_text_or_empty(span: ast::ExprSpan) -> String {
     span.start.source_text().unwrap_or_default()
+}
+
+/// Borrows a source region, returning `None` for empty source or an unresolvable range.
+///
+/// - Precondition: non-synthetic positions refer to `source`.
+/// - Complexity: O(n) time and space in source length for the line-offset table.
+fn source_region(
+    source: &str,
+    start: proc_macro2::LineColumn,
+    end: proc_macro2::LineColumn,
+) -> Option<&str> {
+    use cel_parser::trivia::{line_column_to_byte, line_start_byte_offsets};
+    if source.is_empty() {
+        return None;
+    }
+    let lines = line_start_byte_offsets(source);
+    let start = line_column_to_byte(source, &lines, start);
+    let end = line_column_to_byte(source, &lines, end);
+    source.get(start..end)
+}
+
+/// Emits the complete accepted parameter type and its comments, not only its first token.
+///
+/// Synthetic type spans use their stored source text.
+///
+/// - Precondition: spans refer to `source`, or `source` is empty.
+/// - Complexity: O(n) time and space in source length plus type text length.
+fn write_parameter_type(out: &mut String, source: &str, ty: &ast::TypeExpr) {
+    let span = ty.span();
+    if let Some(text) = source_region(source, span.start.start(), span.end.end()) {
+        out.push_str(text);
+    } else {
+        out.push_str(&source_text_or_empty(span));
+    }
+}
+
+/// Emits the complete documented header prefix, retaining interspersed comments in source order.
+///
+/// Synthetic declarations use their stored documentation instead.
+///
+/// - Precondition: spans refer to `source`, or `source` is empty.
+/// - Complexity: O(n) time and space in source length plus emitted prefix length.
+fn write_header_documentation(
+    out: &mut String,
+    source: &str,
+    start: proc_macro2::Span,
+    keyword: ast::ExprSpan,
+    prefix: &str,
+    documentation: Option<&str>,
+    depth: usize,
+) {
+    if let Some(documentation) = documentation {
+        if let Some(region) = source_region(source, start.start(), keyword.start.start())
+            .filter(|region| !region.is_empty())
+        {
+            out.push_str(&indent(depth));
+            out.push_str(region.trim_end_matches([' ', '\t']));
+        } else {
+            write_doc_comment(out, prefix, Some(documentation), depth);
+        }
+    }
 }
 
 /// A single-point `ExprSpan` (start and end coincide), for a gap endpoint with no spanned AST
@@ -821,7 +883,15 @@ pub fn format_sheet(sheet: &ast::Sheet, source: &str) -> String {
     );
     let mut out = String::new();
     write_trivia(&mut out, false, sheet.leading_comment.as_ref(), 0);
-    write_doc_comment(&mut out, "//!", sheet.doc_comment.as_deref(), 0);
+    write_header_documentation(
+        &mut out,
+        source,
+        sheet.span.start,
+        sheet.keyword_span,
+        "//!",
+        sheet.doc_comment.as_deref(),
+        0,
+    );
     out.push_str("sheet");
     out.push_str(&emit_decl_gap(
         source,
@@ -850,7 +920,7 @@ pub fn format_sheet(sheet: &ast::Sheet, source: &str) -> String {
                 &[":"],
                 0,
             ));
-            out.push_str(&source_text_or_empty(parameter.type_name.span()));
+            write_parameter_type(&mut out, source, &parameter.type_name);
             previous = parameter.type_name.span();
         }
         out.push_str(&emit_decl_gap(
@@ -985,13 +1055,24 @@ fn write_relationship_use(
     call: &ast::RelationshipUse,
     depth: usize,
 ) {
+    for comment in &call.opening_comments {
+        write_trivia(out, false, Some(comment), depth);
+    }
     write_trivia(
         out,
         call.blank_line_before,
         call.leading_comment.as_ref(),
         depth,
     );
-    write_doc_comment(out, "///", call.doc_comment.as_deref(), depth);
+    write_header_documentation(
+        out,
+        source,
+        call.span.start,
+        call.keyword_span,
+        "///",
+        call.doc_comment.as_deref(),
+        depth,
+    );
     out.push_str(&indent(depth));
     out.push_str("relationship");
     out.push_str(&emit_decl_gap(
@@ -1081,7 +1162,15 @@ pub fn format_module(module: &ast::Module, source: &str) -> Result<String, Forma
                 out.push_str(&format_sheet(sheet, source))
             }
             ast::ModuleItem::Use(import) => {
-                write_doc_comment(&mut out, "//!", import.doc_comment.as_deref(), 0);
+                write_header_documentation(
+                    &mut out,
+                    source,
+                    import.span.start,
+                    import.keyword_span,
+                    "//!",
+                    import.doc_comment.as_deref(),
+                    0,
+                );
                 out.push_str("use");
                 out.push_str(&emit_decl_gap(
                     source,

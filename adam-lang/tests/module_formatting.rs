@@ -2,6 +2,123 @@
 
 use adam_lang::{AdamAstParser, attach_module_trivia, format_module, format_source};
 
+/// Preserves all documentation-to-keyword comments and documentation order on imports and components.
+#[test]
+fn documentation_regions_preserve_interspersed_comments() {
+    for declaration in ["use lib::helper;", "sheet helper() {}"] {
+        let source = format!(
+            "//! doc_first\n/* keep_between_doc_and_header */\n//! doc_second\n// keep_before_keyword\n{declaration}\nsheet root {{}}"
+        );
+        let formatted = format_source(&source).unwrap();
+        for marker in [
+            "doc_first",
+            "keep_between_doc_and_header",
+            "doc_second",
+            "keep_before_keyword",
+        ] {
+            assert_eq!(
+                formatted.matches(marker).count(),
+                1,
+                "{marker}:\n{formatted}"
+            );
+        }
+        assert!(formatted.find("doc_first") < formatted.find("keep_between_doc_and_header"));
+        assert!(formatted.find("keep_between_doc_and_header") < formatted.find("doc_second"));
+        assert!(formatted.find("doc_second") < formatted.find("keep_before_keyword"));
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
+/// Preserves every detached and mixed-style opening comment before sheet and branch uses.
+#[test]
+fn first_relationship_uses_preserve_complete_opening_comments() {
+    let gap = "\n// keep_first\n\n/* keep_block */\n\n// keep_second\n";
+    for source in [
+        format!("sheet root {{{gap}relationship helper();\n}}"),
+        format!(
+            "sheet root {{ conditional true {{ true => {{{gap}relationship helper();\n}} }} }}"
+        ),
+        format!("sheet root {{ conditional true {{ _ => {{{gap}relationship helper();\n}} }} }}"),
+    ] {
+        let formatted = format_source(&source).unwrap();
+        for marker in ["keep_first", "keep_block", "keep_second"] {
+            assert_eq!(
+                formatted.matches(marker).count(),
+                1,
+                "{marker}:\n{formatted}"
+            );
+        }
+        assert!(formatted.find("keep_first") < formatted.find("keep_block"));
+        assert!(formatted.find("keep_block") < formatted.find("keep_second"));
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
+/// Returns a span-independent representation of a complete public type-expression shape.
+///
+/// - Complexity: O(n * d) time and space for n type/name bytes and nesting depth d.
+fn type_shape(ty: &adam_lang::ast::TypeExpr) -> String {
+    use adam_lang::ast::TypeExpr;
+    match ty {
+        TypeExpr::Named { name, args, .. } => format!(
+            "{name}({})",
+            args.iter().map(type_shape).collect::<Vec<_>>().join(",")
+        ),
+        TypeExpr::Array { element, .. } => format!("[{}]", type_shape(element)),
+        TypeExpr::Tuple { elements, .. } => format!(
+            "({})",
+            elements
+                .iter()
+                .map(type_shape)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
+/// Preserves applied concrete type structure and all internal comments across formatting.
+#[test]
+fn parameter_types_preserve_complete_shapes_and_comments() {
+    for type_text in [
+        "Wrapper(i32)",
+        "Wrapper /* keep_name_to_args */ (/* keep_inside_args */ i32)",
+        "Wrapper // keep_name_line\n(/* keep_nested */ Other((i32, bool)), [Nested(bool)])",
+    ] {
+        let source = format!("sheet helper(a: {type_text}) {{}}");
+        let before = AdamAstParser::new().parse_module_str(&source).unwrap();
+        assert!(before.errors.is_empty(), "{:?}", before.errors);
+        let formatted = format_source(&source).unwrap();
+        let after = AdamAstParser::new().parse_module_str(&formatted).unwrap();
+        assert!(after.errors.is_empty(), "{formatted}: {:?}", after.errors);
+        let adam_lang::ast::ModuleItem::Sheet(before_sheet) = &before.items[0] else {
+            panic!()
+        };
+        let adam_lang::ast::ModuleItem::Sheet(after_sheet) = &after.items[0] else {
+            panic!()
+        };
+        assert_eq!(
+            type_shape(&before_sheet.parameters.as_ref().unwrap()[0].type_name),
+            type_shape(&after_sheet.parameters.as_ref().unwrap()[0].type_name),
+            "{formatted}"
+        );
+        for marker in [
+            "keep_name_to_args",
+            "keep_inside_args",
+            "keep_name_line",
+            "keep_nested",
+        ] {
+            if source.contains(marker) {
+                assert_eq!(
+                    formatted.matches(marker).count(),
+                    1,
+                    "{marker}:\n{formatted}"
+                );
+            }
+        }
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+}
+
 /// Uses compact path/list punctuation when comments require no intervening layout.
 #[test]
 fn module_canonical_punctuation() {
