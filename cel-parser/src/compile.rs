@@ -17,6 +17,10 @@ use crate::{
 /// to continue normal lookup. An emitted value must carry its complete runtime
 /// descriptor, including tuple, array, record, or callable shape.
 ///
+/// `resolve` must provide segment-local mutable execution owners for each compilation.
+/// Intentionally shared host input state and immutable definitions may remain shared.
+/// The compiler does not enforce freshness of captured execution resources.
+///
 /// Noncapturing closure bodies resolve only their own formals and persistent library
 /// names; they cannot consult `resolve` or transient lookup scopes. Each compilation
 /// creates fresh branch and closure execution resources. Neither syntax nor environments
