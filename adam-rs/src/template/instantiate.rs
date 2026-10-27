@@ -104,6 +104,36 @@ impl<'a> LiveFrame<'a> {
             occurrence,
         })
     }
+
+    /// Retains the current conditional's local identity and active inclusion chain.
+    ///
+    /// - Precondition: The most recently entered item is a conditional.
+    /// - Complexity: O(n + h) time and O(h) space for entered local items n and depth h.
+    fn conditional_error(&self, source: TemplateError, instance: &Instance) -> TemplateError {
+        debug_assert!(matches!(
+            self.recipe.items.get(self.next - 1),
+            Some(Item::Conditional(_))
+        ));
+        let conditional = self.recipe.items[..self.next - 1]
+            .iter()
+            .filter(|item| matches!(item, Item::Conditional(_)))
+            .count();
+        let mut inclusions = std::iter::successors(Some(self.occurrence), |&index| {
+            instance.occurrences[index]
+                .parent
+                .as_ref()
+                .map(|parent| parent.index)
+        })
+        .filter_map(|index| instance.occurrences[index].inclusion_site.clone())
+        .collect::<Vec<_>>();
+        inclusions.reverse();
+        TemplateError::ConditionalConstruction {
+            template: self.recipe.id(),
+            conditional,
+            inclusions,
+            source: Box::new(source),
+        }
+    }
 }
 
 impl SheetTemplate {
@@ -127,7 +157,11 @@ impl SheetTemplate {
     /// graph construction failures. Returns [`TemplateError::EmptyRelationship`]
     /// if specialization removes all directions, or [`TemplateError::Capacity`]
     /// on checked-size overflow or failed expansion reservation.
-    /// A failed match-expression factory returns [`TemplateError::ConditionalFactory`].
+    /// A conditional construction failure returns [`TemplateError::ConditionalConstruction`],
+    /// retaining its definition, registration ordinal and actual root-to-child inclusion
+    /// sites. Its source is the original [`TemplateError::ConditionalFactory`],
+    /// [`TemplateError::InvalidDefinition`], [`TemplateError::Capacity`] or native
+    /// construction error.
     ///
     /// - Complexity: Expected O(d + c + b + Σ(m² × e)) time and O(d + c + b + e + r + h)
     ///   additional space for expanded declarations d, cells c, bindings b,
@@ -400,7 +434,8 @@ impl SheetTemplate {
                 }
                 Item::Conditional(conditional) => {
                     let ids = edges(&conditional.inputs, &frame.cells)?;
-                    (conditional.make)(destination, &ids, &frame.groups, &instance.relationships)?;
+                    (conditional.make)(destination, &ids, &frame.groups, &instance.relationships)
+                        .map_err(|error| frame.conditional_error(error, instance))?;
                 }
                 Item::Relationship(index) => {
                     let start = instance.relationships.len();

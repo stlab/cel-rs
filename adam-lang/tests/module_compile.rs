@@ -483,6 +483,113 @@ fn compiled_failures_retain_typed_causes_and_invocation_sources() {
     );
 }
 
+/// Attributes a failed imported key to its conditional and actual use after owner teardown.
+#[test]
+fn compiled_deferred_key_failure_retains_child_conditional_and_actual_use() {
+    /// Distinguishes the original operation failure from formatted error replacements.
+    #[derive(Debug)]
+    struct KeyFailure;
+    impl std::fmt::Display for KeyFailure {
+        /// Describes the failing operation.
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("deferred key sentinel")
+        }
+    }
+    impl std::error::Error for KeyFailure {}
+
+    let mut lookup = OpLookup::new();
+    lookup.push_scope(|name, body, arity, _| {
+        if name != "-" || arity != 1 || body.peek_output_type_id() != Some(TypeId::of::<i32>()) {
+            return Ok(false);
+        }
+        body.op1r(|_: i32| -> anyhow::Result<i32> { Err(KeyFailure.into()) })?;
+        Ok(true)
+    });
+    let mut modules = ModuleSet::new();
+    modules
+        .insert_source(
+            "child".parse().unwrap(),
+            "child.adm2",
+            "sheet child() {\nsource key: i32 = 0;\ncell value: i32;\ncell other: i32;\n\
+             conditional key { 0 => { relationship { other := key; } } }\n\
+             conditional key { -1 => { relationship { value := key; } } }\n}",
+        )
+        .unwrap();
+    modules
+        .insert_source("unused".parse().unwrap(), "unused.adm2", "sheet spare() {}")
+        .unwrap();
+    let wrapper: ModulePath = "wrapper".parse().unwrap();
+    modules
+        .insert_source(
+            wrapper.clone(),
+            "wrapper.adm2",
+            "use child::child;\nuse unused::spare;\nsheet wrapper() {\n\
+             relationship spare();\nrelationship child();\nrelationship child();\n}",
+        )
+        .unwrap();
+    let compiled = ModuleCompiler::new(TypeRegistry::new(), lookup)
+        .compile(modules)
+        .unwrap();
+    let template = compiled.template(&wrapper, "wrapper").unwrap().clone();
+    drop(compiled);
+    let mut destination = ParsedSheet::new();
+    let error = template.instantiate(&mut destination, &[]).unwrap_err();
+    drop((template, destination));
+
+    let child = error
+        .labels
+        .iter()
+        .filter_map(|label| label.location.as_ref())
+        .find(|location| {
+            location.source.file_name() == "child.adm2"
+                && location.span == cel_parser::SourceSpan::new(6, 0, 6, 60)
+        });
+    assert!(
+        child.is_some(),
+        "missing failed child's exact conditional: {:?}",
+        error.labels
+    );
+    assert!(
+        child
+            .unwrap()
+            .source
+            .text()
+            .contains("conditional key { -1")
+    );
+    assert!(error.labels.iter().any(|label| {
+        label.location.as_ref().is_some_and(|location| {
+            location.source.file_name() == "child.adm2"
+                && location.span == cel_parser::SourceSpan::new(1, 6, 1, 11)
+        })
+    }));
+    let uses = error
+        .labels
+        .iter()
+        .filter(|label| label.label == "component use")
+        .map(|label| label.location.as_ref().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        uses.len(),
+        1,
+        "unrelated or unexecuted uses are not context"
+    );
+    assert_eq!(uses[0].source.file_name(), "wrapper.adm2");
+    assert_eq!(uses[0].span, cel_parser::SourceSpan::new(5, 0, 5, 21));
+    assert!(error.labels.iter().all(|label| {
+        label
+            .location
+            .as_ref()
+            .is_none_or(|location| location.source.file_name() != "unused.adm2")
+    }));
+    let mut cause = std::error::Error::source(&error);
+    let mut found = false;
+    while let Some(error) = cause {
+        found |= error.downcast_ref::<KeyFailure>().is_some();
+        cause = error.source();
+    }
+    assert!(found, "original concrete operation failure must survive");
+}
+
 /// Keeps caller priorities, initial identities, filters and requirements unchanged by binding.
 #[test]
 fn compiled_binding_does_not_write_or_replace_caller_policies() {

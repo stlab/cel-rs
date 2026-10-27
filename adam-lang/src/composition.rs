@@ -1330,10 +1330,50 @@ impl TypedTemplate {
 
     /// Retains the native construction error and real authored source owners.
     ///
-    /// Labels describe implicated local declarations and possible authored invocation
-    /// sites; exact live occurrence resolution remains native provenance's responsibility.
-    /// - Complexity: O(d + a) unique metadata nodes, edges and authored items.
+    /// Conditional failures label the failed definition/item and only the active native
+    /// inclusion chain. Other errors retain implicated cells and possible invocation sites.
+    /// - Complexity: O(d + a + h × a) unique metadata nodes/edges d, authored items a
+    ///   and active conditional inclusion depth h.
     fn construction_error(&self, error: adam_rs::TemplateError) -> ModuleDiagnostic {
+        if let adam_rs::TemplateError::ConditionalConstruction {
+            template,
+            conditional,
+            inclusions,
+            ..
+        } = &error
+        {
+            let definitions = self.definitions();
+            let mut labels = vec![self.metadata.label.clone()];
+            if let Some(definition) = definitions.get(template) {
+                labels.push(definition.label.clone());
+                if let Some(item) = definition
+                    .authored
+                    .iter()
+                    .filter(|item| item.role == AuthoredRole::Conditional)
+                    .nth(*conditional)
+                {
+                    labels.push(item.label.clone());
+                }
+            }
+            // Native inclusion identities distinguish repeated calls to the same definition.
+            for site in inclusions {
+                labels.extend(
+                    definitions
+                        .values()
+                        .flat_map(|definition| definition.authored.iter())
+                        .filter(|item| {
+                            item.role == AuthoredRole::Use
+                                && item.relationship.as_ref() == Some(site)
+                        })
+                        .map(|item| item.label.clone()),
+                );
+            }
+            return ModuleDiagnostic {
+                message: error.to_string(),
+                labels,
+                cause: Some(crate::source_map::ModuleCause::new(error)),
+            };
+        }
         let slot = match &error {
             adam_rs::TemplateError::Factory { slot, .. }
             | adam_rs::TemplateError::ForeignHandle { slot }

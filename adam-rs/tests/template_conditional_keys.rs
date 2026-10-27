@@ -52,7 +52,8 @@ fn conditional_factory_validates_deferred_branch_keys() {
         let flag = sheet.add_cell(true);
         assert!(matches!(
             template.instantiate(&mut sheet, &[("flag", flag)]),
-            Err(adam_rs::TemplateError::InvalidDefinition { .. })
+            Err(adam_rs::TemplateError::ConditionalConstruction { source, .. })
+                if matches!(*source, adam_rs::TemplateError::InvalidDefinition { .. })
         ));
     }
 }
@@ -79,7 +80,78 @@ fn conditional_key_failure_preserves_cause() {
         .unwrap_err();
     assert!(matches!(
         error,
-        adam_rs::TemplateError::ConditionalFactory { .. }
+        adam_rs::TemplateError::ConditionalConstruction { ref source, .. }
+            if matches!(**source, adam_rs::TemplateError::ConditionalFactory { .. })
     ));
     assert!(std::error::Error::source(&error).is_some());
+}
+
+/// Retains the failed local conditional and only its active inclusion chain.
+#[test]
+fn conditional_failure_context_identifies_definition_and_active_inclusions() {
+    let mut child = TemplateBuilder::new();
+    let flag = child.parameter::<bool>("flag").unwrap();
+    child
+        .conditional_factory::<bool, _, _>(
+            std::slice::from_ref(&flag),
+            |ids| Ok(MatchExpr::cell(ids[0])),
+            || Ok(vec![vec![true]]),
+            vec![vec![]],
+            vec![],
+        )
+        .unwrap();
+    child
+        .conditional_factory::<bool, _, _>(
+            &[flag],
+            |ids| Ok(MatchExpr::cell(ids[0])),
+            || Err(std::io::Error::other("key failure").into()),
+            vec![vec![]],
+            vec![],
+        )
+        .unwrap();
+    let child = Rc::new(child.finish().unwrap());
+    let definition = child.id();
+    let empty = Rc::new(TemplateBuilder::new().finish().unwrap());
+    let mut middle = TemplateBuilder::new();
+    let flag = middle.parameter::<bool>("flag").unwrap();
+    middle.include(empty, &[]).unwrap();
+    let failed = middle
+        .include(child.clone(), &[("flag", flag.clone())])
+        .unwrap()
+        .relationships()[0]
+        .clone();
+    middle.include(child, &[("flag", flag)]).unwrap();
+    let mut outer = TemplateBuilder::new();
+    let flag = outer.parameter::<bool>("flag").unwrap();
+    let entry = outer
+        .include(Rc::new(middle.finish().unwrap()), &[("flag", flag)])
+        .unwrap()
+        .relationships()[0]
+        .clone();
+    let template = outer.finish().unwrap();
+    let mut sheet = Sheet::new();
+    let flag = sheet.add_cell(true);
+    let error = template
+        .instantiate(&mut sheet, &[("flag", flag)])
+        .unwrap_err();
+    drop((template, sheet));
+    let adam_rs::TemplateError::ConditionalConstruction {
+        template,
+        conditional,
+        inclusions,
+        source,
+    } = error
+    else {
+        panic!("missing conditional construction context");
+    };
+    assert_eq!(template, definition);
+    assert_eq!(conditional, 1);
+    assert_eq!(inclusions, [entry, failed]);
+    let adam_rs::TemplateError::ConditionalFactory { source } = *source else {
+        panic!("missing original factory failure");
+    };
+    assert_eq!(
+        source.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::Other
+    );
 }

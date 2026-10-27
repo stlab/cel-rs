@@ -3,7 +3,7 @@
 use std::any::TypeId;
 use std::fmt;
 
-use super::CellSlot;
+use super::{CellSlot, RelationshipSlot, TemplateId};
 use crate::{CellId, Error};
 
 /// Identifies a malformed recipe, binding, factory, or native graph construction.
@@ -83,10 +83,25 @@ pub enum TemplateError {
         /// The private cell or first declared method output.
         slot: CellSlot,
     },
-    /// A conditional's repeatable match-expression factory failed.
+    /// A conditional's repeatable match-expression or key factory failed.
     ConditionalFactory {
         /// The underlying factory failure.
         source: anyhow::Error,
+    },
+    /// Retains a failed conditional's definition, local ordinal and active invocation sites.
+    ///
+    /// Context owns identities, not recipes or live state. The original error and
+    /// its typed cause remain available through [`std::error::Error::source`].
+    /// See [`super::SheetTemplate::instantiate`].
+    ConditionalConstruction {
+        /// Identifies the definition containing the failed conditional.
+        template: TemplateId,
+        /// Identifies the zero-based conditional registration ordinal in that definition.
+        conditional: usize,
+        /// Retains only active inclusion sites, ordered from the root to the failed definition.
+        inclusions: Vec<RelationshipSlot>,
+        /// Retains the original concrete construction failure and its cause.
+        source: Box<TemplateError>,
     },
     /// An existing native graph mutator rejected construction.
     Runtime(Error),
@@ -127,6 +142,14 @@ impl fmt::Display for TemplateError {
             Self::ConditionalFactory { source } => {
                 write!(f, "template conditional factory failed: {source}")
             }
+            Self::ConditionalConstruction {
+                conditional,
+                source,
+                ..
+            } => write!(
+                f,
+                "template conditional {conditional} construction failed: {source}"
+            ),
             Self::Runtime(source) => write!(f, "native template construction failed: {source}"),
         }
     }
@@ -138,6 +161,7 @@ impl std::error::Error for TemplateError {
         match self {
             Self::Factory { source, .. } => Some(source.as_ref()),
             Self::ConditionalFactory { source } => Some(source.as_ref()),
+            Self::ConditionalConstruction { source, .. } => Some(source.as_ref()),
             Self::Runtime(source) => Some(source),
             _ => None,
         }

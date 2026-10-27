@@ -959,10 +959,21 @@ fn conditional_factories_validate_signatures_and_errors() {
             .unwrap()
             .instantiate(&mut Sheet::new(), &[])
             .unwrap_err();
+        let TemplateError::ConditionalConstruction {
+            conditional,
+            inclusions,
+            source,
+            ..
+        } = error
+        else {
+            panic!("missing conditional construction context");
+        };
+        assert_eq!(conditional, 0);
+        assert!(inclusions.is_empty());
         if case < 2 {
-            assert!(matches!(error, TemplateError::InvalidDefinition { .. }));
+            assert!(matches!(*source, TemplateError::InvalidDefinition { .. }));
         } else {
-            assert!(matches!(error, TemplateError::ConditionalFactory { .. }));
+            assert!(matches!(*source, TemplateError::ConditionalFactory { .. }));
         }
     }
 }
