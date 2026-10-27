@@ -46,7 +46,7 @@ impl AdamAstParser {
         }
     }
 
-    /// Parses an adam-lang source string into an [`ast::Sheet`].
+    /// Parses exactly one root sheet into an [`ast::Sheet`].
     ///
     /// A syntax error inside one `cell`/`relationship`/`conditional` item is recorded in
     /// `Sheet.errors` and replaced by a `SheetItem::Error` placeholder covering the skipped
@@ -69,7 +69,17 @@ impl AdamAstParser {
     ///
     /// Returns `Err` for structural errors outside any sheet item (e.g. a missing `sheet`
     /// keyword, missing sheet name, missing top-level braces, or trailing tokens after the
-    /// sheet closes) — these can't be attributed to a single recoverable item.
+    /// sheet closes), imports, multiple definitions, or a component signature. Use
+    /// [`Self::parse_module_str`] for complete modules.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut parser = adam_lang::AdamAstParser::new();
+    /// assert_eq!(parser.parse_str("sheet root {}").unwrap().name, "root");
+    /// assert!(parser.parse_str("sheet helper() {}").is_err());
+    /// assert!(parser.parse_str("sheet a {} sheet b {}").is_err());
+    /// ```
     pub fn parse_str(&mut self, source: &str) -> Result<ast::Sheet> {
         use std::str::FromStr;
         let stream = proc_macro2::TokenStream::from_str(source)
@@ -78,6 +88,9 @@ impl AdamAstParser {
             TokenCursor::new(cel_parser::lex_lexer::LexLexer::new(stream.into_iter()).peekable());
         let doc_comment = cursor.consume_doc_comment_run(true);
         let mut sheet = self.parse_sheet(&mut cursor)?;
+        if sheet.parameters.is_some() {
+            return Err(cursor.err_at("expected one root sheet without parameters"));
+        }
         if let Some((text, span)) = doc_comment {
             sheet.doc_comment = Some(text);
             sheet.span.start = span;
@@ -89,13 +102,185 @@ impl AdamAstParser {
         Ok(sheet)
     }
 
-    /// `sheet = "sheet" identifier "{" { sheet_item } "}".`
+    /// Parses `module = { use_decl | sheet }`, recovering at the next file declaration.
+    ///
+    /// Names and types remain unresolved; expressions are parsed without execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tokenization fails. Grammar errors populate `Module.errors`.
+    ///
+    /// - Complexity: O(n) in source and AST size, excluding embedded CEL parsing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let module = adam_lang::AdamAstParser::new()
+    ///     .parse_module_str("use lib::helper; sheet helper() {} sheet root {}").unwrap();
+    /// assert_eq!(module.items.len(), 3);
+    /// assert!(module.errors.is_empty());
+    /// ```
+    pub fn parse_module_str(&mut self, source: &str) -> Result<ast::Module> {
+        use std::str::FromStr;
+        let stream = proc_macro2::TokenStream::from_str(source)
+            .map_err(|e| cel_parser::ParseError::from_lex_error(source, e))?;
+        let mut cursor =
+            TokenCursor::new(cel_parser::lex_lexer::LexLexer::new(stream.into_iter()).peekable());
+        let mut module = ast::Module {
+            items: Vec::new(),
+            errors: Vec::new(),
+            comments: Vec::new(),
+        };
+        while cursor.peek_token().is_some() {
+            let doc = cursor.consume_doc_comment_run(true);
+            let start = doc
+                .as_ref()
+                .map_or_else(|| cursor.peek_span(), |(_, span)| *span);
+            cursor.set_last_span(start);
+            let keyword_span = cursor.peek_span();
+            let result = if cursor.is_keyword("use") {
+                self.parse_use_decl(&mut cursor, keyword_span)
+                    .map(|mut import| {
+                        if let Some((text, span)) = doc {
+                            import.doc_comment = Some(text);
+                            import.span.start = span;
+                        }
+                        ast::ModuleItem::Use(import)
+                    })
+            } else {
+                self.parse_sheet(&mut cursor).map(|mut sheet| {
+                    if let Some((text, span)) = doc {
+                        sheet.doc_comment = Some(text);
+                        sheet.span.start = span;
+                    }
+                    ast::ModuleItem::Sheet(sheet)
+                })
+            };
+            match result {
+                Ok(item) => {
+                    if let ast::ModuleItem::Sheet(sheet) = &item {
+                        module.errors.extend(sheet.errors.iter().cloned());
+                    }
+                    module.items.push(item);
+                }
+                Err(error) => {
+                    module.errors.push(error);
+                    let end = cursor.skip_to_module_item();
+                    module
+                        .items
+                        .push(ast::ModuleItem::Error(ast::ExprSpan { start, end }));
+                }
+            }
+        }
+        Ok(module)
+    }
+
+    /// `path = identifier { "::" identifier }.`
+    ///
+    /// - Complexity: O(n) in path size.
+    fn parse_path(&mut self, cursor: &mut TokenCursor) -> Result<Vec<(String, ast::ExprSpan)>> {
+        let (name, span) = self.parse_module_identifier(cursor)?;
+        let mut path = vec![(name, point(span))];
+        while cursor.consume_punct(":") {
+            cursor.expect_punct(":")?;
+            let (name, span) = self.parse_module_identifier(cursor)?;
+            path.push((name, point(span)));
+        }
+        Ok(path)
+    }
+
+    /// `module_identifier = identifier - ( "use" | "sheet" | "as" ).`
+    ///
+    /// Leaves a following definition's keyword available for file-level recovery.
+    fn parse_module_identifier(
+        &mut self,
+        cursor: &mut TokenCursor,
+    ) -> Result<(String, proc_macro2::Span)> {
+        use cel_parser::lex_lexer::Token;
+        if matches!(cursor.peek_token(), Some(Token::Identifier(id)) if id == "sheet" || id == "use" || id == "as")
+        {
+            return Err(cursor.err_at("expected module identifier"));
+        }
+        cursor.consume_ident()
+    }
+
+    /// `use_decl = "use" path [ "as" identifier ] ";".`
+    ///
+    /// - Precondition: the caller consumed `use` and retained its span in `start`.
+    /// - Complexity: O(n) in import size.
+    fn parse_use_decl(
+        &mut self,
+        cursor: &mut TokenCursor,
+        start: proc_macro2::Span,
+    ) -> Result<ast::UseDecl> {
+        let path = self.parse_path(cursor)?;
+        let alias = if cursor.is_keyword("as") {
+            let (name, span) = self.parse_module_identifier(cursor)?;
+            Some((name, point(span)))
+        } else {
+            None
+        };
+        let end = cursor.expect_punct(";")?;
+        Ok(ast::UseDecl {
+            keyword_span: point(start),
+            doc_comment: None,
+            path,
+            alias,
+            span: ast::ExprSpan { start, end },
+        })
+    }
+
+    /// `parameters = "(" [ identifier ":" type_expr { "," identifier ":" type_expr } [ "," ] ] ")".`
+    ///
+    /// - Complexity: O(n) in signature size, excluding embedded type parsing.
+    fn parse_parameters(
+        &mut self,
+        cursor: &mut TokenCursor,
+    ) -> Result<Option<Vec<ast::ParameterDecl>>> {
+        use cel_parser::lex_lexer::Token;
+        use proc_macro2::Delimiter;
+        if !matches!(
+            cursor.peek_token(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            return Ok(None);
+        }
+        cursor.expect_open_paren()?;
+        let mut parameters = Vec::new();
+        while !matches!(
+            cursor.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            let (name, span) = cursor.consume_ident()?;
+            cursor.expect_punct(":")?;
+            let type_name = self.parse_type_expr(cursor)?;
+            parameters.push(ast::ParameterDecl {
+                name,
+                name_span: point(span),
+                type_name,
+            });
+            if !cursor.consume_punct(",") {
+                break;
+            }
+        }
+        cursor.expect_close_paren()?;
+        Ok(Some(parameters))
+    }
+
+    /// `sheet = "sheet" identifier [ parameters ] "{" { sheet_item } "}".`
     fn parse_sheet(&mut self, cursor: &mut TokenCursor) -> Result<ast::Sheet> {
         let sheet_start = cursor.peek_span();
         if !cursor.is_keyword("sheet") {
             return Err(cursor.err_at("expected `sheet`"));
         }
         let (name, name_span) = cursor.consume_ident()?;
+        let parameters = self.parse_parameters(cursor)?;
         let open_span = cursor.expect_open_brace()?;
         let mut items = Vec::new();
         let mut errors = Vec::new();
@@ -133,8 +318,10 @@ impl AdamAstParser {
         }
         let close_span = cursor.expect_close_brace()?;
         Ok(ast::Sheet {
+            keyword_span: point(sheet_start),
             name,
             name_span: point(name_span),
+            parameters,
             items,
             leading_comment: None,
             doc_comment: None,
@@ -149,16 +336,21 @@ impl AdamAstParser {
         })
     }
 
-    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl | source_decl.`
+    /// `sheet_item = cell_decl | relationship_item | conditional_decl | out_decl | source_decl.`
     fn parse_sheet_item(&mut self, cursor: &mut TokenCursor) -> Result<ast::SheetItem> {
         use cel_parser::lex_lexer::{HasSpan, Token};
         match cursor.peek_token() {
             Some(Token::Identifier(id)) if id == "cell" => {
                 self.parse_cell_decl(cursor).map(ast::SheetItem::Cell)
             }
-            Some(Token::Identifier(id)) if id == "relationship" => self
-                .parse_relationship_decl(cursor)
-                .map(ast::SheetItem::Relationship),
+            Some(Token::Identifier(id)) if id == "relationship" => {
+                match self.parse_relationship_item(cursor)? {
+                    ast::BranchItem::Relationship(rel) => Ok(ast::SheetItem::Relationship(rel)),
+                    ast::BranchItem::RelationshipUse(call) => {
+                        Ok(ast::SheetItem::RelationshipUse(call))
+                    }
+                }
+            }
             Some(Token::Identifier(id)) if id == "conditional" => self
                 .parse_conditional_decl(cursor)
                 .map(ast::SheetItem::Conditional),
@@ -310,13 +502,71 @@ impl AdamAstParser {
         result
     }
 
-    /// `relationship_decl = "relationship" "{" { binding } "}".`
-    fn parse_relationship_decl(
+    /// `relationship_item = "relationship" ( "{" { binding } "}" | path "(" arguments ")" ";" ).`
+    ///
+    /// - Complexity: O(n) in AST size, excluding embedded CEL parsing.
+    fn parse_relationship_item(&mut self, cursor: &mut TokenCursor) -> Result<ast::BranchItem> {
+        use cel_parser::lex_lexer::Token;
+        use proc_macro2::Delimiter;
+        let start = cursor.peek_span();
+        cursor.is_keyword("relationship");
+        if matches!(
+            cursor.peek_token(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Brace,
+                ..
+            })
+        ) {
+            return self
+                .parse_relationship_body(cursor, start)
+                .map(ast::BranchItem::Relationship);
+        }
+        let path = self.parse_path(cursor)?;
+        cursor.expect_open_paren()?;
+        let mut arguments = Vec::new();
+        while !matches!(
+            cursor.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            let (name, name_span) = cursor.consume_ident()?;
+            cursor.expect_punct(":")?;
+            let (cell, cell_span) = cursor.consume_ident()?;
+            arguments.push(ast::NamedArgument {
+                name,
+                name_span: point(name_span),
+                cell,
+                cell_span: point(cell_span),
+            });
+            if !cursor.consume_punct(",") {
+                break;
+            }
+        }
+        cursor.expect_close_paren()?;
+        let end = cursor.expect_punct(";")?;
+        Ok(ast::BranchItem::RelationshipUse(ast::RelationshipUse {
+            keyword_span: point(start),
+            path,
+            arguments,
+            leading_comment: None,
+            doc_comment: None,
+            trailing_line_comment: None,
+            blank_line_before: false,
+            span: ast::ExprSpan { start, end },
+        }))
+    }
+
+    /// `relationship_body = "{" { binding } "}".`
+    ///
+    /// - Precondition: the caller consumed `relationship` and retained its span.
+    /// - Complexity: O(n) in AST size, excluding embedded CEL parsing.
+    fn parse_relationship_body(
         &mut self,
         cursor: &mut TokenCursor,
+        decl_start: proc_macro2::Span,
     ) -> Result<ast::RelationshipDecl> {
-        let decl_start = cursor.peek_span();
-        cursor.is_keyword("relationship");
         let open_span = cursor.expect_open_brace()?;
         let mut bindings = Vec::new();
         while !cursor.at_close_brace() {
@@ -436,19 +686,19 @@ impl AdamAstParser {
         })
     }
 
-    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_decl }
+    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_item }
     /// "}"`, up to (not including) the closing `}`.
     fn parse_branch_relationships(
         &mut self,
         cursor: &mut TokenCursor,
-    ) -> Result<Vec<ast::RelationshipDecl>> {
+    ) -> Result<Vec<ast::BranchItem>> {
         use cel_parser::lex_lexer::Token;
         let mut relationships = Vec::new();
         while !cursor.at_close_brace() {
             if !matches!(cursor.peek_token(), Some(Token::Identifier(id)) if id == "relationship") {
                 return Err(cursor.err_at("expected `relationship`"));
             }
-            relationships.push(self.parse_relationship_decl(cursor)?);
+            relationships.push(self.parse_relationship_item(cursor)?);
         }
         Ok(relationships)
     }

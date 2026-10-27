@@ -458,10 +458,13 @@ fn build_decomposed_multi_cell_conditionals(
 fn build_branch_relationships(
     doc: &Document,
     group_ids: &[RelationshipGroupId],
-) -> Result<Vec<RelationshipDecl>, ExportError> {
+) -> Result<Vec<adam_lang::ast::BranchItem>, ExportError> {
     group_ids
         .iter()
-        .map(|&group_id| build_relationship_decl(doc, &doc.relationship_groups[group_id], group_id))
+        .map(|&group_id| {
+            build_relationship_decl(doc, &doc.relationship_groups[group_id], group_id)
+                .map(adam_lang::ast::BranchItem::Relationship)
+        })
         .collect()
 }
 

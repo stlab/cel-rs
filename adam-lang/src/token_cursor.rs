@@ -390,6 +390,36 @@ impl TokenCursor {
         Some((lines.join("\n"), first_span))
     }
 
+    /// Skips a malformed file item, stopping before the next top-level `use` or `sheet`.
+    ///
+    /// The failed production must consume its starting keyword before recovery.
+    ///
+    /// - Complexity: O(n) in skipped tokens.
+    pub(crate) fn skip_to_module_item(&mut self) -> Span {
+        let mut last = self.last_span;
+        loop {
+            let top_level = self.depth <= 0;
+            match self.peek_token() {
+                None => return last,
+                Some(Token::Identifier(id)) if top_level && (id == "use" || id == "sheet") => {
+                    return last;
+                }
+                Some(Token::OpenDelim { .. }) => {
+                    self.depth = self.depth.checked_add(1).expect("token nesting fits i32")
+                }
+                Some(Token::CloseDelim { .. }) => {
+                    self.depth = self.depth.checked_sub(1).expect("token nesting fits i32")
+                }
+                _ => {}
+            }
+            last = self.peek_span();
+            self.advance();
+            if self.depth < 0 {
+                self.depth = 0;
+            }
+        }
+    }
+
     pub(crate) fn at_close_brace(&mut self) -> bool {
         matches!(
             self.tokens.as_mut().and_then(|t| t.peek()),

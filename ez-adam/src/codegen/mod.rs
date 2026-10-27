@@ -190,6 +190,8 @@ fn build_sheet(doc: &Document) -> Result<Sheet, ExportError> {
     }
 
     Ok(Sheet {
+        keyword_span: cel_parser::ExprSpan::for_text("sheet"),
+        parameters: None,
         name: doc.sheet_name.clone(),
         name_span: cel_parser::ExprSpan::for_text(&doc.sheet_name),
         items,

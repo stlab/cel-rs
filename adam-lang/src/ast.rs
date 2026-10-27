@@ -11,16 +11,138 @@ use cel_parser::lex_lexer::Literal;
 
 pub use cel_parser::Comment;
 
+/// An ordered file of imports and sheet definitions, without resolved names or types.
+///
+/// Errors include malformed file items and errors recovered inside definitions.
+///
+/// # Examples
+///
+/// ```
+/// let module = adam_lang::AdamAstParser::new().parse_module_str("sheet root {}").unwrap();
+/// assert_eq!(module.items.len(), 1);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Module {
+    /// File items in source order, including recovery placeholders.
+    pub items: Vec<ModuleItem>,
+    /// Recovered syntax errors in source order.
+    pub errors: Vec<cel_parser::ParseError>,
+    /// Comments before each item and after the last item, populated by trivia attachment.
+    pub comments: Vec<Vec<Comment>>,
+}
+
+/// A file-level declaration or a recovered malformed declaration.
+#[derive(Debug, Clone)]
+pub enum ModuleItem {
+    /// An explicit named import.
+    Use(UseDecl),
+    /// A root or parameterized definition.
+    Sheet(Sheet),
+    /// The span of a malformed file-level declaration.
+    Error(ExprSpan),
+}
+
+impl ModuleItem {
+    /// Returns the declaration or recovery span.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let module = adam_lang::AdamAstParser::new().parse_module_str("sheet root {}").unwrap();
+    /// assert_eq!(module.items[0].span().start.start().line, 1);
+    /// ```
+    pub fn span(&self) -> ExprSpan {
+        match self {
+            Self::Use(item) => item.span,
+            Self::Sheet(item) => item.span,
+            Self::Error(span) => *span,
+        }
+    }
+}
+
+/// `use_decl = "use" identifier { "::" identifier } [ "as" identifier ] ";".`
+#[derive(Debug, Clone)]
+pub struct UseDecl {
+    /// The `use` keyword's span, excluding preceding documentation.
+    pub keyword_span: ExprSpan,
+    /// Leading inner documentation, if present.
+    pub doc_comment: Option<String>,
+    /// Unresolved path segments and their individual spans.
+    pub path: Vec<(String, ExprSpan)>,
+    /// The optional local alias and its span.
+    pub alias: Option<(String, ExprSpan)>,
+    /// The whole import's span.
+    pub span: ExprSpan,
+}
+
+/// A required typed formal parameter, without a default or an initializer.
+#[derive(Debug, Clone)]
+pub struct ParameterDecl {
+    /// The formal parameter's name.
+    pub name: String,
+    /// The name token's span.
+    pub name_span: ExprSpan,
+    /// The required unresolved type expression.
+    pub type_name: TypeExpr,
+}
+
+/// A named binding from a formal parameter to a caller's cell identifier.
+#[derive(Debug, Clone)]
+pub struct NamedArgument {
+    /// The formal parameter's name.
+    pub name: String,
+    /// The formal name token's span.
+    pub name_span: ExprSpan,
+    /// The actual cell's name.
+    pub cell: String,
+    /// The actual cell token's span.
+    pub cell_span: ExprSpan,
+}
+
+/// `relationship_use = "relationship" path "(" [ named_arguments ] ")" ";".`
+#[derive(Debug, Clone)]
+pub struct RelationshipUse {
+    /// The `relationship` keyword's span, excluding any preceding documentation.
+    pub keyword_span: ExprSpan,
+    /// Unresolved callee path segments and their spans.
+    pub path: Vec<(String, ExprSpan)>,
+    /// Named cell arguments in source order.
+    pub arguments: Vec<NamedArgument>,
+    /// A recovered leading comment.
+    pub leading_comment: Option<Comment>,
+    /// A leading documentation comment.
+    pub doc_comment: Option<String>,
+    /// A comment on the declaration's last source line.
+    pub trailing_line_comment: Option<Comment>,
+    /// Whether a blank line precedes this declaration.
+    pub blank_line_before: bool,
+    /// The whole declaration's span.
+    pub span: ExprSpan,
+}
+
+/// A conditional branch item, retaining inline and included relationship order.
+#[derive(Debug, Clone)]
+pub enum BranchItem {
+    /// An ordinary inline relationship.
+    Relationship(RelationshipDecl),
+    /// A named component use.
+    RelationshipUse(RelationshipUse),
+}
+
 /// A parsed adam-lang sheet declaration, with source spans on every node.
 ///
 /// Built by [`crate::AdamAstParser`]; consumed by the language server, the formatter, and the
 /// (separate, future) compile-to-`Sheet` phase.
 #[derive(Debug, Clone)]
 pub struct Sheet {
+    /// The `sheet` keyword's span, excluding any preceding documentation.
+    pub keyword_span: ExprSpan,
     /// The sheet's declared name.
     pub name: String,
     /// The name token's span.
     pub name_span: ExprSpan,
+    /// `None` for a root; `Some`, including an empty vector, for a component.
+    pub parameters: Option<Vec<ParameterDecl>>,
     /// The sheet's items, in declaration order.
     pub items: Vec<SheetItem>,
     /// A leading `//`/`/* */` comment immediately preceding the `sheet` keyword (e.g. a file
@@ -54,6 +176,8 @@ pub enum SheetItem {
     Cell(CellDecl),
     /// A `relationship` declaration.
     Relationship(RelationshipDecl),
+    /// A named component use.
+    RelationshipUse(RelationshipUse),
     /// A `conditional` declaration.
     Conditional(ConditionalDecl),
     /// An `out` declaration.
@@ -88,6 +212,7 @@ impl SheetItem {
         match self {
             SheetItem::Cell(c) => c.span,
             SheetItem::Relationship(r) => r.span,
+            SheetItem::RelationshipUse(r) => r.span,
             SheetItem::Conditional(c) => c.span,
             SheetItem::Out(o) => o.span,
             SheetItem::Source(s) => s.span,
@@ -100,6 +225,7 @@ impl SheetItem {
         match self {
             SheetItem::Cell(c) => c.leading_comment = Some(comment),
             SheetItem::Relationship(r) => r.leading_comment = Some(comment),
+            SheetItem::RelationshipUse(r) => r.leading_comment = Some(comment),
             SheetItem::Conditional(c) => c.leading_comment = Some(comment),
             SheetItem::Out(o) => o.leading_comment = Some(comment),
             SheetItem::Source(s) => s.leading_comment = Some(comment),
@@ -115,6 +241,7 @@ impl SheetItem {
         match self {
             SheetItem::Cell(c) => c.trailing_line_comment = Some(comment),
             SheetItem::Relationship(r) => r.trailing_line_comment = Some(comment),
+            SheetItem::RelationshipUse(r) => r.trailing_line_comment = Some(comment),
             SheetItem::Conditional(c) => c.trailing_line_comment = Some(comment),
             SheetItem::Out(o) => o.trailing_line_comment = Some(comment),
             SheetItem::Source(s) => s.trailing_line_comment = Some(comment),
@@ -130,6 +257,7 @@ impl SheetItem {
         match self {
             SheetItem::Cell(c) => c.blank_line_before = value,
             SheetItem::Relationship(r) => r.blank_line_before = value,
+            SheetItem::RelationshipUse(r) => r.blank_line_before = value,
             SheetItem::Conditional(c) => c.blank_line_before = value,
             SheetItem::Out(o) => o.blank_line_before = value,
             SheetItem::Source(s) => s.blank_line_before = value,
@@ -149,6 +277,10 @@ impl SheetItem {
                 c.span.start = start;
             }
             SheetItem::Relationship(r) => {
+                r.doc_comment = Some(text);
+                r.span.start = start;
+            }
+            SheetItem::RelationshipUse(r) => {
                 r.doc_comment = Some(text);
                 r.span.start = start;
             }
@@ -463,7 +595,7 @@ pub struct ConditionalDecl {
 #[derive(Debug, Clone)]
 pub struct DefaultBranch {
     /// The default branch's relationships, in declaration order.
-    pub relationships: Vec<RelationshipDecl>,
+    pub relationships: Vec<BranchItem>,
     /// A trailing comment immediately preceding this branch's own closing `}`, if recovered.
     /// See <https://github.com/stlab/cel-rs/issues/52>.
     pub trailing_comment: Option<Comment>,
@@ -480,7 +612,7 @@ pub struct DefaultBranch {
     pub span: ExprSpan,
 }
 
-/// `conditional_branch = literal_pattern "=>" "{" { relationship_decl } "}" [ "," ].`
+/// `conditional_branch = literal_pattern "=>" "{" { relationship_item } "}" [ "," ].`
 /// `literal_pattern = ["-"] literal.`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
@@ -495,7 +627,7 @@ pub struct ConditionalBranch {
     /// The literal token's own span (never includes a leading `-`; see [`Self::negated`]).
     pub literal_span: ExprSpan,
     /// The branch's relationships, in declaration order.
-    pub relationships: Vec<RelationshipDecl>,
+    pub relationships: Vec<BranchItem>,
     /// A leading comment immediately preceding this branch, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,

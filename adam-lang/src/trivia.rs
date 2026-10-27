@@ -100,6 +100,40 @@ impl TriviaTarget for RelationshipDecl {
     }
 }
 
+impl TriviaTarget for crate::ast::BranchItem {
+    /// Returns the inline relationship or component use span.
+    fn span(&self) -> ExprSpan {
+        match self {
+            Self::Relationship(rel) => rel.span,
+            Self::RelationshipUse(call) => call.span,
+        }
+    }
+
+    /// Attaches a leading comment to this branch item.
+    fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
+        match self {
+            Self::Relationship(rel) => rel.leading_comment = Some(comment),
+            Self::RelationshipUse(call) => call.leading_comment = Some(comment),
+        }
+    }
+
+    /// Attaches a same-line comment to this branch item.
+    fn set_trailing_line_comment(&mut self, comment: crate::ast::Comment) {
+        match self {
+            Self::Relationship(rel) => rel.trailing_line_comment = Some(comment),
+            Self::RelationshipUse(call) => call.trailing_line_comment = Some(comment),
+        }
+    }
+
+    /// Records a preceding blank line.
+    fn set_blank_line_before(&mut self, value: bool) {
+        match self {
+            Self::Relationship(rel) => rel.blank_line_before = value,
+            Self::RelationshipUse(call) => call.blank_line_before = value,
+        }
+    }
+}
+
 impl TriviaTarget for ConditionalBranch {
     fn span(&self) -> ExprSpan {
         self.span
@@ -335,9 +369,18 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     let sheet_start = line_column_to_byte(source, &line_starts, sheet.span.start.start());
     let (leading_comment, _, _) = analyze_gap(&source[..sheet_start]);
     sheet.leading_comment = leading_comment;
-    attach_gaps(source, &line_starts, &mut sheet.items);
+    attach_sheet_body(source, &line_starts, sheet);
+}
+
+/// Attaches nested sheet trivia using the caller's shared source-offset table.
+///
+/// - Precondition: spans and offsets refer to `source`.
+/// - Complexity: O(n) in the sheet's source and nested AST size.
+fn attach_sheet_body(source: &str, line_starts: &[usize], sheet: &mut Sheet) {
+    attach_opening(source, line_starts, sheet.open_brace_span, &mut sheet.items);
+    attach_gaps(source, line_starts, &mut sheet.items);
     let last_child_end = sheet.items.last().map(|item| item.span().end.end());
-    if let Some(comment) = attach_trailing(source, &line_starts, last_child_end, sheet) {
+    if let Some(comment) = attach_trailing(source, line_starts, last_child_end, sheet) {
         sheet
             .items
             .last_mut()
@@ -347,23 +390,72 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     for item in &mut sheet.items {
         match item {
             crate::ast::SheetItem::Relationship(rel) => {
-                attach_relationship(source, &line_starts, rel)
+                attach_relationship(source, line_starts, rel)
             }
             crate::ast::SheetItem::Conditional(cond) => {
-                attach_conditional(source, &line_starts, cond)
+                attach_conditional(source, line_starts, cond)
             }
-            crate::ast::SheetItem::Out(out_decl) => attach_out(source, &line_starts, out_decl),
-            crate::ast::SheetItem::Cell(cell) => attach_cell(source, &line_starts, cell),
+            crate::ast::SheetItem::Out(out_decl) => attach_out(source, line_starts, out_decl),
+            crate::ast::SheetItem::Cell(cell) => attach_cell(source, line_starts, cell),
             crate::ast::SheetItem::Source(source_decl) => {
-                attach_source(source, &line_starts, source_decl)
+                attach_source(source, line_starts, source_decl)
             }
-            crate::ast::SheetItem::Error { .. } => {}
+            crate::ast::SheetItem::RelationshipUse(_) | crate::ast::SheetItem::Error { .. } => {}
         }
     }
 }
 
+/// Attaches every file-boundary comment and each sheet's existing nested trivia.
+///
+/// - Precondition: `module` was parsed from exactly `source`.
+/// - Postcondition: each file-boundary comment belongs to exactly one gap.
+/// - Complexity: O(n) in source and AST size, excluding nested trivia scans.
+///
+/// # Examples
+///
+/// ```
+/// let source = "// header\nsheet root {}\n// end\n";
+/// let mut module = adam_lang::AdamAstParser::new().parse_module_str(source).unwrap();
+/// adam_lang::attach_module_trivia(source, &mut module);
+/// assert_eq!(module.comments.len(), 2);
+/// ```
+pub fn attach_module_trivia(source: &str, module: &mut crate::ast::Module) {
+    use cel_parser::trivia::{GapPiece, scan_gap};
+    let line_starts = line_start_byte_offsets(source);
+    module.comments.clear();
+    let mut previous_end = 0;
+    for item in &mut module.items {
+        let span = item.span();
+        let start = line_column_to_byte(source, &line_starts, span.start.start());
+        module.comments.push(
+            scan_gap(source.get(previous_end..start).unwrap_or(""), &[])
+                .into_iter()
+                .filter_map(|piece| match piece {
+                    GapPiece::Comment(comment) => Some(comment),
+                    GapPiece::Punct(_) => None,
+                })
+                .collect(),
+        );
+        previous_end = line_column_to_byte(source, &line_starts, span.end.end());
+        if let crate::ast::ModuleItem::Sheet(sheet) = item {
+            attach_sheet_body(source, &line_starts, sheet);
+            sheet.leading_comment = None;
+        }
+    }
+    module.comments.push(
+        scan_gap(&source[previous_end..], &[])
+            .into_iter()
+            .filter_map(|piece| match piece {
+                GapPiece::Comment(comment) => Some(comment),
+                GapPiece::Punct(_) => None,
+            })
+            .collect(),
+    );
+}
+
 /// Recovers trivia for a relationship block's bindings.
 fn attach_relationship(source: &str, line_starts: &[usize], rel: &mut RelationshipDecl) {
+    attach_opening(source, line_starts, rel.open_brace_span, &mut rel.bindings);
     attach_gaps(source, line_starts, &mut rel.bindings);
     let last_child_end = rel.bindings.last().map(|b| b.span().end.end());
     if let Some(comment) = attach_trailing(source, line_starts, last_child_end, rel) {
@@ -378,6 +470,12 @@ fn attach_relationship(source: &str, line_starts: &[usize], rel: &mut Relationsh
 fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut ConditionalDecl) {
     attach_gaps(source, line_starts, &mut cond.branches);
     for branch in &mut cond.branches {
+        attach_opening(
+            source,
+            line_starts,
+            branch.open_brace_span,
+            &mut branch.relationships,
+        );
         attach_gaps(source, line_starts, &mut branch.relationships);
         let last_child_end = branch.relationships.last().map(|r| r.span().end.end());
         if let Some(comment) = attach_trailing(source, line_starts, last_child_end, branch) {
@@ -388,10 +486,18 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
                 .set_trailing_line_comment(comment);
         }
         for rel in &mut branch.relationships {
-            attach_relationship(source, line_starts, rel);
+            if let crate::ast::BranchItem::Relationship(rel) = rel {
+                attach_relationship(source, line_starts, rel);
+            }
         }
     }
     if let Some(default) = &mut cond.default {
+        attach_opening(
+            source,
+            line_starts,
+            default.open_brace_span,
+            &mut default.relationships,
+        );
         attach_gaps(source, line_starts, &mut default.relationships);
         let last_child_end = default.relationships.last().map(|r| r.span().end.end());
         if let Some(comment) = attach_trailing(source, line_starts, last_child_end, default) {
@@ -402,7 +508,9 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
                 .set_trailing_line_comment(comment);
         }
         for rel in default.relationships.iter_mut() {
-            attach_relationship(source, line_starts, rel);
+            if let crate::ast::BranchItem::Relationship(rel) = rel {
+                attach_relationship(source, line_starts, rel);
+            }
         }
     }
     if let Some(comment) = attach_conditional_trailing(source, line_starts, cond) {
@@ -453,13 +561,32 @@ fn attach_source(source: &str, line_starts: &[usize], source_decl: &mut SourceDe
     attach_require_block(source, line_starts, source_decl.require.as_mut());
 }
 
+/// Attaches trivia between a container's opening brace and its first child.
+///
+/// - Precondition: spans and offsets refer to `source`.
+/// - Complexity: O(n) in the opening gap's length.
+fn attach_opening<T: TriviaTarget>(
+    source: &str,
+    line_starts: &[usize],
+    open: ExprSpan,
+    items: &mut [T],
+) {
+    if let Some(first) = items.first_mut() {
+        let start = after_open_brace(source, line_starts, open.end);
+        let end = line_column_to_byte(source, line_starts, first.span().start.start());
+        let (comment, blank, _) = analyze_gap(source.get(start..end).unwrap_or(""));
+        if let Some(comment) = comment {
+            first.set_leading_comment(comment);
+        }
+        first.set_blank_line_before(blank);
+    }
+}
+
 /// Recovers comments/blank-lines from the gaps between consecutive `items`, attaching each to the
 /// nearest following item — unless the comment's first line begins on the same source line as
 /// the *previous* item's own last token, in which case it attaches to that previous item's
 /// `trailing_line_comment` instead (see <https://github.com/stlab/cel-rs/issues/59>). The first
-/// item in `items` never gets a blank-line-before or leading comment — nothing in this list
-/// precedes it (a blank line or comment between it and this list's own enclosing `{` is a
-/// separate, untracked case; see the module doc's linked issue).
+/// item's opening-brace gap belongs to [`attach_opening`], not this sibling-gap pass.
 fn attach_gaps<T: TriviaTarget>(source: &str, line_starts: &[usize], items: &mut [T]) {
     if items.len() < 2 {
         return;
@@ -833,8 +960,11 @@ mod tests {
             panic!("expected Conditional");
         };
         assert_eq!(
-            cond.branches[0].relationships[1].leading_comment,
-            Some(crate::ast::Comment::Line("second".to_string()))
+            match &cond.branches[0].relationships[1] {
+                crate::ast::BranchItem::Relationship(rel) => &rel.leading_comment,
+                crate::ast::BranchItem::RelationshipUse(call) => &call.leading_comment,
+            },
+            &Some(crate::ast::Comment::Line("second".to_string()))
         );
     }
 
@@ -848,8 +978,11 @@ mod tests {
         };
         let default = cond.default.as_ref().expect("default branch present");
         assert_eq!(
-            default.relationships[1].leading_comment,
-            Some(crate::ast::Comment::Line("second".to_string()))
+            match &default.relationships[1] {
+                crate::ast::BranchItem::Relationship(rel) => &rel.leading_comment,
+                crate::ast::BranchItem::RelationshipUse(call) => &call.leading_comment,
+            },
+            &Some(crate::ast::Comment::Line("second".to_string()))
         );
     }
 
@@ -1231,8 +1364,11 @@ mod tests {
             panic!("expected Conditional");
         };
         assert_eq!(
-            cond.branches[0].relationships[0].trailing_line_comment,
-            Some(crate::ast::Comment::Line("note".to_string()))
+            match &cond.branches[0].relationships[0] {
+                crate::ast::BranchItem::Relationship(rel) => &rel.trailing_line_comment,
+                crate::ast::BranchItem::RelationshipUse(call) => &call.trailing_line_comment,
+            },
+            &Some(crate::ast::Comment::Line("note".to_string()))
         );
         assert_eq!(cond.branches[0].trailing_comment, None);
     }
@@ -1248,8 +1384,11 @@ mod tests {
         };
         let default = cond.default.as_ref().expect("default branch present");
         assert_eq!(
-            default.relationships[0].trailing_line_comment,
-            Some(crate::ast::Comment::Line("note".to_string()))
+            match &default.relationships[0] {
+                crate::ast::BranchItem::Relationship(rel) => &rel.trailing_line_comment,
+                crate::ast::BranchItem::RelationshipUse(call) => &call.trailing_line_comment,
+            },
+            &Some(crate::ast::Comment::Line("note".to_string()))
         );
         assert_eq!(default.trailing_comment, None);
     }
