@@ -210,13 +210,17 @@ pub use ast_parser::AdamAstParser;
 pub use cel_parser::ParseError;
 pub use cell_value::{debug_compound_cell, prepare_compound_cell_formatter};
 pub use composition::{
-    CellOrigin, CellSlot, CompositionBuilder, InstanceOrigin, MethodRecipe, OccurrenceOrigin,
-    TypedTemplate,
+    AuthoredItem, AuthoredRole, CellOrigin, CellSlot, CompositionBuilder, InstanceOrigin,
+    MethodRecipe, OccurrenceOrigin, TypedTemplate,
 };
 pub use fmt::{FormatSourceError, format_module, format_sheet, format_source};
-pub use module::{ModulePath, ModuleSet, check_module};
+pub use module::{
+    CompiledModules, ModuleCompiler, ModulePath, ModuleSet, PreparedRoot, RootCell, check_module,
+};
 pub use parser::{AdamParser, ParsedSheet};
-pub use source_map::{ModuleDiagnostic, SourceId, SourceLabel, SourceLocation, SourceMap};
+pub use source_map::{
+    ModuleCause, ModuleDiagnostic, SourceId, SourceLabel, SourceLocation, SourceMap,
+};
 pub use trivia::{attach_module_trivia, attach_trivia};
 pub use type_registry::TypeRegistry;
 pub use typecheck::check_sheet;

@@ -110,6 +110,73 @@ pub struct OccurrenceOrigin {
     pub inclusion_site: Option<RelationshipSlot>,
     /// Retains a real definition location, or a span-free native label.
     pub label: SourceLabel,
+    /// Retains authored local metadata, independent of definition owners.
+    pub authored: Rc<[AuthoredItem]>,
+}
+
+impl OccurrenceOrigin {
+    /// Borrows authored items, including original method ordinals and invocation sites.
+    ///
+    /// # Examples
+    /// See [`TypedTemplate::instantiate`].
+    pub fn authored_items(&self) -> &[AuthoredItem] {
+        &self.authored
+    }
+}
+
+/// Retains one authored node and its native slots without expanding included definitions.
+///
+/// Parent indices refer only to this definition's authored item slice.
+/// See [`OccurrenceOrigin::authored_items`].
+#[derive(Clone, Debug)]
+pub struct AuthoredItem {
+    /// Distinguishes declaration, method, policy and invocation roles.
+    pub role: AuthoredRole,
+    /// Identifies the immediate authored parent in the same definition.
+    pub parent: Option<usize>,
+    /// Retains the exact authored source owner and span.
+    pub label: SourceLabel,
+    /// Identifies the declared or governed local cell, where applicable.
+    pub cell: Option<adam_rs::CellSlot>,
+    /// Identifies the native relationship or inclusion group, where applicable.
+    pub relationship: Option<RelationshipSlot>,
+    /// Identifies an authored method before whole-method source specialization.
+    pub method_index: Option<usize>,
+    /// Retains an explicit requirement name; unnamed requirements have no name.
+    pub requirement_name: Option<String>,
+    /// Retains the exact expression site independently of its enclosing authored item.
+    pub expression: Option<SourceLabel>,
+}
+
+/// Classifies a local authored record without guessing from label text or output count.
+///
+/// See [`AuthoredItem`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthoredRole {
+    /// Binds a caller cell.
+    Parameter,
+    /// Allocates a private ordinary cell.
+    Cell,
+    /// Allocates a private source.
+    Source,
+    /// Allocates a private output and its sole writer.
+    Out,
+    /// Attaches a private-cell filter.
+    Filter,
+    /// Attaches a private-cell numeric-range filter.
+    RangeFilter,
+    /// Attaches a private-cell requirement.
+    Requirement,
+    /// Registers an ordinary relationship.
+    Relationship,
+    /// Declares an authored alternative direction.
+    Method,
+    /// Includes a reusable definition.
+    Use,
+    /// Selects native relationship groups.
+    Conditional,
+    /// Declares a conditional branch or default.
+    Branch,
 }
 
 /// Retains one direct invocation's flat occurrence records after template drop.
@@ -131,6 +198,8 @@ pub struct CellOrigin {
     pub occurrence: OccurrenceId,
     /// Identifies the local cell within that occurrence's definition.
     pub slot: adam_rs::CellSlot,
+    /// Retains the formal or private declaration's exact source label.
+    pub label: SourceLabel,
 }
 
 /// Constructs fresh type-erased initial values for monomorphized native adapters.
@@ -189,6 +258,9 @@ struct Metadata {
     formals: HashMap<String, CellSlot>,
     children: Vec<Rc<Metadata>>,
     label: SourceLabel,
+    authored: Rc<[AuthoredItem]>,
+    cell_labels: HashMap<adam_rs::CellSlot, SourceLabel>,
+    requirements: HashMap<adam_rs::CellSlot, Vec<Option<String>>>,
 }
 
 impl Drop for Metadata {
@@ -219,6 +291,7 @@ pub struct CompositionBuilder {
     formals: HashMap<String, CellSlot>,
     children: Vec<Rc<Metadata>>,
     label: SourceLabel,
+    authored: Vec<AuthoredItem>,
 }
 
 impl CompositionBuilder {
@@ -227,9 +300,14 @@ impl CompositionBuilder {
     /// # Examples
     /// See the [module example](self).
     pub fn new(types: TypeRegistry) -> Self {
+        Self::with_types(Rc::new(types))
+    }
+
+    /// Shares only the immutable compiler registry, never construction state.
+    pub(crate) fn with_types(types: Rc<TypeRegistry>) -> Self {
         Self {
             native: TemplateBuilder::new(),
-            types: Rc::new(types),
+            types,
             cells: HashMap::new(),
             formals: HashMap::new(),
             children: Vec::new(),
@@ -237,7 +315,22 @@ impl CompositionBuilder {
                 location: None,
                 label: "native template".into(),
             },
+            authored: Vec::new(),
         }
+    }
+
+    /// Retains flat authored metadata after native slots have been assigned.
+    ///
+    /// - Precondition: Native handles belong to this builder; parents precede children.
+    /// - Complexity: O(n) item storage transfer.
+    pub(crate) fn set_authored(&mut self, authored: Vec<AuthoredItem>) {
+        debug_assert!(
+            authored
+                .iter()
+                .enumerate()
+                .all(|(i, a)| a.parent.is_none_or(|p| p < i))
+        );
+        self.authored = authored;
     }
 
     /// Retains a definition label without synthesizing source locations.
@@ -341,6 +434,20 @@ impl CompositionBuilder {
         name: &str,
         shape: TypeShape,
     ) -> Result<CellSlot, ModuleDiagnostic> {
+        self.default_private(name, shape, false)
+    }
+
+    /// Declares a checked canonical default without constructing its value.
+    ///
+    /// # Errors
+    /// Reports unavailable defaults, shapes, capabilities or invalid native declarations.
+    /// - Complexity: O(n + l) shape nodes and name bytes.
+    pub(crate) fn default_private(
+        &mut self,
+        name: &str,
+        shape: TypeShape,
+        source: bool,
+    ) -> Result<CellSlot, ModuleDiagnostic> {
         let adapters = self.adapters(&shape)?;
         self.types.validate_default(&shape).map_err(diagnostic)?;
         let types = self.types.clone();
@@ -363,7 +470,7 @@ impl CompositionBuilder {
                 )?;
                 Ok(frame.call(&[])?.remove(0))
             }),
-            false,
+            source,
         )
         .map_err(diagnostic)?;
         Ok(self.record(native, shape))
@@ -448,6 +555,24 @@ impl CompositionBuilder {
     where
         F: Fn() -> anyhow::Result<DynSegment> + 'static,
     {
+        self.method_pattern(inputs, outputs, outputs.len() > 1, emit)
+    }
+
+    /// Prepares an explicitly whole-result or destructured checked output pattern.
+    ///
+    /// # Errors
+    /// Reports invalid native edges or incompatible complete signatures.
+    /// - Complexity: As [`Self::method`].
+    pub(crate) fn method_pattern<F>(
+        &self,
+        inputs: &[CellSlot],
+        outputs: &[CellSlot],
+        destructure: bool,
+        emit: F,
+    ) -> Result<MethodRecipe, ModuleDiagnostic>
+    where
+        F: Fn() -> anyhow::Result<DynSegment> + 'static,
+    {
         let (input_slots, input_shapes) = self.slots(inputs)?;
         let (output_slots, output_shapes) = self.slots(outputs)?;
         if outputs.is_empty() {
@@ -457,7 +582,7 @@ impl CompositionBuilder {
             emit().map_err(diagnostic)?,
             &input_shapes,
             &output_shapes,
-            outputs.len() > 1,
+            destructure,
             &self.types,
         )
         .map_err(diagnostic)?;
@@ -465,7 +590,7 @@ impl CompositionBuilder {
         let i_shapes = input_shapes.clone();
         let o_shapes = output_shapes.clone();
         let native = adam_rs::MethodRecipe::new(&input_slots, &output_slots, move |i, o| {
-            frame_method(emit()?, i, o, &i_shapes, &o_shapes, &types)
+            frame_method(emit()?, i, o, &i_shapes, &o_shapes, destructure, &types)
         })
         .map_err(diagnostic)?;
         Ok(MethodRecipe {
@@ -749,6 +874,56 @@ impl CompositionBuilder {
             .map_err(diagnostic)
     }
 
+    /// Registers retained literal-key and match emitters without executing either.
+    ///
+    /// Checked canonical values provide equality for scalar and compound match shapes.
+    /// # Errors
+    /// Reports invalid handles or signatures before native mutation.
+    /// - Complexity: Expression preparation plus O(i + g) inputs and groups.
+    pub(crate) fn conditional_owned<F, K>(
+        &mut self,
+        inputs: &[CellSlot],
+        shape: TypeShape,
+        emit: F,
+        keys: K,
+        branches: Vec<Vec<RelationshipSlot>>,
+        default: Vec<RelationshipSlot>,
+    ) -> Result<(), ModuleDiagnostic>
+    where
+        F: Fn() -> anyhow::Result<DynSegment> + 'static,
+        K: Fn() -> anyhow::Result<Vec<Vec<CellValue>>> + 'static,
+    {
+        let (slots, shapes) = self.slots(inputs)?;
+        let types = self.types.clone();
+        let result = types.checked_value_type(&shape).map_err(diagnostic)?;
+        CellValue::validate(&result).map_err(diagnostic)?;
+        crate::cell_value::RawFrame::new(emit().map_err(diagnostic)?, &shapes, &result, &types)
+            .map_err(diagnostic)?;
+        self.native
+            .conditional_factory::<CellValue, _, _>(
+                &slots,
+                move |ids| {
+                    let frame = RefCell::new(crate::cell_value::RawFrame::new(
+                        emit()?,
+                        &shapes,
+                        &result,
+                        &types,
+                    )?);
+                    Ok(MatchExpr::new(
+                        ids.to_vec(),
+                        storage_ids(&shapes),
+                        TypeId::of::<CellValue>(),
+                        |a, b| a.downcast_ref::<CellValue>() == b.downcast_ref::<CellValue>(),
+                        move |args| Ok(Box::new(CellValue(frame.borrow_mut().call(args)?))),
+                    ))
+                },
+                keys,
+                branches,
+                default,
+            )
+            .map_err(diagnostic)
+    }
+
     /// Includes a typed child using complete named bindings before native mutation.
     ///
     /// # Errors
@@ -804,18 +979,43 @@ impl CompositionBuilder {
     ///
     /// # Errors
     /// Rejects included parameters that became private outputs after inclusion.
-    /// - Complexity: O(n + e) local declarations and edges, without DAG expansion.
+    /// - Complexity: O(n + a + e) local declarations, authored records and edges,
+    ///   without DAG expansion.
     ///
     /// # Examples
     /// See the [module example](self).
     pub fn finish(self) -> Result<TypedTemplate, ModuleDiagnostic> {
         let native = Rc::new(self.native.finish().map_err(diagnostic)?);
+        let mut cell_labels = HashMap::new();
+        let mut requirements = HashMap::<_, Vec<_>>::new();
+        for item in &self.authored {
+            if let Some(cell) = &item.cell {
+                match item.role {
+                    AuthoredRole::Parameter
+                    | AuthoredRole::Cell
+                    | AuthoredRole::Source
+                    | AuthoredRole::Out => {
+                        cell_labels.insert(cell.clone(), item.label.clone());
+                    }
+                    AuthoredRole::Requirement => {
+                        requirements
+                            .entry(cell.clone())
+                            .or_default()
+                            .push(item.requirement_name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
         let metadata = Rc::new(Metadata {
             id: native.id(),
             cells: self.cells,
             formals: self.formals,
             children: self.children,
             label: self.label,
+            authored: self.authored.into(),
+            cell_labels,
+            requirements,
         });
         Ok(TypedTemplate { native, metadata })
     }
@@ -886,7 +1086,60 @@ pub struct TypedTemplate {
     metadata: Rc<Metadata>,
 }
 
+impl Clone for TypedTemplate {
+    /// Shares immutable recipes and metadata without copying any live execution state.
+    fn clone(&self) -> Self {
+        Self {
+            native: self.native.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
 impl TypedTemplate {
+    /// Appends genuine source owners while visiting each immutable definition only once.
+    ///
+    /// - Precondition: `sources` already contains every identity in `seen_sources`.
+    /// - Complexity: O(d + a) newly visited metadata nodes, edges and authored records.
+    pub(crate) fn retain_sources(
+        &self,
+        seen_definitions: &mut HashSet<TemplateId>,
+        seen_sources: &mut HashSet<crate::SourceId>,
+        sources: &mut Vec<crate::SourceId>,
+    ) {
+        let mut pending = vec![self.metadata.as_ref()];
+        while let Some(node) = pending.pop() {
+            if !seen_definitions.insert(node.id.clone()) {
+                continue;
+            }
+            for label in std::iter::once(&node.label).chain(
+                node.authored
+                    .iter()
+                    .flat_map(|item| std::iter::once(&item.label).chain(item.expression.iter())),
+            ) {
+                if let Some(location) = &label.location
+                    && seen_sources.insert(location.source.clone())
+                {
+                    sources.push(location.source.clone());
+                }
+            }
+            pending.extend(node.children.iter().map(Rc::as_ref));
+        }
+    }
+
+    /// Borrows flat authored labels and local native slot mappings.
+    ///
+    /// Native templates may have no authored item records.
+    /// # Examples
+    /// ```
+    /// let t = adam_lang::CompositionBuilder::new(adam_lang::TypeRegistry::new()).finish()?;
+    /// assert!(t.authored_items().is_empty());
+    /// # Ok::<(), adam_lang::ModuleDiagnostic>(())
+    /// ```
+    pub fn authored_items(&self) -> &[AuthoredItem] {
+        &self.metadata.authored
+    }
+
     /// Borrows complete formal signatures in declaration order without running factories.
     ///
     /// - Complexity: O(c) traversal for c local declarations, with expected O(1) lookup per formal.
@@ -978,7 +1231,7 @@ impl TypedTemplate {
         let instance = self
             .native
             .instantiate(&mut destination.sheet, bindings)
-            .map_err(|e| self.error(e))?;
+            .map_err(|error| self.construction_error(error))?;
         let definitions = self.definitions();
         let mut occurrences = Vec::with_capacity(instance.occurrences().len());
         let mut source_ids: HashSet<_> = destination.sources.iter().cloned().collect();
@@ -996,7 +1249,22 @@ impl TypedTemplate {
                     .push(CellOrigin {
                         occurrence: occurrence.id().clone(),
                         slot: slot.clone(),
+                        label: definition
+                            .cell_labels
+                            .get(slot)
+                            .unwrap_or(&definition.label)
+                            .clone(),
                     });
+                // Preserve attachment order, including unnamed requirements.
+                if let Some(policies) = definition.requirements.get(slot) {
+                    let ids = destination.sheet.cell_requirements(id).unwrap_or_default();
+                    destination.requirement_names.extend(
+                        policies
+                            .iter()
+                            .zip(ids)
+                            .filter_map(|(name, id)| name.as_ref().map(|name| (*id, name.clone()))),
+                    );
+                }
             }
             if let Some(location) = &definition.label.location
                 && source_ids.insert(location.source.clone())
@@ -1009,6 +1277,7 @@ impl TypedTemplate {
                 template: occurrence.template().clone(),
                 inclusion_site: occurrence.inclusion_site().cloned(),
                 label: definition.label.clone(),
+                authored: definition.authored.clone(),
             });
         }
         destination.method_origins.extend(
@@ -1053,8 +1322,50 @@ impl TypedTemplate {
     /// - Complexity: O(m) formatted message bytes.
     fn error(&self, error: impl std::fmt::Display) -> ModuleDiagnostic {
         ModuleDiagnostic {
+            cause: None,
             message: error.to_string(),
             labels: vec![self.metadata.label.clone()],
+        }
+    }
+
+    /// Retains the native construction error and real authored source owners.
+    ///
+    /// Labels describe implicated local declarations and possible authored invocation
+    /// sites; exact live occurrence resolution remains native provenance's responsibility.
+    /// - Complexity: O(d + a) unique metadata nodes, edges and authored items.
+    fn construction_error(&self, error: adam_rs::TemplateError) -> ModuleDiagnostic {
+        let slot = match &error {
+            adam_rs::TemplateError::Factory { slot, .. }
+            | adam_rs::TemplateError::ForeignHandle { slot }
+            | adam_rs::TemplateError::InvalidDefinition {
+                slot: Some(slot), ..
+            } => Some(slot),
+            _ => None,
+        };
+        let mut labels = vec![self.metadata.label.clone()];
+        for definition in self.definitions().values() {
+            if slot.is_some_and(|slot| definition.cells.contains_key(slot)) {
+                labels.push(definition.label.clone());
+                labels.extend(
+                    definition
+                        .authored
+                        .iter()
+                        .filter(|item| item.cell.as_ref() == slot)
+                        .map(|item| item.label.clone()),
+                );
+            }
+            labels.extend(
+                definition
+                    .authored
+                    .iter()
+                    .filter(|item| item.role == AuthoredRole::Use)
+                    .map(|item| item.label.clone()),
+            );
+        }
+        ModuleDiagnostic {
+            message: error.to_string(),
+            labels,
+            cause: Some(crate::source_map::ModuleCause::new(error)),
         }
     }
 }
@@ -1065,6 +1376,7 @@ impl TypedTemplate {
 pub(crate) fn diagnostic(error: impl std::fmt::Display) -> ModuleDiagnostic {
     let message = error.to_string();
     ModuleDiagnostic {
+        cause: None,
         labels: vec![SourceLabel {
             location: None,
             label: message.clone(),
@@ -1092,13 +1404,14 @@ fn frame_method(
     outputs: &[CellId],
     input_shapes: &[TypeShape],
     output_shapes: &[TypeShape],
+    destructure: bool,
     types: &TypeRegistry,
 ) -> anyhow::Result<Method> {
     let frame = RefCell::new(Frame::new(
         body,
         input_shapes,
         output_shapes,
-        outputs.len() > 1,
+        destructure,
         types,
     )?);
     Ok(Method::new(

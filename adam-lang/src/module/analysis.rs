@@ -2,11 +2,6 @@
 //!
 //! The flat plan retains authored syntax and local ordinals for owning factory materialization.
 
-#![allow(
-    dead_code,
-    reason = "checked plans are the handoff to the next materialization subgate"
-)]
-
 use std::{any::TypeId, collections::HashSet};
 
 use cel_parser::{Expr, ExprSpan, OpLookup, compile_expr};
@@ -98,6 +93,10 @@ impl Expression<'_> {
     /// # Errors
     /// Propagates checked operation emission failures without executing the result.
     /// - Complexity: CEL compilation plus O(nr) identifier comparisons for n names and r reads.
+    #[allow(
+        dead_code,
+        reason = "retains the borrowed checked-plan inspection/emission seam"
+    )]
     pub(super) fn emit(
         &self,
         cells: &[Cell<'_>],
@@ -110,27 +109,63 @@ impl Expression<'_> {
                 .chain(&self.candidate)
                 .all(|cell| *cell < cells.len())
         );
+        Emission {
+            syntax: self.syntax,
+            inputs: self
+                .inputs
+                .iter()
+                .map(|id| (cells[*id].name, types.value_type(&cells[*id].shape))),
+            candidate: self.candidate.map(|id| types.value_type(&cells[id].shape)),
+            descriptor: &self.descriptor,
+            label: &self.label,
+        }
+        .emit(types, lookup)
+    }
+}
+
+/// Borrows planned positional bindings for fresh emission without repeating body analysis.
+pub(super) struct Emission<'a, I> {
+    pub syntax: &'a Expr,
+    pub inputs: I,
+    pub candidate: Option<cel_runtime::ValueType>,
+    pub descriptor: &'a cel_runtime::ValueType,
+    pub label: &'a SourceLabel,
+}
+
+impl<'a, I> Emission<'a, I>
+where
+    I: Clone + Iterator<Item = (&'a str, cel_runtime::ValueType)>,
+{
+    /// Emits one fresh segment with the checked candidate and first-use positional order.
+    ///
+    /// - Precondition: Bindings and descriptors come from analysis in this environment.
+    /// # Errors
+    /// Propagates operation-emission errors without executing any callback.
+    /// - Complexity: CEL compilation plus O(nr) positional name comparisons.
+    pub(super) fn emit(
+        self,
+        types: &TypeRegistry,
+        lookup: &OpLookup,
+    ) -> Result<DynSegment, ModuleDiagnostic> {
         let mut segment = compile_expr(
             self.syntax,
             lookup,
             &types.cel_type_resolver(),
             &mut |name, segment, _| {
                 if name == "_"
-                    && let Some(candidate) = self.candidate
+                    && let Some(candidate) = &self.candidate
                 {
-                    segment.push_argument(0, types.checked_value_type(&cells[candidate].shape)?)?;
+                    segment.push_argument(0, candidate.clone())?;
                     return Ok(true);
                 }
-                if let Some((index, cell)) = self
+                if let Some((index, (_, descriptor))) = self
                     .inputs
-                    .iter()
+                    .clone()
                     .enumerate()
-                    .find(|(_, cell)| cells[**cell].name == name)
+                    .find(|(_, (input, _))| *input == name)
                 {
-                    segment.push_argument(
-                        index + usize::from(self.candidate.is_some()),
-                        types.checked_value_type(&cells[*cell].shape)?,
-                    )?;
+                    segment
+                        .push_argument(index + usize::from(self.candidate.is_some()), descriptor)?;
                     return Ok(true);
                 }
                 Ok(false)
@@ -356,6 +391,7 @@ struct Checker<'a, 'b> {
 /// - Complexity: O(n) formatted message bytes.
 fn failure(message: impl fmt::Display, site: SourceLabel) -> ModuleDiagnostic {
     ModuleDiagnostic {
+        cause: None,
         message: message.to_string(),
         labels: vec![site],
     }
@@ -746,6 +782,7 @@ impl<'a> Checker<'a, '_> {
             && let Some(ineligible) = &child.ineligible
         {
             return Err(ModuleDiagnostic {
+                cause: None,
                 message: "conditional use requires a relationship-only component".into(),
                 labels: vec![site, ineligible.clone()],
             });
@@ -772,6 +809,7 @@ impl<'a> Checker<'a, '_> {
             }
             if cell.shape != child.cells[formal].shape {
                 return Err(ModuleDiagnostic {
+                    cause: None,
                     message: "component argument type mismatch".into(),
                     labels: vec![
                         label(self.owner, argument.cell_span, "actual cell"),
@@ -1008,6 +1046,7 @@ impl Checked<'_> {
                     .collect();
                 if let Err(error) = native.check_source_bindings(&bindings) {
                     errors.push(ModuleDiagnostic {
+                        cause: error.cause.clone(),
                         message: error.to_string(),
                         labels: source_labels(&visits, visit, definition.label.clone()),
                     });
@@ -1032,6 +1071,7 @@ impl Checked<'_> {
                         });
                         if !survives {
                             errors.push(ModuleDiagnostic {
+                                cause: None,
                                 message: "source specialization leaves an empty relationship"
                                     .into(),
                                 labels: source_labels(&visits, visit, item.label.clone()),

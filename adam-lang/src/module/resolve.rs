@@ -40,6 +40,7 @@ pub(super) fn resolve(modules: &ModuleSet) -> Result<Resolved<'_>, Vec<ModuleDia
             result.definitions.push((module, local));
             if let Some(previous) = sites[module].get(&definition.name) {
                 errors.push(ModuleDiagnostic {
+                    cause: None,
                     message: format!("duplicate definition `{}`", definition.name),
                     labels: vec![definition.label().clone(), previous.clone()],
                 });
@@ -56,6 +57,7 @@ pub(super) fn resolve(modules: &ModuleSet) -> Result<Resolved<'_>, Vec<ModuleDia
             let site = label(owner, import.span, "import");
             let target = exported_path(modules, &exports, &import.path).map_err(|message| {
                 ModuleDiagnostic {
+                    cause: None,
                     message,
                     labels: vec![site.clone()],
                 }
@@ -68,6 +70,7 @@ pub(super) fn resolve(modules: &ModuleSet) -> Result<Resolved<'_>, Vec<ModuleDia
                 .expect("parsed import is nonempty");
             let duplicate = if let Some(previous) = sites[module].get(name) {
                 errors.push(ModuleDiagnostic {
+                    cause: None,
                     message: format!("duplicate local or imported name `{name}`"),
                     labels: vec![site.clone(), previous.clone()],
                 });
@@ -115,6 +118,7 @@ pub(super) fn resolve(modules: &ModuleSet) -> Result<Resolved<'_>, Vec<ModuleDia
                             DefinitionBody::Parsed { sheet, .. } if sheet.parameters.is_none())
                         {
                             errors.push(ModuleDiagnostic {
+                                cause: None,
                                 message: "a root sheet is not a reusable component".into(),
                                 labels: vec![site, definition_at(&result, target).label().clone()],
                             });
@@ -126,6 +130,7 @@ pub(super) fn resolve(modules: &ModuleSet) -> Result<Resolved<'_>, Vec<ModuleDia
                         }
                     }
                     Err(message) => errors.push(ModuleDiagnostic {
+                        cause: None,
                         message,
                         labels: vec![site],
                     }),
@@ -250,6 +255,7 @@ fn postorder(edges: &[Vec<Edge>]) -> Result<Vec<usize>, ModuleDiagnostic> {
                         .chain(std::iter::once(edge.label.clone()))
                         .collect();
                     return Err(ModuleDiagnostic {
+                        cause: None,
                         message: "component-use cycle".into(),
                         labels,
                     });

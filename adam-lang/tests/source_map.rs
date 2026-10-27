@@ -29,6 +29,7 @@ fn diagnostics_retain_file_and_text_after_collection_drop() {
         let mut sources = SourceMap::default();
         let source = sources.insert("library.adm2", "sheet library() {}");
         ModuleDiagnostic {
+            cause: None,
             message: "invalid use".into(),
             labels: vec![SourceLabel {
                 location: Some(SourceLocation {

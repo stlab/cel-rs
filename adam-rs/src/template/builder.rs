@@ -521,17 +521,56 @@ impl TemplateBuilder {
         T: Clone + Any + PartialEq + 'static,
         F: Fn(&[CellId]) -> anyhow::Result<MatchExpr> + 'static,
     {
-        for input in inputs {
-            self.check_slot(input)?;
-        }
-        if branches.iter().any(|(keys, _)| keys.is_empty()) {
+        let (keys, groups): (Vec<_>, Vec<_>) = branches.into_iter().unzip();
+        if keys.iter().any(Vec::is_empty) {
             return Err(TemplateError::InvalidDefinition {
                 detail: "conditional branch requires keys",
                 slot: None,
             });
         }
+        self.conditional_factory(inputs, make, move || Ok(keys.clone()), groups, default)
+    }
+
+    /// Registers conditional groups with fresh keys constructed once per instance.
+    ///
+    /// Neither factory executes during preparation. Group ownership, uniqueness and
+    /// relationship-only eligibility are checked before mutation. Keys follow native
+    /// first-match semantics and must have one nonempty vector per declared branch.
+    ///
+    /// # Errors
+    /// Reports invalid inputs/groups before mutation; reports failed factories, invalid
+    /// key counts, empty keys or native conditional errors during construction.
+    /// - Complexity: O(i + b + g) preparation for inputs i, branches b and groups g;
+    ///   construction adds factory costs and O(i + b + k + g + r) for keys k and
+    ///   expanded relationship members r.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut b = adam_rs::TemplateBuilder::new();
+    /// let flag = b.parameter::<bool>("flag")?;
+    /// b.conditional_factory::<bool, _, _>(&[flag],
+    ///     |ids| Ok(adam_rs::MatchExpr::cell(ids[0])),
+    ///     || Ok(vec![vec![true]]), vec![vec![]], vec![])?;
+    /// # Ok::<(), adam_rs::TemplateError>(())
+    /// ```
+    pub fn conditional_factory<T, F, K>(
+        &mut self,
+        inputs: &[CellSlot],
+        make: F,
+        keys: K,
+        branches: Vec<Vec<RelationshipSlot>>,
+        default: Vec<RelationshipSlot>,
+    ) -> Result<(), TemplateError>
+    where
+        T: Clone + Any + PartialEq + 'static,
+        F: Fn(&[CellId]) -> anyhow::Result<MatchExpr> + 'static,
+        K: Fn() -> anyhow::Result<Vec<Vec<T>>> + 'static,
+    {
+        for input in inputs {
+            self.check_slot(input)?;
+        }
         let mut seen = HashSet::new();
-        for group in branches.iter().flat_map(|(_, g)| g).chain(&default) {
+        for group in branches.iter().flatten().chain(&default) {
             if !Rc::ptr_eq(&self.recipe.owner, &group.owner)
                 || group.index >= self.recipe.relationships.len()
                 || self.conditional_groups.contains(&group.index)
@@ -580,12 +619,14 @@ impl TemplateBuilder {
                 live_branches
                     .try_reserve(branches.len())
                     .map_err(|_| TemplateError::Capacity)?;
-                for (keys, slots) in &branches {
-                    let mut live_keys = Vec::new();
-                    live_keys
-                        .try_reserve(keys.len())
-                        .map_err(|_| TemplateError::Capacity)?;
-                    live_keys.extend_from_slice(keys);
+                let keys = keys().map_err(|source| TemplateError::ConditionalFactory { source })?;
+                if keys.len() != branches.len() || keys.iter().any(Vec::is_empty) {
+                    return Err(TemplateError::InvalidDefinition {
+                        detail: "conditional key factory differs from its branches",
+                        slot: None,
+                    });
+                }
+                for (live_keys, slots) in keys.into_iter().zip(&branches) {
                     live_branches.push((
                         live_keys,
                         super::instantiate::group_members(slots, groups, relationships)?,

@@ -1,18 +1,23 @@
-//! Collects supplied modules and checks names and retained bodies without filesystem access.
+//! Compiles supplied modules into immutable factories without filesystem access or execution.
 //!
 //! ```
-//! use adam_lang::{ModulePath, ModuleSet};
+//! use adam_lang::{ModuleCompiler, ModulePath, ModuleSet, TypeRegistry};
 //! let path: ModulePath = "constraints".parse()?;
 //! let mut modules = ModuleSet::new();
 //! modules.insert_source(path.clone(), "constraints.adm2", "sheet empty() {}")?;
 //! modules.check_resolution().map_err(|errors| errors.into_iter().next().unwrap())?;
+//! let compiled = ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+//!     .compile(modules).map_err(|mut errors| errors.remove(0))?;
+//! assert!(compiled.template(&path, "empty").is_some());
 //! # Ok::<(), adam_lang::ModuleDiagnostic>(())
 //! ```
 
 mod analysis;
+pub(crate) mod compile;
 mod resolve;
 
 pub use analysis::check_module;
+pub use compile::{CompiledModules, ModuleCompiler, PreparedRoot, RootCell};
 
 use std::{collections::HashMap, fmt, str::FromStr};
 
@@ -213,6 +218,7 @@ impl ModuleSet {
             .find(|definition| definition.name == name)
         {
             return Err(ModuleDiagnostic {
+                cause: None,
                 message: "duplicate local definition".into(),
                 labels: vec![
                     template.definition_label().clone(),
@@ -289,6 +295,7 @@ fn source_error(
 ) -> ModuleDiagnostic {
     let message = message.to_string();
     ModuleDiagnostic {
+        cause: None,
         labels: vec![SourceLabel {
             location: Some(SourceLocation {
                 source: source.clone(),

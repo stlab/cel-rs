@@ -171,6 +171,7 @@ pub struct SourceLabel {
 /// let diagnostic = adam_lang::ModuleDiagnostic {
 ///     message: "invalid native use".into(),
 ///     labels: vec![adam_lang::SourceLabel { location: None, label: "native".into() }],
+///     cause: None,
 /// };
 /// assert!(diagnostic.labels[0].location.is_none());
 /// ```
@@ -180,7 +181,49 @@ pub struct ModuleDiagnostic {
     pub message: String,
     /// Identifies implicated definitions and uses in diagnostic order.
     pub labels: Vec<SourceLabel>,
+    /// Retains an underlying construction error without replacing it with display text.
+    pub cause: Option<ModuleCause>,
 }
+
+/// Shares an immutable diagnostic cause with identity-based equality.
+///
+/// Clones retain the same error identity; separately constructed causes remain distinct.
+/// See [`ModuleDiagnostic`].
+#[derive(Clone, Debug)]
+pub struct ModuleCause(std::rc::Rc<dyn std::error::Error>);
+
+impl ModuleCause {
+    /// Retains a concrete error, including non-Send native template ownership handles.
+    ///
+    /// # Examples
+    /// ```
+    /// let cause = adam_lang::source_map::ModuleCause::new(std::io::Error::other("failure"));
+    /// assert_eq!(cause, cause.clone());
+    /// ```
+    pub fn new(error: impl std::error::Error + 'static) -> Self {
+        Self(std::rc::Rc::new(error))
+    }
+
+    /// Borrows the original error for source traversal and concrete downcasting.
+    ///
+    /// # Examples
+    /// ```
+    /// let cause = adam_lang::source_map::ModuleCause::new(std::io::Error::other("failure"));
+    /// assert!(cause.as_error().is::<std::io::Error>());
+    /// ```
+    pub fn as_error(&self) -> &(dyn std::error::Error + 'static) {
+        self.0.as_ref()
+    }
+}
+
+impl PartialEq for ModuleCause {
+    /// Compares immutable error identity, not display text.
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ModuleCause {}
 
 impl std::fmt::Display for ModuleDiagnostic {
     /// Formats the primary diagnostic message without rendering source labels.
@@ -191,4 +234,9 @@ impl std::fmt::Display for ModuleDiagnostic {
     }
 }
 
-impl std::error::Error for ModuleDiagnostic {}
+impl std::error::Error for ModuleDiagnostic {
+    /// Borrows the retained original error, if this diagnostic wraps a construction failure.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause.as_ref().map(ModuleCause::as_error)
+    }
+}
