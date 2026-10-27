@@ -3,7 +3,9 @@
 //! directly, per the design doc's testing strategy (handler-level unit tests over full protocol
 //! round-trips where possible).
 
-use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
+use adam_lang::{
+    AdamAstParser, ModuleDiagnostic, ModulePath, ModuleSet, TypeRegistry, check_module, check_sheet,
+};
 use cel_parser::{CELError, SourceSpan};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
@@ -34,11 +36,7 @@ pub fn diagnostics_for_source(source: &str) -> Vec<Diagnostic> {
         Ok(sheet) => sheet,
         Err(e) => return vec![to_diagnostic(e.into())],
     };
-    let mut types = TypeRegistry::new();
-    cel_euclid::register_adam_types(&mut types);
-    let mut lookup = cel_parser::OpLookup::new();
-    cel_std::install(&mut lookup);
-    cel_euclid::install(&mut lookup);
+    let (types, lookup) = configured_environment();
     let type_errors = check_sheet(&sheet, &types, &lookup);
     sheet
         .errors
@@ -46,6 +44,40 @@ pub fn diagnostics_for_source(source: &str) -> Vec<Diagnostic> {
         .chain(type_errors)
         .map(|e| to_diagnostic(e.into()))
         .collect()
+}
+
+/// Checks a registered module collection without executing defaults, methods or match keys.
+///
+/// Uses the same standard and Euclid libraries as [`diagnostics_for_source`].
+/// Includes all registered definitions and retains the actual source owners.
+/// An unknown requested module returns a diagnostic, never a source-only fallback.
+/// - Complexity: the configured libraries' setup plus [`check_module`]'s analysis cost.
+///
+/// # Examples
+///
+/// ```
+/// let path = "app".parse().unwrap();
+/// let mut modules = adam_lang::ModuleSet::new();
+/// modules.insert_source(path, "file:///app.adm2", "sheet app {}").unwrap();
+/// assert!(adam_lsp::diagnostics::diagnostics_for_module(
+///     &"app".parse().unwrap(), &modules
+/// ).is_empty());
+/// ```
+pub fn diagnostics_for_module(module: &ModulePath, modules: &ModuleSet) -> Vec<ModuleDiagnostic> {
+    let (types, lookup) = configured_environment();
+    check_module(module, modules, &types, &lookup)
+}
+
+/// Creates the common source-only and module-aware nonexecuting type environment.
+///
+/// - Complexity: O(s²) for s installed operation signatures.
+fn configured_environment() -> (TypeRegistry, cel_parser::OpLookup) {
+    let mut types = TypeRegistry::new();
+    cel_euclid::register_adam_types(&mut types);
+    let mut lookup = cel_parser::OpLookup::new();
+    cel_std::install(&mut lookup);
+    cel_euclid::install(&mut lookup);
+    (types, lookup)
 }
 
 /// Converts a [`CELError`] into an LSP [`Diagnostic`] at error severity.

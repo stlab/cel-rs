@@ -1,4 +1,4 @@
-//! Wires `lsp-server`'s stdio transport to [`crate::diagnostics::diagnostics_for_source`].
+//! Wires `lsp-server` to the explicit module and source-only diagnostic hosts.
 
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ use lsp_types::{
     request::{Formatting, Request as _},
 };
 
-use crate::diagnostics::diagnostics_for_source;
+use crate::modules::ModuleSources;
 
 /// The JSON-RPC "Method not found" error code, reused by LSP for unhandled request methods.
 const METHOD_NOT_FOUND: i32 = -32601;
@@ -35,9 +35,10 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Performs the LSP initialize handshake on `connection`, then serves `textDocument/didOpen`
-/// and `textDocument/didChange` notifications as `textDocument/publishDiagnostics` until the
-/// client shuts the server down.
+/// Performs initialization, then publishes source/module diagnostics until shutdown.
+///
+/// Reads the caller-owned `moduleSources` wire snapshot described in the
+/// [crate documentation](crate), and accepts complete configuration replacements.
 ///
 /// Exposed separately from [`run`] so tests can drive an in-memory [`Connection::memory`] pair
 /// instead of real stdio.
@@ -45,14 +46,28 @@ pub fn run() -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns `Err` under the same conditions as [`run`].
+///
+/// # Examples
+///
+/// ```no_run
+/// let (server, _client) = lsp_server::Connection::memory();
+/// adam_lsp::serve(&server)?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 pub fn serve(connection: &Connection) -> anyhow::Result<()> {
     let capabilities = serde_json::to_value(ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         document_formatting_provider: Some(OneOf::Left(true)),
         ..Default::default()
     })?;
-    connection.initialize(capabilities)?;
-    main_loop(connection)
+    let options = connection.initialize(capabilities)?;
+    let mut modules = ModuleSources::default();
+    modules.configure(
+        options
+            .get("initializationOptions")
+            .unwrap_or(&serde_json::Value::Null),
+    );
+    main_loop(connection, modules)
 }
 
 /// Dispatches every message on `connection` until a `shutdown`/`exit` sequence ends the server.
@@ -60,12 +75,8 @@ pub fn serve(connection: &Connection) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns `Err` if a message can't be read from or sent to `connection` (a broken transport).
-// `lsp_types::Uri`'s `Hash`/`Eq` are keyed on `as_str()` only (see its `impl Hash for Uri`); the
-// interior-mutable field clippy's flagging here never participates in either, so it's safe as a
-// map key despite the lint.
-#[allow(clippy::mutable_key_type)]
-fn main_loop(connection: &Connection) -> anyhow::Result<()> {
-    let mut documents: HashMap<Uri, String> = HashMap::new();
+fn main_loop(connection: &Connection, mut modules: ModuleSources) -> anyhow::Result<()> {
+    let mut documents: HashMap<String, String> = HashMap::new();
     for msg in &connection.receiver {
         match msg {
             Message::Request(req) => {
@@ -74,7 +85,9 @@ fn main_loop(connection: &Connection) -> anyhow::Result<()> {
                 }
                 handle_request(connection, &documents, req)?;
             }
-            Message::Notification(not) => handle_notification(connection, &mut documents, not)?,
+            Message::Notification(not) => {
+                handle_notification(connection, &mut documents, &mut modules, not)?
+            }
             Message::Response(_) => {}
         }
     }
@@ -88,11 +101,9 @@ fn main_loop(connection: &Connection) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns `Err` only if sending the response fails (a broken transport).
-// See the matching `#[allow]` on `main_loop` for why `HashMap<Uri, _>` is fine despite the lint.
-#[allow(clippy::mutable_key_type)]
 fn handle_request(
     connection: &Connection,
-    documents: &HashMap<Uri, String>,
+    documents: &HashMap<String, String>,
     req: Request,
 ) -> anyhow::Result<()> {
     match req.method.as_str() {
@@ -104,7 +115,7 @@ fn handle_request(
                     // gets no edits, the same "nothing to do" response as a syntax error — not an error
                     // response.
                     let edits = documents
-                        .get(&params.text_document.uri)
+                        .get(params.text_document.uri.as_str())
                         .map(|source| format_edits(source))
                         .unwrap_or_default();
                     connection
@@ -132,9 +143,11 @@ fn handle_request(
     Ok(())
 }
 
-/// Handles one client notification, publishing fresh diagnostics on `didOpen`/`didChange` and
-/// recording the document's current text in `documents` so a later `textDocument/formatting`
-/// request can look it up by URI (that request's params carry only a URI, not the text).
+/// Applies document/configuration changes and republishes all affected source owners.
+///
+/// Open documents overlay registered revisions by exact URI; closing restores the
+/// supplied revision. Malformed notifications leave documents unchanged.
+/// - Complexity: diagnostic analysis and serialization plus O(n) full-text storage.
 ///
 /// # Errors
 ///
@@ -142,11 +155,10 @@ fn handle_request(
 /// transport). A `didOpen`/`didChange` notification whose params fail to deserialize is logged to
 /// stderr and skipped rather than propagated, so one malformed client message can't take down the
 /// server.
-// See the matching `#[allow]` on `main_loop` for why `HashMap<Uri, _>` is fine despite the lint.
-#[allow(clippy::mutable_key_type)]
 fn handle_notification(
     connection: &Connection,
-    documents: &mut HashMap<Uri, String>,
+    documents: &mut HashMap<String, String>,
+    modules: &mut ModuleSources,
     not: ServerNotification,
 ) -> anyhow::Result<()> {
     match not.method.as_str() {
@@ -162,14 +174,10 @@ fn handle_notification(
                 }
             };
             documents.insert(
-                params.text_document.uri.clone(),
-                params.text_document.text.clone(),
+                params.text_document.uri.as_str().to_owned(),
+                params.text_document.text,
             );
-            publish(
-                connection,
-                &params.text_document.uri,
-                &params.text_document.text,
-            )?;
+            publish_all(connection, documents, modules)?;
         }
         DidChangeTextDocument::METHOD => {
             let params: DidChangeTextDocumentParams =
@@ -184,31 +192,95 @@ fn handle_notification(
                     }
                 };
             if let Some(change) = params.content_changes.into_iter().last() {
-                documents.insert(params.text_document.uri.clone(), change.text.clone());
-                publish(connection, &params.text_document.uri, &change.text)?;
+                documents.insert(params.text_document.uri.as_str().to_owned(), change.text);
+                publish_all(connection, documents, modules)?;
             }
+        }
+        "textDocument/didClose" => {
+            let params: lsp_types::DidCloseTextDocumentParams =
+                match serde_json::from_value(not.params) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        eprintln!("adam-lsp: ignoring malformed didClose: {error}");
+                        return Ok(());
+                    }
+                };
+            documents.remove(params.text_document.uri.as_str());
+            // Clear stale source-only diagnostics; module publications below replace this.
+            publish(connection, params.text_document.uri, Vec::new())?;
+            publish_all(connection, documents, modules)?;
+        }
+        "workspace/didChangeConfiguration" => {
+            let params: lsp_types::DidChangeConfigurationParams =
+                match serde_json::from_value(not.params) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        eprintln!("adam-lsp: ignoring malformed didChangeConfiguration: {error}");
+                        return Ok(());
+                    }
+                };
+            let old = modules.diagnostics(documents);
+            modules.configure(&params.settings);
+            let fresh = modules.diagnostics(documents);
+            for uri in old.keys().filter(|uri| !fresh.contains_key(*uri)) {
+                publish(connection, uri.parse()?, Vec::new())?;
+            }
+            publish_diagnostics(connection, fresh)?;
         }
         _ => {}
     }
     Ok(())
 }
 
-/// Computes diagnostics for `source` and sends them as a `textDocument/publishDiagnostics`
-/// notification for `uri`.
+/// Sends one complete diagnostic replacement for `uri`.
+///
+/// - Complexity: O(d) for the serialized diagnostic size.
 ///
 /// # Errors
 ///
 /// Returns `Err` if sending the notification on `connection` fails (a broken transport).
-fn publish(connection: &Connection, uri: &Uri, source: &str) -> anyhow::Result<()> {
+fn publish(
+    connection: &Connection,
+    uri: Uri,
+    diagnostics: Vec<lsp_types::Diagnostic>,
+) -> anyhow::Result<()> {
     let params = PublishDiagnosticsParams {
-        uri: uri.clone(),
-        diagnostics: diagnostics_for_source(source),
+        uri,
+        diagnostics,
         version: None,
     };
     let notification = ServerNotification::new(PublishDiagnostics::METHOD.to_string(), params);
     connection
         .sender
         .send(Message::Notification(notification))?;
+    Ok(())
+}
+
+/// Rechecks all supplied and open sources and publishes clean/error replacements.
+///
+/// - Complexity: the source snapshot's analysis cost plus diagnostic serialization.
+/// # Errors
+/// Returns an error if the transport fails.
+fn publish_all(
+    connection: &Connection,
+    documents: &HashMap<String, String>,
+    modules: &ModuleSources,
+) -> anyhow::Result<()> {
+    publish_diagnostics(connection, modules.diagnostics(documents))
+}
+
+/// Sends a complete diagnostic replacement for each URI in the supplied map.
+///
+/// - Complexity: O(d) for the serialized diagnostic size.
+/// # Errors
+/// Returns an error if the transport fails or an internal URI cannot be parsed.
+fn publish_diagnostics(
+    connection: &Connection,
+    diagnostics: std::collections::BTreeMap<String, Vec<lsp_types::Diagnostic>>,
+) -> anyhow::Result<()> {
+    for (uri, diagnostics) in diagnostics {
+        publish(connection, uri.parse()?, diagnostics)?;
+    }
     Ok(())
 }
 
@@ -261,6 +333,26 @@ mod tests {
     };
 
     use super::{format_edits, serve};
+
+    /// Module formatting preserves imports, aliases, parameter types and named bindings.
+    #[test]
+    fn format_edits_preserve_complete_modules_and_refuse_recovered_items() {
+        let source = "use lib::pair as p; sheet helper(a:f64){} sheet app { cell x:f64; relationship p(a:x); }";
+        let edits = format_edits(source);
+        assert_eq!(edits.len(), 1);
+        let formatted = &edits[0].new_text;
+        assert!(formatted.contains("use lib::pair as p;"), "{formatted}");
+        assert!(formatted.contains("helper(a: f64)"), "{formatted}");
+        assert!(formatted.contains("p(a: x)"), "{formatted}");
+        assert_eq!(format_edits(formatted)[0].new_text, *formatted);
+        for malformed in [
+            "use lib::; sheet good {}",
+            "sheet helper(a: ) {} sheet app {}",
+            "sheet good {} sheet bad { cell : i32; }",
+        ] {
+            assert!(format_edits(malformed).is_empty(), "{malformed}");
+        }
+    }
 
     #[test]
     fn format_edits_is_empty_for_a_syntax_error() {

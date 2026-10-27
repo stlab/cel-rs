@@ -18,6 +18,79 @@ The extension looks for the `adam-lsp` binary in this order:
    open workspace folder.
 3. `adam-lsp` on `PATH`.
 
+## Explicit modules
+
+Configure every imported module and importing root in `adam-lang.modules`. Paths
+are relative to the **first workspace folder**; multi-root workspaces use that
+same base for all entries. No workspace folder is needed for ordinary standalone
+single-sheet diagnostics.
+
+```json
+{
+  "adam-lang.modules": {
+    "constraints": "sheets/constraints.adm2",
+    "app": "sheets/app.adm2"
+  }
+}
+```
+
+For example, `constraints.adm2` can contain
+`sheet ordered(a: f64, b: f64) {}`; `app.adm2` can contain:
+
+```text
+use constraints::ordered as ord;
+sheet app {
+    cell x: f64;
+    cell y: f64;
+    relationship ord(a: x, b: y);
+}
+```
+
+The extension reads only explicitly mapped files. Invalid mappings, duplicate
+source files, paths outside the workspace, invalid UTF-8 and read failures show
+visible errors; none become successful empty sources. File create/change/delete
+events refresh mapped files, and configuration/workspace-folder changes refresh
+the complete mapping. Open text takes precedence over disk snapshots until close.
+Module checking never runs initializers, methods, defaults or conditional keys.
+The Problems panel includes definition/use-site related locations across files.
+Formatting supports imports, aliases, parameter types and named bindings, and
+refuses any recovered syntax error.
+
+### Wire contract for other clients
+
+Send `initializationOptions.moduleSources` as exact `{path, uri, text}` records:
+
+```json
+{
+  "moduleSources": [{
+    "path": "constraints",
+    "uri": "file:///repo/sheets/constraints.adm2",
+    "text": "sheet ordered(a: f64, b: f64) {}"
+  }]
+}
+```
+
+`path` is an explicit `::`-separated module identity, `uri` is its absolute source
+URI and `text` is the complete owned revision. Paths and URIs must each be unique.
+Include roots in this collection too; the server does not infer a module identity
+for an unregistered document. It checks all definitions, not an instantiated root.
+Unregistered documents use the source-only checker with the same standard and
+Euclid libraries. Merely adding imports to an unregistered document does not
+silently opt it into guessed module ownership.
+
+Send the same complete object in `workspace/didChangeConfiguration.settings` for
+source or configuration refresh. Empty `moduleSources: []` explicitly removes
+the mapping and clears removed-source diagnostics. Report a tooling read failure
+as `{"moduleSourcesError":"message"}`, not an empty source or successful empty
+snapshot. The server retains the last valid ownership mapping, blocks checking
+with configuration diagnostics until recovery, and never silently falls back to
+source-only checking for registered modules. All open edits overlay by exact URI
+through refreshes; `didClose` restores the latest supplied revision.
+
+Checking conservatively republishes all registered/open sources so dependents
+and cleared errors stay current. Core libraries perform no filesystem discovery,
+glob imports, automatic language migration or root execution.
+
 ## Trying it out
 
 The `.vscode/launch.json`/`tasks.json` in this folder only take effect when **this folder**

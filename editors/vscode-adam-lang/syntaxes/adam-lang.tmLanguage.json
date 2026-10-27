@@ -8,6 +8,7 @@
     { "include": "#types" },
     { "include": "#strings" },
     { "include": "#numbers" },
+    { "include": "#bindings" },
     { "include": "#operators" }
   ],
   "repository": {
@@ -28,7 +29,7 @@
       "patterns": [
         {
           "name": "keyword.declaration.adam-lang",
-          "match": "\\b(sheet|cell|source|relationship|conditional|out|require|filter)\\b"
+          "match": "\\b(sheet|cell|source|relationship|conditional|out|require|filter|use|as)\\b"
         },
         {
           "name": "keyword.other.wildcard.adam-lang",
@@ -59,6 +60,10 @@
           "match": "\\b\\d+(\\.\\d+)?([eE][+-]?\\d+)?(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)?\\b"
         }
       ]
+    },
+    "bindings": {
+      "name": "variable.parameter.adam-lang",
+      "match": "\\b[A-Za-z_][A-Za-z_0-9]*\\b(?=\\s*:(?![:=]))"
     },
     "operators": {
       "patterns": [
