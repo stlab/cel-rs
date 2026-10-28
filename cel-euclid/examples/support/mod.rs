@@ -8,6 +8,12 @@ use cel_euclid::{Rect, Transform2D};
 use cel_runtime::DynClosure;
 
 /// Compiles general checked geometry operations once for candidate validation.
+///
+/// Validation checks feasibility; Adam propagation remains responsible for fitting.
+///
+/// # Examples
+/// The parent runner creates one boundary and reuses [`Self::write_validated`]
+/// for its transform and crop edits.
 pub struct InputBoundary {
     /// Tests source-anchor feasibility and representability of inverse bounds.
     check: DynClosure,
@@ -20,6 +26,9 @@ impl InputBoundary {
     ///
     /// # Errors
     /// Returns a parser/evaluator error if the validation expression cannot compile.
+    ///
+    /// # Examples
+    /// See [`InputBoundary`].
     pub fn new() -> Result<Self> {
         let mut types = adam_lang::TypeRegistry::new();
         cel_euclid::register_adam_types(&mut types);
@@ -57,6 +66,9 @@ impl InputBoundary {
     /// # Errors
     /// Returns an error for non-finite/nonpositive/unrepresentable rectangles,
     /// invalid checked inverses or bounds, or a source anchor not strictly inside the image.
+    ///
+    /// # Examples
+    /// [`Self::write_validated`] performs this check before the runner writes a cell.
     pub fn validate(&self, image: Rect, crop: Rect, transform: Transform2D) -> Result<()> {
         ensure!(valid_rect(image), "invalid or unrepresentable source image");
         ensure!(valid_rect(crop), "invalid or unrepresentable source crop");
@@ -65,6 +77,28 @@ impl InputBoundary {
             "infeasible source anchor or unrepresentable inverse crop bounds"
         );
         Ok(())
+    }
+
+    /// Validates a candidate before invoking its caller-owned input write exactly once.
+    ///
+    /// # Errors
+    /// Returns validation errors without invoking `write`, or propagates the
+    /// writer's error without rolling back effects performed by the writer.
+    ///
+    /// - Complexity: The fixed validation expression plus the writer's time and space.
+    ///
+    /// # Examples
+    /// The parent runner supplies its transform or crop cell write as the
+    /// callback, so rejected geometry never changes those source cells.
+    pub fn write_validated(
+        &self,
+        image: Rect,
+        crop: Rect,
+        transform: Transform2D,
+        write: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.validate(image, crop, transform)?;
+        write()
     }
 }
 
@@ -79,4 +113,41 @@ fn valid_rect(rect: Rect) -> bool {
         && rect.max_x() > rect.min_x()
         && rect.max_y() > rect.min_y()
         && rect.center().is_finite()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cel_euclid::{Point2D, Size2D};
+
+    /// Commits valid candidates, preserves writes on rejected input, and propagates write failures.
+    #[test]
+    fn validation_guards_input_writes() -> Result<()> {
+        let boundary = InputBoundary::new()?;
+        let image = Rect::new(Point2D::zero(), Size2D::new(100.0, 80.0));
+        let prior = Rect::new(Point2D::new(10.0, 10.0), Size2D::new(20.0, 40.0));
+        let candidate = Rect::new(Point2D::new(20.0, 10.0), Size2D::new(20.0, 30.0));
+        let mut committed = prior;
+        assert!(
+            boundary
+                .write_validated(image, candidate, Transform2D::scale(0.0, 1.0), || {
+                    committed = candidate;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(committed, prior);
+        boundary.write_validated(image, candidate, Transform2D::identity(), || {
+            committed = candidate;
+            Ok(())
+        })?;
+        assert_eq!(committed, candidate);
+        let error = boundary
+            .write_validated(image, candidate, Transform2D::identity(), || {
+                anyhow::bail!("write failed")
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "write failed");
+        Ok(())
+    }
 }

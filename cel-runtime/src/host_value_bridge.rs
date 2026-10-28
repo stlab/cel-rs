@@ -12,7 +12,9 @@ use crate::{ValueKind, ValueType};
 /// Retains concrete scalar box moves without optional capability requirements.
 #[derive(Clone, Debug)]
 pub(crate) struct LeafBridge {
+    /// Names the exact concrete scalar type for boundary diagnostics.
     pub(crate) name: Cow<'static, str>,
+    /// Moves a prevalidated concrete scalar box into its matching allocation.
     write: unsafe fn(Box<dyn Any>, *mut u8),
 }
 
@@ -37,6 +39,7 @@ impl LeafBridge {
 
 /// Validates scalar identity or complete canonical ownership before execution.
 pub(crate) struct HostValuePlan {
+    /// Binds the checked host boundary's exact recursive representation.
     value_type: ValueType,
 }
 

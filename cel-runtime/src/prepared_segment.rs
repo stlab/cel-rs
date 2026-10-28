@@ -17,8 +17,11 @@ use crate::{DynSegment, ValueRepr};
 ///
 /// Hosts validate their storage adapters once, then lend exact canonical pointers.
 pub struct PreparedRawSegment {
+    /// Owns the validated independent instruction body.
     body: DynSegment,
+    /// Binds exact result ownership and extraction.
     result: ResultPlan,
+    /// Counts the borrowed positional pointers required on each call.
     arity: usize,
 }
 
@@ -94,10 +97,15 @@ impl PreparedRawSegment {
 ///
 /// Calls borrow arguments, clone only emitted reads, and return independent owners.
 pub struct PreparedSegment<A: ValueRepr, R: ValueRepr> {
+    /// Owns the frozen instruction body.
     body: DynSegment,
+    /// Binds the canonical borrowed argument tuple layout.
     arguments: ArgumentPlan,
+    /// Reuses fixed-arity pointer slots, rebound before each call.
     pointers: Vec<*const u8>,
+    /// Binds exact result ownership and extraction.
     result: ResultPlan,
+    /// Associates the validated body with its concrete boundary witnesses.
     witness: PhantomData<fn(A, R)>,
 }
 

@@ -164,25 +164,25 @@ fn opaque_arities_and_preloaded_arguments() -> anyhow::Result<()> {
     let mut body = DynSegment::new::<()>();
     body.op0(|| 30u32);
     body.op0(|| 12u32);
-    body.op2(|a: u32, b: u32| a + b)?;
+    body.op2(|a: u32, b: u32| (a, b))?;
     body.op0(|| 100u32);
     body.op0(|| 10u32);
-    body.op3(|a: u32, b: u32, c: u32| a + b - c)?;
-    body.op1(|value: u32| value.to_string())?;
-    assert_eq!(body.call0::<String>()?, "132");
-    assert_eq!(body.call0::<String>()?, "132");
+    body.op3(|pair: (u32, u32), b: u32, c: u32| (pair.0, pair.1, b, c))?;
+    body.op1(|value: (u32, u32, u32, u32)| format!("{value:?}"))?;
+    assert_eq!(body.call0::<String>()?, "(30, 12, 100, 10)");
+    assert_eq!(body.call0::<String>()?, "(30, 12, 100, 10)");
 
     let mut body = DynSegment::new::<(u32,)>();
     body.just(12u32);
-    body.op2(|a: u32, b: u32| a + b)?;
-    assert_eq!(body.call1::<u32, u32>(30)?, 42);
-    assert_eq!(body.call1::<u32, u32>(1)?, 13);
-    assert!(body.call1::<i32, u32>(1).is_err());
+    body.op2(|a: u32, b: u32| (a, b))?;
+    assert_eq!(body.call1::<u32, (u32, u32)>(30)?, (30, 12));
+    assert_eq!(body.call1::<u32, (u32, u32)>(1)?, (1, 12));
+    assert!(body.call1::<i32, (u32, u32)>(1).is_err());
 
     let mut body = DynSegment::new::<(u8, f64)>();
-    body.op2(|a: u8, b: f64| f64::from(a) + b)?;
+    body.op2(|a: u8, b: f64| f64::from(a) - b)?;
     let typed = Segment::<(u8, f64), CStackList<f64, CNil<()>>>::try_from(body)?;
-    assert_eq!(typed.call((7, 2.0))?, 9.0);
+    assert_eq!(typed.call((7, 2.0))?, 5.0);
     Ok(())
 }
 
@@ -452,8 +452,18 @@ fn registered_capabilities_survive_checked_tuple_ownership() -> anyhow::Result<(
             .with_debug::<Leaf<i32>>()?,
     )?;
     body.make_tuple(1, 0)?;
+    let value = body.call_dyn_value(&[])?;
+    let cloned = value.try_clone()?;
+    assert!(value.try_eq(&cloned)?);
+    assert_eq!(value.try_debug()?, cloned.try_debug()?);
     assert_eq!(
-        body.call_dyn_value(&[])?
+        cloned
+            .try_into_typed::<Cons<Leaf<i32>, Nil>>()?
+            .into_rust_tuple(),
+        (7,)
+    );
+    assert_eq!(
+        value
             .try_into_typed::<Cons<Leaf<i32>, Nil>>()?
             .into_rust_tuple(),
         (7,)

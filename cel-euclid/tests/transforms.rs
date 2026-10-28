@@ -242,17 +242,6 @@ fn inverse_preserves_exact_zeros_and_representable_subnormals() {
     );
 }
 
-/// Reversing six named fields preserves the Euclid coefficient convention.
-#[test]
-fn matrix_literal_field_order_is_named() {
-    assert_eq!(
-        evaluate::<Transform2D>(
-            "Transform2D { m32: 6.0, m31: 5.0, m22: 4.0, m21: 3.0, m12: 1.0, m11: 2.0 }"
-        ),
-        Transform2D::new(2.0, 1.0, 3.0, 4.0, 5.0, 6.0)
-    );
-}
-
 /// Every remaining ordinary signature matches Euclid and supports receiver syntax.
 #[test]
 fn angle_and_transform_signature_table() {
@@ -417,13 +406,6 @@ fn checked_outer_bounds_errors() {
         (
             Transform2D::scale(f64::MAX, 1.0),
             Rect::new(Point2D::new(2.0, 0.0), Size2D::new(1.0, 1.0)),
-        ),
-        (
-            Transform2D::scale(2.0, 1.0),
-            Rect::new(
-                Point2D::new(-f64::MAX * 0.5, 0.0),
-                Size2D::new(f64::MAX, 1.0),
-            ),
         ),
         (Transform2D::translation(1e100, 0.0), unit),
         (

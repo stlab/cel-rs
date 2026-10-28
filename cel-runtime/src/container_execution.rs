@@ -42,8 +42,11 @@ pub(crate) fn stack_position(ambient: usize, layout: Layout) -> anyhow::Result<(
 /// Fields/elements are initialized in source order, independently of their
 /// physical offsets. Array payload capacity equals length, except for ZSTs.
 pub(crate) struct ContainerPlan {
+    /// Binds the complete recursive tuple or array representation.
     value_type: ValueType,
+    /// Describes the tuple bytes or array element allocation.
     payload_layout: Layout,
+    /// Counts source-ordered fields or elements, including ZSTs.
     length: usize,
 }
 
@@ -187,9 +190,13 @@ impl ContainerPlan {
 /// A disjoint destination avoids in-place permutation clobbering of tail-first
 /// fields, including values whose source and destination orders are opposite.
 pub(crate) struct StackFramePlan {
+    /// Binds the disjoint canonical destination layout.
     container: ContainerPlan,
+    /// Marks the caller-owned byte prefix beneath all operands.
     ambient: usize,
+    /// Records source-ordered aligned operand positions.
     offsets: Vec<usize>,
+    /// Marks the byte boundary after the final operand.
     end: usize,
 }
 
@@ -259,6 +266,7 @@ impl StackFramePlan {
 
 /// Freezes cloneable canonical argument types and their physical frame offsets.
 pub(crate) struct ArgumentPlan {
+    /// Binds the canonical tuple layout used for positional pointer borrowing.
     container: ContainerPlan,
 }
 
@@ -356,16 +364,23 @@ impl ArgumentPlan {
 
 /// Freezes a single result's stack position relative to ambient storage.
 pub(crate) struct ResultPlan {
+    /// Binds the result's representation and ownership operations.
     value_type: ValueType,
+    /// Marks the caller-owned byte prefix preserved during extraction.
     ambient: usize,
+    /// Marks the aligned start of the live result.
     offset: usize,
+    /// Marks the byte boundary after the result.
     end: usize,
 }
 
 /// Restores the pre-clone length after recursive clone cleanup has finished unwinding.
 struct CloneRollback<'a> {
+    /// Exclusively borrows the stack receiving cloned values.
     stack: &'a mut RawStack,
+    /// Records the byte length restored after child-owner cleanup.
     ambient: usize,
+    /// Distinguishes unfinished initialization from a committed clone.
     armed: bool,
 }
 

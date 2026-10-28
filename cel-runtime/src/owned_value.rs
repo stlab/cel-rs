@@ -32,7 +32,9 @@ thread_local! {
 ///
 /// This owner deallocates storage but does not destroy its contents.
 pub(crate) struct Allocation {
+    /// Points to the allocation or a layout-aligned dangling address for a ZST.
     pub(crate) pointer: NonNull<u8>,
+    /// Retains the exact layout required to release this allocation.
     pub(crate) layout: Layout,
 }
 
@@ -78,8 +80,11 @@ impl Drop for Allocation {
 /// assert_eq!(owner.try_into_typed::<Leaf<String>>().unwrap(), "hello");
 /// ```
 pub struct OwnedValue {
+    /// Owns storage matching the frozen value layout.
     allocation: Allocation,
+    /// Binds complete representation, ownership, and optional capability plans.
     value_type: ValueType,
+    /// Records whether this allocation currently contains an initialized owner.
     live: bool,
 }
 
@@ -98,6 +103,7 @@ pub struct OwnedValue {
 /// ```
 #[derive(Clone)]
 pub struct ValueFormatter {
+    /// Retains the exact shape and recursive formatting capabilities checked at preparation.
     value_type: ValueType,
 }
 
@@ -630,8 +636,11 @@ impl Children<'_> {
 
 /// Destroys a live child prefix backwards, including remaining children on unwind.
 pub(crate) struct Prefix<'a> {
+    /// Points to the caller-owned tuple or element allocation.
     pub(crate) base: *mut u8,
+    /// Supplies source-ordered child layouts and ownership operations.
     pub(crate) children: Children<'a>,
+    /// Counts the live child prefix still requiring destruction.
     pub(crate) initialized: usize,
 }
 
@@ -867,6 +876,25 @@ unsafe fn debug_raw(value_type: &ValueType, pointer: *const u8, output: &mut Str
 
 #[cfg(test)]
 mod tests {
+    /// Reuses prepared formatting for matching owners and rejects unavailable or mismatched shapes.
+    #[test]
+    fn prepared_formatter_contract() -> anyhow::Result<()> {
+        let plain = super::OwnedValue::new::<crate::Leaf<String>>(String::from("first"));
+        assert!(plain.prepare_debug().is_err());
+        let owner = plain.with_value_type(
+            crate::ValueType::leaf::<String>().with_debug::<crate::Leaf<String>>()?,
+        )?;
+        let formatter = owner.prepare_debug()?;
+        let other = super::OwnedValue::new::<crate::Leaf<String>>(String::from("second"));
+        assert_eq!(formatter.format(&owner)?, "\"first\"");
+        assert_eq!(formatter.clone().format(&other)?, "\"second\"");
+        let mismatch = super::OwnedValue::new::<crate::Leaf<u32>>(7);
+        assert!(formatter.format(&mismatch).is_err());
+        assert_eq!(formatter.format(&owner)?, "\"first\"");
+        assert_eq!(mismatch.try_into_typed::<crate::Leaf<u32>>()?, 7);
+        Ok(())
+    }
+
     use super::*;
     use crate::{Array, ArrayOf, Cons, IntoCStackList, IntoRustTuple, Leaf, Nil};
     use std::{cell::Cell, rc::Rc};

@@ -24,8 +24,11 @@ use std::slice::SliceIndex;
 /// ```
 #[derive(Debug)]
 pub struct RawVec {
+    /// Owns raw storage including bytes preceding its aligned logical origin.
     buffer: Vec<MaybeUninit<u8>>,
+    /// Retains the nonzero power-of-two alignment required at the logical origin.
     base_alignment: usize,
+    /// Locates the aligned logical origin within the allocation.
     start_offset: usize,
 }
 

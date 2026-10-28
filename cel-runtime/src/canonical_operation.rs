@@ -13,8 +13,11 @@ use crate::value_type::{ArrayOf, ValueRepr, ValueType};
 
 /// Binds one canonical value to an absolute stack position and its ambient length.
 struct Slot {
+    /// Marks the ambient byte prefix before this operand's alignment padding.
     before: usize,
+    /// Marks the aligned start of this operand's live representation.
     offset: usize,
+    /// Binds exact representation identity, layout, and ownership operations.
     value_type: ValueType,
 }
 
@@ -44,10 +47,15 @@ impl Slot {
 /// are transferred to concrete Rust owners before executing user code.
 /// Emission consumes all descriptor metadata; only the user callback is retained.
 pub(crate) struct OperationPlan {
+    /// Marks the caller-owned byte prefix beneath this operation's inputs.
     origin: usize,
+    /// Counts the inputs transferred from the live stack to this operation.
     owned_inputs: usize,
+    /// Bounds the alignment required by the complete input/result frame.
     alignment: usize,
+    /// Retains source-ordered operand positions until emission binds their moves.
     operands: Vec<Slot>,
+    /// Binds the result's exact representation and destruction.
     result: ValueType,
 }
 

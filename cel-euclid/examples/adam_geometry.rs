@@ -67,8 +67,10 @@ fn main() -> Result<()> {
         let transform = Transform2D::translation(-anchor.x, -anchor.y)
             .then(&Transform2D::rotation(Angle::degrees(degrees)))
             .then(&Transform2D::translation(anchor.x, anchor.y));
-        boundary.validate(image, overlay, transform)?;
-        parsed.write(transform_id, transform)?;
+        boundary.write_validated(image, overlay, transform, || {
+            parsed.write(transform_id, transform)?;
+            Ok(())
+        })?;
         propagate(&mut parsed)?;
         let fitted = *parsed.read::<Rect>(crop_id)?;
         let presentation = *parsed.read::<Transform2D>(parsed.cell_names["presentation"].0)?;
@@ -91,8 +93,10 @@ fn main() -> Result<()> {
         println!("{degrees:>4} degrees: overlay={overlay:?}, effective={fitted:?}");
     }
     let edited = Rect::new(Point2D::new(10.0, 10.0), Size2D::new(80.0, 80.0));
-    boundary.validate(image, edited, Transform2D::identity())?;
-    parsed.write(crop_id, edited)?;
+    boundary.write_validated(image, edited, Transform2D::identity(), || {
+        parsed.write(crop_id, edited)?;
+        Ok(())
+    })?;
     propagate(&mut parsed)?;
     ensure!(
         *parsed.sheet.source::<Rect>(crop_id)? == edited,

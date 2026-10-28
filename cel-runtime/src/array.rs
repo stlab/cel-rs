@@ -31,10 +31,15 @@ use std::ptr::NonNull;
 /// This layout is independent of Rust's unspecified `Vec<T>` header layout.
 #[repr(C)]
 pub(crate) struct RawArray {
+    /// Points to the owned element allocation, or an aligned dangling address for ZSTs.
     pub(crate) ptr: NonNull<()>,
+    /// Counts initialized logical elements, including ZSTs.
     pub(crate) len: usize,
+    /// Retains the original vector capacity for allocation reconstruction.
     pub(crate) capacity: usize,
+    /// Destroys the initialized members using their bound concrete or erased type.
     drop_members: unsafe fn(&mut RawArray),
+    /// Retains recursive element ownership metadata for an erased array.
     pub(crate) element_type: Option<crate::ValueType>,
 }
 
@@ -161,7 +166,9 @@ unsafe fn drop_erased_members(raw: &mut RawArray) {
 /// ```
 #[repr(transparent)]
 pub struct Array<T> {
+    /// Owns the allocation and exactly the initialized `T` elements.
     pub(crate) raw: RawArray,
+    /// Associates the erased header with its concrete element type.
     marker: PhantomData<T>,
 }
 

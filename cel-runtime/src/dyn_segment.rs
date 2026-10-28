@@ -126,10 +126,15 @@ impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
 /// `new::<()>()` starts an independent body with borrowed positional reads.
 /// Other `new` argument lists retain the direct, preloaded opaque-leaf ABI.
 pub struct DynSegment {
+    /// Owns emitted operations and their captures.
     pub(crate) segment: RawSegment,
+    /// Retains preloaded argument identities in source order.
     pub(crate) argument_ids: Vec<TypeId>,
+    /// Describes every current live stack value in physical push order.
     pub(crate) stack_ids: Vec<StackInfo>,
+    /// Marks the caller-owned byte prefix beneath this fragment.
     pub(crate) base_stack_index: usize,
+    /// Records positional borrowed reads and their complete required shapes.
     pub(crate) argument_reads: Vec<(usize, ValueType)>,
     /// Records byte boundaries for construction-time layout, without runtime ownership.
     stack_ends: Vec<usize>,

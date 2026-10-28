@@ -26,7 +26,17 @@ fn geometry_closure_parameter_uses_registered_adam_type() {
     let mut parser = adam_lang::AdamParser::new(registry, lookup);
     // An uninvoked closure has no registered cell type in this environment.
     // Invocation exposes its registered result and exercises annotation resolution.
-    parser
+    let mut sheet = parser
         .parse_str("sheet s { out r: Rect := (|r: Rect| r)(Rect { origin: Point2D { x: 0.0, y: 0.0 }, size: Size2D { width: 1.0, height: 1.0 } }); }")
         .unwrap_or_else(|error| panic!("{}", error.message()));
+    sheet.propagate().unwrap();
+    assert_eq!(
+        *sheet
+            .read::<cel_euclid::Rect>(sheet.cell_names["r"].0)
+            .unwrap(),
+        cel_euclid::Rect::new(
+            cel_euclid::Point2D::new(0.0, 0.0),
+            cel_euclid::Size2D::new(1.0, 1.0),
+        )
+    );
 }

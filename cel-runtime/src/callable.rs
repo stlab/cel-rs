@@ -34,7 +34,9 @@ use crate::{ArgumentList, DynClosure, PreparedSegment, ValueRepr};
 /// ```
 #[repr(transparent)]
 pub struct Callable<Args, R> {
+    /// Shares the exact native or interpreted body under its trusted binding.
     carrier: DynClosure,
+    /// Associates the carrier with its validated canonical argument/result witnesses.
     signature: PhantomData<fn(&Args) -> R>,
 }
 

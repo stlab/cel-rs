@@ -24,6 +24,7 @@ use std::mem;
 /// unsafe { values.drop_in_place::<String>(0) };
 /// ```
 pub struct RawSequence {
+    /// Owns aligned value bytes; callers retain responsibility for typed destruction.
     buffer: RawVec,
 }
 

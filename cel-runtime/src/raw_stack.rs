@@ -8,27 +8,51 @@ use std::mem::size_of;
 /// base alignment of the stack, which is the maximum alignment of any value stored in the stack.
 /// Live values are owned until popped, explicitly released, or destroyed in reverse push order.
 #[derive(Debug)]
+/// # Thread confinement
+///
+/// The erased owners may contain non-`Send` values, so the stack remains on its
+/// creating thread.
+///
+/// ```compile_fail
+/// let mut stack = cel_runtime::RawStack::with_base_alignment(4096);
+/// stack.push(std::rc::Rc::new(()));
+/// std::thread::spawn(move || drop(stack));
+/// ```
 pub struct RawStack {
+    /// Owns the aligned bytes occupied by live stack values.
     buffer: RawVec,
+    /// Destroys one initialized logical slot per entry, in reverse order.
     owners: Vec<fn(&mut RawStack)>,
+    /// Retains layout and destruction metadata for erased raw slots.
     raw_owners: Vec<RawOwner>,
+    /// Prevents erased non-`Send`/non-`Sync` owners from crossing thread boundaries.
+    thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 /// Records layout and optional erased destruction only for a raw-byte slot.
 #[derive(Debug)]
 struct RawOwner {
+    /// Identifies this raw slot's logical position among all owners.
     depth: usize,
+    /// Marks the byte prefix before this slot's alignment padding.
     before: usize,
+    /// Records the slot's required alignment.
     align: usize,
+    /// Records the initialized value's byte size.
     size: usize,
+    /// Supplies recursive destruction when the raw slot owns a canonical value.
     ty: Option<ValueType>,
 }
 
 /// Restores a stack checkpoint unless explicitly disarmed.
 struct UnwindGuard<'a> {
+    /// Exclusively borrows the stack whose suffix this guard owns.
     stack: &'a mut RawStack,
+    /// Marks the byte prefix preserved by cleanup.
     byte_origin: usize,
+    /// Marks the logical owner prefix preserved by cleanup.
     depth: usize,
+    /// Distinguishes rollback cleanup from a committed successful call.
     armed: bool,
 }
 
@@ -67,6 +91,7 @@ impl RawStack {
             buffer: RawVec::with_base_alignment(base_alignment),
             owners: Vec::new(),
             raw_owners: Vec::new(),
+            thread_bound: std::marker::PhantomData,
         }
     }
 

@@ -62,15 +62,29 @@ impl<H: 'static, T: List + CStackListHeadLimit> StackResult for CStackList<H, T>
 ///     .call((42.0, )).unwrap(),       // call the segment with an argument 42
 ///     "94");                          // the result is (42 * 2 + 10).to_string()
 /// ```
+/// # Thread confinement
+///
+/// Captures need not implement `Send` or `Sync`; the erased program remains
+/// thread-confined even when its argument and result types are thread-safe.
+///
+/// ```compile_fail
+/// use cel_runtime::{Segment, SegmentCallable};
+/// let captured = std::rc::Rc::new(7usize);
+/// let body = Segment::<()>::new().op0(move || *captured);
+/// std::thread::spawn(move || body.call(()));
+/// ```
 pub struct Segment<
     Args: IntoList + 'static,
     Stack: List = ReverseList<<Args as IntoList>::Output<CNil<()>>>,
 > {
+    /// Owns the instruction stream and its thread-confined captures.
     segment: RawSegment,
+    /// Binds the argument and current stack types without storing their values.
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
 impl<Args: IntoList + 'static> Default for Segment<Args> {
+    /// Constructs an instruction-free segment with the declared initial argument stack.
     fn default() -> Self {
         Self::new()
     }
@@ -78,6 +92,13 @@ impl<Args: IntoList + 'static> Default for Segment<Args> {
 
 impl<Args: IntoList + 'static> Segment<Args> {
     /// Creates a new empty segment with no operations.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{Segment, SegmentCallable};
+    /// assert_eq!(Segment::<(String,)>::new().call((String::from("owned"),))?, "owned");
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
     #[must_use]
     pub fn new() -> Segment<Args> {
         Segment {
@@ -93,7 +114,15 @@ where
     Stack: ListTypeIteratorAdvance<TypeId>,
 {
     type Error = anyhow::Error;
+    /// Binds a dynamic preloaded opaque-leaf frame to its exact static signature.
+    ///
+    /// # Errors
+    /// Rejects different argument/result types, non-opaque descriptors,
+    /// borrowed positional reads, and nonzero ambient stack origins.
+    ///
+    /// - Complexity: O(a + s) metadata comparisons for a arguments and s result fields.
     fn try_from(value: DynSegment) -> Result<Self, Self::Error> {
+        /// Names the physical top-first list corresponding to source-ordered arguments.
         type ArgList<Args> = ReverseList<<Args as IntoList>::Output<CNil<()>>>;
 
         ensure!(
@@ -134,7 +163,7 @@ where
     Stack: StackResult + 'static,
     Stack::Tail: CStackListHeadLimit,
 {
-    /// Private method to change the stack type.
+    /// Transfers the raw program into the phantom stack produced by its last operation.
     fn into<NewStack: List + 'static>(self) -> Segment<Args, NewStack> {
         Segment {
             segment: self.segment,
@@ -142,12 +171,13 @@ where
         }
     }
 
-    /*     pub fn indirect<N: 'static>(mut self) -> Segment<Args, Stack::PushFront<&Stack::Index<N>>> {
-        self.segment.indirect::<N, T>();
-        self.into()
-    } */
-
     /// Pushes a nullary operation that takes no arguments and returns a value of type R.
+    ///
+    /// - Complexity: Amortized O(size of `F` + alignment of `F`) capture storage;
+    ///   raising capture alignment also relocates the existing stored capture bytes.
+    ///
+    /// # Examples
+    /// See [`Segment`].
     pub fn op0<R, F>(mut self, op: F) -> Segment<Args, Stack::Push<R>>
     where
         F: Fn() -> R + 'static,
@@ -158,6 +188,17 @@ where
     }
 
     /// Pushes a fallible nullary operation that returns `Result<R>`.
+    ///
+    /// Execution returns the operation's error through [`SegmentCallable::call`].
+    /// - Complexity: The capture-storage insertion cost of [`Self::op0`].
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{Segment, SegmentCallable};
+    /// let body = Segment::<()>::new().op0r(|| Ok(String::from("owned")));
+    /// assert_eq!(body.call(())?, "owned");
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
     pub fn op0r<R, F>(mut self, op: F) -> Segment<Args, Stack::Push<R>>
     where
         F: Fn() -> Result<R> + 'static,
@@ -168,6 +209,11 @@ where
     }
 
     /// Pushes a unary operation that takes the current stack value and returns a new value.
+    ///
+    /// - Complexity: The capture-storage insertion cost of [`Self::op0`].
+    ///
+    /// # Examples
+    /// See [`Segment`].
     pub fn op1<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
         Stack: CStackListHeadPadded,
@@ -179,6 +225,20 @@ where
     }
 
     /// Pushes a fallible unary operation that takes the current stack value and returns `Result<R>`.
+    ///
+    /// Execution returns the operation's error through [`SegmentCallable::call`].
+    /// - Complexity: The capture-storage insertion cost of [`Self::op0`].
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{Segment, SegmentCallable};
+    /// let body = Segment::<(i32,)>::new().op1r(|value| {
+    ///     value.checked_mul(2).ok_or_else(|| anyhow::anyhow!("overflow"))
+    /// });
+    /// assert_eq!(body.call((21,))?, 42);
+    /// assert!(body.call((i32::MAX,)).is_err());
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
     pub fn op1r<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
         Stack: CStackListHeadPadded,
@@ -189,6 +249,12 @@ where
         self.into()
     }
     /// Pushes a binary operation that takes the top two stack values and returns a new value.
+    ///
+    /// The earlier source operand becomes the callback's first argument.
+    /// - Complexity: The capture-storage insertion cost of [`Self::op0`].
+    ///
+    /// # Examples
+    /// See [`Segment`].
     pub fn op2<R, F>(
         mut self,
         op: F,
@@ -208,11 +274,22 @@ where
     }
 
     /// Executes all operations in the segment and returns the final result.
+    ///
+    /// # Errors
+    /// Propagates operation errors after destroying the live owned frame.
+    ///
+    /// - Complexity: O(n) dispatches plus callback costs for n operations;
+    ///   allocates storage for the maximum live stack.
     pub(crate) fn call0(&self) -> Result<Stack::Head> {
         self.finish(RawStack::with_base_alignment(self.segment.base_alignment()))
     }
 
     /// Executes the owned frame and extracts its statically described result.
+    ///
+    /// # Errors
+    /// Propagates operation errors after destroying remaining live stack values.
+    ///
+    /// - Complexity: O(n) dispatches plus callback costs for n operations.
     fn finish(&self, mut stack: RawStack) -> Result<Stack::Head> {
         unsafe {
             self.segment.call0_stack(&mut stack)?;
@@ -221,6 +298,11 @@ where
     }
 
     /// Executes a one-argument segment and returns its statically described result.
+    ///
+    /// # Errors
+    /// Propagates operation errors after destroying the live owned frame.
+    ///
+    /// - Complexity: The execution and storage costs of [`Self::call0`].
     pub(crate) fn call1<A: 'static>(&self, (a,): (A,)) -> Result<Stack::Head> {
         let mut stack =
             RawStack::with_base_alignment(self.segment.base_alignment().max(align_of::<A>()));
@@ -229,6 +311,11 @@ where
     }
 
     /// Executes a two-argument segment and returns its statically described result.
+    ///
+    /// # Errors
+    /// Propagates operation errors after destroying the live owned frame.
+    ///
+    /// - Complexity: The execution and storage costs of [`Self::call0`].
     pub(crate) fn call2<A: 'static, B: 'static>(&self, (a, b): (A, B)) -> Result<Stack::Head> {
         let mut stack = RawStack::with_base_alignment(
             self.segment
@@ -257,6 +344,14 @@ pub trait SegmentCallable<Args> {
     /// The result type produced by calling with `Args`.
     type Output;
     /// Invokes the segment with the supplied arguments.
+    ///
+    /// Implementations return the statically described result or an operation
+    /// error after cleaning the owned execution frame.
+    /// - Complexity: O(n) dispatches plus callback costs for n operations;
+    ///   allocates the maximum live frame.
+    ///
+    /// # Examples
+    /// See [`SegmentCallable`].
     fn call(&self, args: Args) -> Self::Output;
 }
 
@@ -265,6 +360,11 @@ where
     T::Tail: EmptyList + CStackListHeadLimit,
 {
     type Output = Result<T::Head>;
+    /// Executes the zero-argument body and returns its single result.
+    ///
+    /// # Errors
+    /// Propagates body errors after frame cleanup.
+    /// - Complexity: The execution and storage costs of [`SegmentCallable::call`].
     fn call(&self, _args: ()) -> Self::Output {
         self.call0()
     }
@@ -275,6 +375,11 @@ where
     T::Tail: EmptyList + CStackListHeadLimit,
 {
     type Output = Result<T::Head>;
+    /// Consumes one argument and executes the body to its single result.
+    ///
+    /// # Errors
+    /// Propagates body errors after frame cleanup.
+    /// - Complexity: The execution and storage costs of [`SegmentCallable::call`].
     fn call(&self, args: (A,)) -> Self::Output {
         self.call1(args)
     }
@@ -286,6 +391,11 @@ where
     T::Tail: EmptyList + CStackListHeadLimit,
 {
     type Output = Result<T::Head>;
+    /// Consumes source-ordered arguments and executes the body to its single result.
+    ///
+    /// # Errors
+    /// Propagates body errors after frame cleanup.
+    /// - Complexity: The execution and storage costs of [`SegmentCallable::call`].
     fn call(&self, args: (A, B)) -> Self::Output {
         self.call2(args)
     }
@@ -332,12 +442,9 @@ mod tests {
     /// Returns an unmodified argument even when the segment has no instructions.
     #[test]
     fn identity_segment() {
-        assert_eq!(
-            Segment::<(String,)>::new()
-                .call((String::from("owned"),))
-                .unwrap(),
-            "owned"
-        );
+        for body in [Segment::<(String,)>::new(), Segment::<(String,)>::default()] {
+            assert_eq!(body.call((String::from("owned"),)).unwrap(), "owned");
+        }
     }
 
     /// Validates and executes a dynamically checked signed segment through its typed view.
