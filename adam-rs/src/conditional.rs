@@ -276,12 +276,15 @@ mod tests {
     }
 
     #[test]
+    /// Checks that conditional identities satisfy the Copy bound.
     fn conditional_id_is_copy() {
+        /// Accepts only carriers that implement Copy.
         fn takes_copy<T: Copy>(_: T) {}
         takes_copy(ConditionalId::default());
     }
 
     #[test]
+    /// Checks the input identity and output type of a cell-backed match expression.
     fn match_expr_cell_wraps_a_single_cell() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -294,6 +297,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks unary match-expression types and its computed value.
     fn match_expr_from_fn_1_stores_correct_type_ids_and_computes_value() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -317,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks binary match-expression types and its computed value.
     fn match_expr_from_fn_2_stores_correct_type_ids_and_computes_value() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -342,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a cell-backed subject exposes its single input.
     fn match_cells_returns_single_cell_for_cell_variant() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -355,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a computed subject exposes every declared input in order.
     fn match_cells_returns_all_inputs_for_expr_variant() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -373,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preservation of an erased match callback's failure.
     fn match_expr_new_reports_the_error_a_failing_function_returns() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();

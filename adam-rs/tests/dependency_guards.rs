@@ -3,11 +3,13 @@
 
 use adam_rs::{Error, ErrorSite, Filter, MatchExpr, Method, Sheet};
 
+/// Creates an integer upper-bound filter using the supplied dynamic argument.
 fn min_filter(bound: adam_rs::CellId) -> Filter {
     Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b)))
 }
 
 #[test]
+/// Checks rejection of a filter argument derived from its governed cell.
 fn validate_rejects_an_argument_derived_from_the_filtered_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
@@ -34,6 +36,7 @@ fn validate_rejects_an_argument_derived_from_the_filtered_cell() {
 }
 
 #[test]
+/// Checks rejection of the sum-based filter dependency cycle from issue 153.
 fn validate_rejects_the_issue_153_sum_example() {
     // z = x + y with methods z <- (x, y) and x <- (z, y); y filtered by z. y is never an
     // output, so the edge y -> z of z <- (x, y) always exists.
@@ -55,6 +58,7 @@ fn validate_rejects_the_issue_153_sum_example() {
 }
 
 #[test]
+/// Checks rejection of the two-relationship filter cycle from issue 153.
 fn validate_rejects_the_issue_153_two_relationship_example() {
     // R1 over {x, y, z} with all three single-output methods, R2 over {w, y}; y filtered
     // by z. R1's z <- (x, y) makes z depend on y regardless of which plan runs.
@@ -84,6 +88,7 @@ fn validate_rejects_the_issue_153_two_relationship_example() {
 }
 
 #[test]
+/// Checks acceptance and deferred conformance for an upstream filter argument.
 fn add_filter_accepts_an_upstream_argument_and_conforms_on_propagate() {
     let mut sheet = Sheet::new();
     let hi = sheet.add_cell(3_i32);
@@ -99,6 +104,7 @@ fn add_filter_accepts_an_upstream_argument_and_conforms_on_propagate() {
 }
 
 #[test]
+/// Checks acceptance of an argument derived from a self-reference aspiration.
 fn add_filter_accepts_an_argument_computed_from_a_self_referencing_input() {
     // (x, y) <- (x, q) reads x at its pre-round value, so y does not depend on x and
     // filtering x by y closes no cycle.
@@ -128,6 +134,7 @@ fn add_filter_accepts_an_argument_computed_from_a_self_referencing_input() {
 }
 
 #[test]
+/// Checks rejection of a filter closing a conditional guard-dependency cycle.
 fn validate_rejects_a_filter_closing_an_existing_conditional_guard() {
     // Conditional on m governs k -> o; filtering m by o closes m -gate-> o -filter-> m.
     let mut sheet = Sheet::new();
@@ -149,6 +156,7 @@ fn validate_rejects_a_filter_closing_an_existing_conditional_guard() {
 }
 
 #[test]
+/// Checks validation after a new relationship creates a filter dependency cycle.
 fn validate_rejects_a_relationship_that_makes_a_filter_argument_dependent() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
@@ -173,6 +181,7 @@ fn validate_rejects_a_relationship_that_makes_a_filter_argument_dependent() {
 }
 
 #[test]
+/// Checks rejection of a relationship feeding a match cell from its governed branch.
 fn validate_rejects_a_relationship_that_feeds_a_match_cell_from_its_branch() {
     // Conditional on p governs k -> o; a later unconditional o -> p closes the cycle.
     let mut sheet = Sheet::new();
@@ -196,6 +205,7 @@ fn validate_rejects_a_relationship_that_feeds_a_match_cell_from_its_branch() {
 }
 
 #[test]
+/// Checks rejection of a branch's direct write to its own match cell.
 fn validate_rejects_a_single_method_branch_that_writes_its_own_match_cell() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(0_i32);
@@ -214,6 +224,7 @@ fn validate_rejects_a_single_method_branch_that_writes_its_own_match_cell() {
 }
 
 #[test]
+/// Checks rejection of an indirect branch-to-match dependency.
 fn validate_rejects_a_branch_feeding_the_match_cell_through_another_relationship() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -247,6 +258,7 @@ fn validate_rejects_a_branch_feeding_the_match_cell_through_another_relationship
 }
 
 #[test]
+/// Checks acceptance of branches that only read their match contributors.
 fn add_conditional_accepts_a_multi_method_branch_that_only_reads_match_contributors() {
     // a feeds p; the branch relationship over {a, b, c} always reads a and writes b or c,
     // so nothing it governs reaches p.
@@ -277,6 +289,7 @@ fn add_conditional_accepts_a_multi_method_branch_that_only_reads_match_contribut
 }
 
 #[test]
+/// Checks rejection of a conditional closing an existing filter guard cycle.
 fn validate_rejects_a_conditional_closing_an_existing_filter_guard() {
     // y filtered by z; a conditional on y governing k -> z closes y -gate-> z -filter-> y.
     let mut sheet = Sheet::new();
@@ -297,6 +310,7 @@ fn validate_rejects_a_conditional_closing_an_existing_filter_guard() {
 }
 
 #[test]
+/// Checks static dependency rejection before propagation mutates published state.
 fn propagate_reports_dependency_cycle_before_mutating_state() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
@@ -315,6 +329,7 @@ fn propagate_reports_dependency_cycle_before_mutating_state() {
 }
 
 #[test]
+/// Checks revalidation after a later declaration introduces a guard cycle.
 fn validate_reports_a_guard_cycle_added_after_successful_validation() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(1_i32);

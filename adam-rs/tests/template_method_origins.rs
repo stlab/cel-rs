@@ -3,6 +3,7 @@
 use adam_rs::{Method, MethodRecipe, Sheet, TemplateBuilder};
 
 #[test]
+/// Checks bulk and checked method-origin agreement after template specialization.
 fn bulk_method_origins_match_checked_lookup_after_specialization() {
     let mut builder = TemplateBuilder::new();
     let a = builder.parameter::<i32>("a").unwrap();

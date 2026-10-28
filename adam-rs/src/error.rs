@@ -274,6 +274,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Checks that mismatch fields distinguish expected and supplied types.
     fn type_mismatch_fields_convention() {
         use std::any::TypeId;
         let expected = TypeId::of::<i32>();
@@ -297,6 +298,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that mismatch formatting identifies the type failure.
     fn type_mismatch_display_contains_type_mismatch() {
         let err = Error::TypeMismatch {
             expected: TypeId::of::<i32>(),
@@ -307,11 +309,13 @@ mod tests {
     }
 
     #[test]
+    /// Checks that unknown-identity formatting identifies invalid input.
     fn invalid_id_display_contains_invalid() {
         assert!(Error::InvalidId.to_string().contains("invalid"));
     }
 
     #[test]
+    /// Checks that conflict formatting identifies an overconstrained graph.
     fn conflict_display_contains_overconstrained() {
         assert!(
             Error::Conflict { sites: vec![] }
@@ -321,11 +325,13 @@ mod tests {
     }
 
     #[test]
+    /// Checks that execution-cycle formatting identifies the cycle.
     fn cycle_display_contains_cycle() {
         assert!(Error::Cycle { sites: vec![] }.to_string().contains("cycle"));
     }
 
     #[test]
+    /// Checks that method-failure formatting includes its underlying message.
     fn method_failed_display_contains_source_message() {
         let err = Error::MethodFailed {
             error: anyhow::anyhow!("division by zero"),
@@ -335,6 +341,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that malformed-method formatting identifies invalid input.
     fn invalid_method_display_contains_invalid() {
         assert!(
             Error::InvalidMethod { sites: vec![] }
@@ -344,13 +351,16 @@ mod tests {
     }
 
     #[test]
+    /// Checks that runtime failures satisfy the standard error interface.
     fn error_implements_std_error() {
+        /// Accepts a borrowed value through the standard error interface.
         fn takes_error(_: &dyn std::error::Error) {}
         takes_error(&Error::InvalidId);
         takes_error(&Error::Conflict { sites: vec![] });
     }
 
     #[test]
+    /// Checks that a failed method exposes its underlying error.
     fn method_failed_source_returns_some() {
         let err = Error::MethodFailed {
             error: anyhow::anyhow!("inner"),
@@ -360,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that structural failures expose no underlying callback error.
     fn non_method_failed_variants_have_no_source() {
         assert!(std::error::Error::source(&Error::InvalidId).is_none());
         assert!(std::error::Error::source(&Error::Conflict { sites: vec![] }).is_none());
@@ -383,6 +394,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that conditional-validation formatting names the component.
     fn invalid_conditional_display_contains_conditional() {
         assert!(
             Error::InvalidConditional { sites: vec![] }
@@ -392,11 +404,13 @@ mod tests {
     }
 
     #[test]
+    /// Checks that conditional-validation failure has no underlying error.
     fn invalid_conditional_has_no_source() {
         assert!(std::error::Error::source(&Error::InvalidConditional { sites: vec![] }).is_none());
     }
 
     #[test]
+    /// Checks that incompatible-method formatting identifies the cell mismatch.
     fn mismatched_method_cells_display_contains_cells() {
         assert!(
             Error::MismatchedMethodCells { sites: vec![] }
@@ -406,6 +420,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that malformed-output formatting identifies the output sets.
     fn invalid_method_outputs_display_contains_outputs() {
         assert!(
             Error::InvalidMethodOutputs { sites: vec![] }
@@ -415,16 +430,19 @@ mod tests {
     }
 
     #[test]
+    /// Checks that malformed-Out formatting identifies invalid input.
     fn invalid_output_display_contains_invalid() {
         assert!(Error::InvalidOutput.to_string().contains("invalid"));
     }
 
     #[test]
+    /// Checks that malformed-Out failure has no underlying error.
     fn invalid_output_has_no_source() {
         assert!(std::error::Error::source(&Error::InvalidOutput).is_none());
     }
 
     #[test]
+    /// Checks that cell-kind formatting names the rejected kind.
     fn invalid_cell_kind_display_contains_kind() {
         assert!(
             Error::InvalidCellKind { sites: vec![] }
@@ -437,6 +455,7 @@ mod tests {
     // claim the cell "belongs to a terminal output", which stopped being true once `out` cells
     // became usable as inputs, and never covered the `Source`-kind case at all.
     #[test]
+    /// Checks that cell-kind formatting avoids the obsolete terminal terminology.
     fn invalid_cell_kind_display_does_not_mention_terminal() {
         assert!(
             !Error::InvalidCellKind { sites: vec![] }
@@ -446,21 +465,25 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a rejected cell kind has no underlying error.
     fn invalid_cell_kind_has_no_source() {
         assert!(std::error::Error::source(&Error::InvalidCellKind { sites: vec![] }).is_none());
     }
 
     #[test]
+    /// Checks that filter-validation formatting names the filter.
     fn invalid_filter_display_contains_filter() {
         assert!(Error::InvalidFilter.to_string().contains("filter"));
     }
 
     #[test]
+    /// Checks that filter-validation failure has no underlying error.
     fn invalid_filter_has_no_source() {
         assert!(std::error::Error::source(&Error::InvalidFilter).is_none());
     }
 
     #[test]
+    /// Checks that requirement-validation formatting names the requirement.
     fn invalid_requirement_display_contains_requirement() {
         assert!(
             Error::InvalidRequirement
@@ -470,11 +493,13 @@ mod tests {
     }
 
     #[test]
+    /// Checks that requirement-validation failure has no underlying error.
     fn invalid_requirement_has_no_source() {
         assert!(std::error::Error::source(&Error::InvalidRequirement).is_none());
     }
 
     #[test]
+    /// Checks that guard-dependency formatting identifies the cycle.
     fn dependency_cycle_display_contains_cycle() {
         assert!(
             Error::DependencyCycle { sites: vec![] }
@@ -484,6 +509,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that seed-cycle formatting distinguishes seed dependencies.
     fn seed_cycle_display_mentions_seed_dependency_cycle() {
         assert!(
             Error::SeedCycle { sites: vec![] }
@@ -493,11 +519,13 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a guard-dependency cycle has no underlying error.
     fn dependency_cycle_has_no_source() {
         assert!(std::error::Error::source(&Error::DependencyCycle { sites: vec![] }).is_none());
     }
 
     #[test]
+    /// Checks that a guard-dependency cycle preserves its diagnostic sites.
     fn dependency_cycle_exposes_its_sites() {
         let site = ErrorSite::Cell(CellId::default());
         let e = Error::DependencyCycle { sites: vec![site] };
@@ -505,6 +533,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a seed cycle preserves its diagnostic sites.
     fn seed_cycle_exposes_its_sites() {
         let site = ErrorSite::Cell(CellId::default());
         let e = Error::SeedCycle { sites: vec![site] };
@@ -512,6 +541,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that cell, relationship and method sites retain distinct identities.
     fn error_site_variants_are_distinct() {
         let a = ErrorSite::MethodIndex(0);
         let b = ErrorSite::Method(RelationshipId::default(), 0);
@@ -522,11 +552,13 @@ mod tests {
     }
 
     #[test]
+    /// Checks that an error without locations exposes an empty site slice.
     fn sites_is_empty_for_a_siteless_variant() {
         assert!(Error::InvalidId.sites().is_empty());
     }
 
     #[test]
+    /// Checks that a located error exposes its recorded site.
     fn sites_returns_the_recorded_site() {
         let rid = RelationshipId::default();
         let e = Error::MethodFailed {

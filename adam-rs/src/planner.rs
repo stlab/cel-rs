@@ -75,8 +75,10 @@ pub(crate) type Seeds = HashMap<CellId, Rc<dyn Any>>;
 /// Unlike forced pure outputs, this includes exclusive self-referencing claims.
 ///
 /// - Precondition: every active relationship belongs to `relationships`.
-/// - Complexity: One acyclic-assignment search, exponential in active relationships
-///   in the worst case; see [`matching::Assignment::solve_acyclic`].
+/// - Complexity: The time and auxiliary-space bounds of one
+///   [`matching::Assignment::solve_acyclic`] search, plus O(1) candidate-set storage.
+///   That bound includes scanning relationship storage and checking partial
+///   assignments, even with one method per active relationship.
 pub(crate) fn can_be_source(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
@@ -109,7 +111,8 @@ pub(crate) struct Plan {
     /// The complete deterministic cell sequence the release pass evaluated when
     /// tentatively eliminating sources, retained for source-prefix certificates.
     pub(crate) elimination_order: Vec<CellId>,
-    /// Cells that can never be a source under the relationships this plan considered.
+    /// Cells classified as pure outputs by the active-method elimination fixpoint.
+    /// This excludes aspiration-bearing self-reference claims, even mandatory ones.
     /// See [`forced_output_cells`].
     pub(crate) forced_outputs: HashSet<CellId>,
     /// Active relationships with exactly one alive method after the forced-output
@@ -254,8 +257,7 @@ fn node_to_site(node: Node) -> ErrorSite {
     }
 }
 
-/// Computes the cells that can never be a source under `active`, and which methods
-/// survive that determination.
+/// Computes the pure-output forced classification and surviving methods under `active`.
 ///
 /// A cell is forced by a relationship when it is a [`pure_outputs`] member of every one
 /// of that relationship's currently-alive methods. Starting with all methods alive, this
@@ -263,6 +265,10 @@ fn node_to_site(node: Node) -> ErrorSite {
 /// *different* relationship is eliminated (selecting it would always double-write that
 /// cell), which can force more cells for the relationships that lost a method. The loop
 /// stops once no relationship loses another method.
+///
+/// This classification does not decide exact unclaimed-source feasibility:
+/// self-referencing outputs are excluded from `pure_outputs`, although matching
+/// exclusively claims them. Their stored source aspirations can still affect results.
 ///
 /// The returned `HashMap` gives, for each relationship in `active`, a per-method-index
 /// alive flag (`false` for eliminated methods); used only to populate
@@ -272,10 +278,11 @@ fn node_to_site(node: Node) -> ErrorSite {
 ///
 /// - Precondition: every `RelationshipId` in `active` is present in `relationships`.
 ///
-/// - Complexity: O(D · R · M · K²) where D = total methods eliminated across all
+/// - Complexity: O((D + 1) · R · M · K²) where D = total methods eliminated across all
 ///   iterations (bounded by the total method count), R = active relationships,
 ///   M = methods per relationship, K = cells per method (squared because
 ///   [`pure_outputs`] scans `inputs` once per output).
+///   Auxiliary space is O(R · (M + K)) for alive flags and forced-cell sets.
 fn forced_output_cells(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
@@ -368,6 +375,7 @@ mod tests {
     // Propagation-behavior tests live in the integration tests.
 
     #[test]
+    /// Checks that inactive relationships contribute no selected steps.
     fn plan_with_active_subset_ignores_inactive_relationship() {
         // Two independent relationships: R1 (a→b) and R2 (c→d).
         // Plan with only R1 active; R2 must be ignored (not required in output).
@@ -395,6 +403,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that each active relationship contributes at most one selected method.
     fn relationship_selected_at_most_once() {
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(0_i32);
@@ -422,6 +431,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that incompatible exclusive claims return a conflict.
     fn conflict_returns_error() {
         // Two relationships both want to overwrite the same cell; only one method
         // each, and both output the same cell.
@@ -441,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that conflict sites isolate the minimal infeasible relationship set.
     fn conflict_error_names_the_minimal_infeasible_set() {
         // Two relationships both want to overwrite the same cell; only one method
         // each, and both output the same cell -- the whole active set is the
@@ -474,6 +485,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a sole pure output is forced despite its stronger aspiration.
     fn single_method_output_is_forced_and_not_selected_as_source() {
         // b outranks a in strength (added second), but the relationship has only one
         // method (a -> b), so b must never be treated as a source.
@@ -493,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks propagation of the pure-output classification through adjacent methods.
     fn forced_outputs_cascade_through_adjacent_relationship() {
         // R1: a -> b (single method) forces b.
         // R2: b -> c or c -> b (two methods) — once b is forced by R1, R2's c -> b
@@ -521,6 +534,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks forced-relationship classification for a sole viable method.
     fn forced_relationships_true_for_single_method_relationship() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -536,6 +550,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that surviving alternatives prevent forced-relationship classification.
     fn forced_relationships_excludes_multi_method_relationship() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0.0_f64);
@@ -558,6 +573,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks cascading elimination down to one viable method per relationship.
     fn forced_relationships_cascade_through_adjacent_relationship() {
         // R1: a -> b (single method) is trivially forced.
         // R2: b -> c or c -> b — c -> b dies once b is forced by R1 (it would
@@ -585,6 +601,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that an eliminated alternative never executes before its owning relationship.
     fn dead_method_not_selected_before_owning_relationship() {
         // R_A: p -> b (single method, forces b).
         // R_B: q -> c (single method, forces c).
@@ -650,6 +667,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that an unfiltered plan contains exactly its selected method steps.
     fn plan_with_no_filters_produces_only_method_steps_matching_relationship_selection() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -665,6 +683,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preservation of the release pass's cell order in the completed plan.
     fn plan_retains_release_elimination_order() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -686,6 +705,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that derived-cell filters add no authoritative reclamp step.
     fn no_filter_reclamp_step_for_a_filtered_cell_that_is_derived_this_round() {
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(5_i32);
@@ -709,6 +729,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that source filtering precedes its consuming method.
     fn filter_reclamp_positioned_before_consuming_relationship_when_argument_is_a_plain_source() {
         let mut sheet = Sheet::new();
         let bound = sheet.add_cell(10_i32);
@@ -741,6 +762,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that reclamping follows the producer of its dynamic argument.
     fn filter_reclamp_positioned_after_relationship_that_produces_its_argument() {
         let mut sheet = Sheet::new();
         let q = sheet.add_cell(10_i32);
@@ -773,6 +795,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that cycle sites follow actual alternating dependency edges.
     fn cycle_error_names_the_relationships_in_loop_order() {
         use crate::error::ErrorSite;
         let mut sheet = Sheet::new();

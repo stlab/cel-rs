@@ -93,6 +93,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Checks source/derived precedence and the explicit-strength bit boundary.
     fn cell_data_initial_state() {
         let mut data = CellData {
             source: Box::new(42_i32),
@@ -130,7 +131,9 @@ mod tests {
     }
 
     #[test]
+    /// Checks that cell identities satisfy the Copy bound.
     fn cell_id_is_copy() {
+        /// Accepts only carriers that implement Copy.
         fn takes_copy<T: Copy>(_: T) {}
         takes_copy(CellId::default());
     }

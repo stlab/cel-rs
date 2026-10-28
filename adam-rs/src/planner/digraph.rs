@@ -159,6 +159,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     #[test]
+    /// Checks acceptance of an acyclic selected-method graph.
     fn acyclic_assignment_reports_acyclic() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -172,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a cyclic selected-method graph.
     fn cyclic_assignment_reports_not_acyclic() {
         // Force the diamond's colliding pairing directly: R1's only method claims c via
         // [a,b]->c, R2's only method claims b via [c,d]->b -- b depends on c (R1) and
@@ -197,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks retention of a self-referencing writer without a self-dependency edge.
     fn purely_self_referencing_relationship_still_appears_as_a_node() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -216,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks the authoritative dependency from a filter argument to its source cell.
     fn add_filter_edges_adds_edge_from_argument_to_filtered_source_cell() {
         let mut sheet = Sheet::new();
         let bound = sheet.add_cell(10_i32);
@@ -236,6 +240,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks exclusion of diagnostic-only filters on claimed outputs.
     fn add_filter_edges_skips_a_filtered_cell_claimed_by_the_assignment() {
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(5_i32);
@@ -260,6 +265,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks retention of an isolated source filter with no dynamic arguments.
     fn add_filter_edges_adds_a_node_for_a_zero_argument_filter_with_no_relationship_membership() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
@@ -279,6 +285,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that topological order respects every dependency edge.
     fn topological_order_returns_forward_order_for_a_dag() {
         let ids = {
             let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -296,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that cyclic graphs have no topological order.
     fn topological_order_returns_none_for_a_cycle() {
         let ids = {
             let mut map: SlotMap<CellId, ()> = SlotMap::with_key();

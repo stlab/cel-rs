@@ -214,11 +214,16 @@ impl Assignment {
     ///
     /// Returns `None` if no combination of method choices satisfies every constraint.
     ///
-    /// - Complexity: O(M^R · R·K) worst case (M = max methods per relationship, R =
-    ///   active relationships, K = cells per method) -- exponential in the number of
-    ///   active relationships. Acceptable at `adam-rs`'s target scale (UI property
-    ///   models: tens of cells, small relationship counts); see the design doc's "Future
-    ///   Work" section for the incremental alternative if this ever needs to scale up.
+    /// - Complexity: Expected O(T + N · (1 + R · K²)) time and O(1 + R · (1 + K))
+    ///   auxiliary space, with expected O(1) hash operations. T is relationship
+    ///   storage slots scanned to form `order`, R is active relationships, and K is
+    ///   the maximum total input/output count per method. N counts recursive calls
+    ///   and examined method candidates, including candidates rejected before recursion.
+    ///   Each accepted candidate checks a partial graph of at most R relationships;
+    ///   graph construction scans output membership for every input, costing O(R · K²).
+    ///   For at most M methods per relationship, N is O(1 + M + … + M^R).
+    ///   With M = 1, the successive partial checks can therefore take O(R² · K²)
+    ///   time after the O(T) scan; branching can make the search exponential.
     pub(crate) fn solve_acyclic(
         relationships: &SlotMap<RelationshipId, RelationshipData>,
         active: &HashSet<RelationshipId>,
@@ -269,13 +274,18 @@ impl Assignment {
 ///
 /// At each relationship, tries every method whose outputs are disjoint from `forbidden`
 /// and from cells already claimed earlier in this same combination, recursing before
-/// checking the next candidate. The base case (`idx == order.len()`) accepts the
-/// combination only if its induced digraph is acyclic; a rejected base case or a
-/// dead-end mid-recursion unwinds the claim/assignment it just made and tries the next
-/// method, so `assignment` is restored to its pre-call state whenever this returns
-/// `false`.
+/// checking the next candidate. Each tentative assignment must be acyclic before
+/// recursion, and the base case checks the complete assignment again. A cyclic
+/// partial assignment or dead end restores the tentative claims before trying
+/// the next method. Returning `false` restores `assignment` to its pre-call state.
 ///
-/// - Complexity: O(M^(len(order) - idx)) branches explored in the worst case.
+/// - Complexity: Expected O(N · (1 + R · K²)) time for N recursive calls and method
+///   candidates examined in this subtree, R total relationships in `order`, and K
+///   maximum total input/output count per method. N is
+///   O(1 + M + … + M^(order.len() - idx)) for at most M methods per relationship.
+///   Auxiliary space is O(1 + (order.len() - idx) · (1 + K) + R · K), including
+///   retained candidate-output sets and one transient partial graph. Hash operations
+///   take expected O(1); see [`Assignment::solve_acyclic`] for the full-search bound.
 fn search_acyclic(
     order: &[RelationshipId],
     idx: usize,
@@ -320,6 +330,7 @@ mod tests {
     use crate::{Method, Sheet};
 
     #[test]
+    /// Checks assignment of the sole available method.
     fn single_relationship_single_method_is_assigned() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -335,6 +346,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of two mandatory writers claiming the same cell.
     fn two_relationships_wanting_the_same_only_output_is_infeasible() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -351,6 +363,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks complete, exclusive claims for a feasible diamond assignment.
     fn diamond_relationships_admit_a_feasible_assignment() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0.0_f64);
@@ -377,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks exclusive self-reference ownership alongside a distinct writer.
     fn self_referencing_output_is_claimed_and_does_not_conflict_with_a_different_relationship() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -395,6 +409,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a selected multi-output method claims every output.
     fn multi_output_method_claims_all_its_outputs_when_forced() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell("a".to_string());
@@ -438,6 +453,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks alternate assignment after an unsuccessful displacement cascade.
     fn blocker_displacement_falls_back_when_the_cascade_cannot_complete() {
         // R1's only method wants `x`, currently claimed by R2's default method; R2's
         // only alternative wants `y`, currently claimed by R3's default method; R3's
@@ -504,6 +520,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that undoing displacement permits a later valid revisit.
     fn undone_blocker_displacement_does_not_leave_stale_visited_poisoning() {
         // Regression test: `try_assign`'s shared `visited` set must be rolled back
         // (via the same `trail`/`undo` mechanism as `chosen`/`claimed`) when a

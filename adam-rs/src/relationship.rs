@@ -209,7 +209,9 @@ mod tests {
     }
 
     #[test]
+    /// Checks that relationship identities satisfy the Copy bound.
     fn relationship_id_is_copy() {
+        /// Accepts only carriers that implement Copy.
         fn takes_copy<T: Copy>(_: T) {}
         // RelationshipId must be Copy so it can be stored in adjacency Vecs cheaply.
         // This test fails to compile if RelationshipId is not Copy.
@@ -217,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preservation of an erased method's positional edges and types.
     fn method_new_stores_types_and_cell_ids() {
         use slotmap::SlotMap;
 
@@ -254,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks unary method signature types and its result.
     fn from_fn_1_1_stores_correct_type_ids() {
         use slotmap::SlotMap;
 
@@ -274,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks binary method signature types and its result.
     fn from_fn_2_1_stores_correct_type_ids() {
         use slotmap::SlotMap;
 

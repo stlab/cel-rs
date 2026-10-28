@@ -92,8 +92,10 @@ pub struct Filter(pub(crate) FilterData);
 
 /// Internal storage for a single filter.
 ///
-/// Argument identities and declared types have equal lengths. The conforming
-/// callback returns `value_type`; the sheet validates those identities at attachment.
+/// Argument identities and declared types have equal lengths. `value_type` declares
+/// the expected callback result type. Attachment validates argument identities and
+/// types; propagation validates successful results and records a soft failure for
+/// a result with a different runtime type.
 pub(crate) struct FilterData {
     /// The `TypeId` of the value this filter operates on, validated against its cell's
     /// registered type by `add_filter`.
@@ -311,6 +313,7 @@ mod tests {
     use crate::cell::CellId;
 
     #[test]
+    /// Checks a static conformer's declared type, result and idempotence.
     fn from_fn_0_stores_correct_value_type_and_computes_value() {
         let filter = Filter::from_fn_0(|x: &i32| Ok((*x).max(10)));
         assert_eq!(filter.0.value_type, TypeId::of::<i32>());
@@ -323,6 +326,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks unary dynamic-filter types and its conformed value.
     fn from_fn_1_stores_correct_type_ids_and_computes_value() {
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
         let arg = map.insert(());
@@ -339,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks binary dynamic-filter types and its conformed value.
     fn from_fn_2_stores_correct_type_ids_and_computes_value() {
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
         let lo = map.insert(());
@@ -362,6 +367,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preservation of a static conformer's callback failure.
     fn from_fn_0_reports_the_error_a_failing_function_returns() {
         let filter =
             Filter::from_fn_0(|_x: &i32| Err(std::io::Error::other("cannot conform").into()));
@@ -372,6 +378,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preservation of an erased filter's declared value and argument types.
     fn new_stores_explicit_value_type_and_arg_types() {
         let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
             let v = value.downcast_ref::<i32>().unwrap();
@@ -422,6 +429,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that an erased filter carries opaque presentation metadata.
     fn new_defaults_to_opaque_kind() {
         let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
             Ok(Box::new(*value.downcast_ref::<i32>().unwrap()) as Box<dyn Any>)
@@ -430,6 +438,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks range metadata and callback clamping.
     fn range_stores_range_kind_and_clamps_via_function() {
         let filter = Filter::range(
             TypeId::of::<i32>(),

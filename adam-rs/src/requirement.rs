@@ -171,12 +171,15 @@ mod tests {
     }
 
     #[test]
+    /// Checks that requirement identities satisfy the Copy bound.
     fn requirement_id_is_copy() {
+        /// Accepts only carriers that implement Copy.
         fn takes_copy<T: Copy>(_: T) {}
         takes_copy(RequirementId::default());
     }
 
     #[test]
+    /// Checks preservation of an erased requirement's input identities and types.
     fn requirement_new_stores_types_and_cell_ids() {
         use slotmap::SlotMap;
 
@@ -209,6 +212,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks unary requirement signature types and predicate evaluation.
     fn from_fn_1_stores_correct_type_ids() {
         use slotmap::SlotMap;
 
@@ -227,6 +231,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks binary requirement signature types and predicate evaluation.
     fn from_fn_2_stores_correct_type_ids() {
         use slotmap::SlotMap;
 
