@@ -75,6 +75,68 @@ fix wave. Pre-existing Scout memory and instruction-file changes remain
 untouched and unstaged. The approved semantics and all deferred boundaries below
 remain unchanged.
 
+## Strict LL(1) correction — 2026-10-27
+
+The subsequent grammar correction supersedes the optional-comma acceptance in
+the original implementation plan and the formatter fix described above.
+Component parameter lists, named actual lists and record fields now require an
+item after every comma. Conditional branches have no comma separator or
+terminator. Singleton tuple values, types and destructuring bindings retain
+their required comma. Expression/type grouping, empty lists and ordinary
+separated lists remain unchanged. Parenthesized binding targets require the
+first comma: `(x,) := expression` destructures a singleton tuple, while
+`(x) := expression` is invalid. A bare `x := expression` binds the whole result.
+Binding-target productions express that singleton exception without implying
+trailing commas for larger tuples.
+
+Both Adam entry points share the structural parser; both CEL emission contexts
+share the expression parser. New rejection regressions failed against the
+previous acceptance before the implementation changed. Existing list-closing
+comment tests remain in the formatter and LSP suites with valid comma-free
+closers. The optional-prefix trivia scanner is removed: ordinary fixed-token
+gap scanning preserves those comments without an optional-comma facility.
+Current books, example-backed tests and grammar productions in dated plans
+reflect the correction.
+
+`CLAUDE.md` and `.github/copilot-instructions.md` now require strict Wirth-style
+LL(1) productions and forbid multi-token peek APIs, indexed lookahead, cloned
+cursors, checkpoints and backtracking. The existing lexer is non-cloneable and
+its parser cursors use one-token `Peekable`; no multi-token peek API was found.
+Lexical character composition remains distinct from parser lookahead.
+The same project guidance treats Scout amounts and budgets as private retrieval
+metadata, never remaining tokens, time, context, or constraints on the task.
+
+Validation passed after migrating the existing fixtures: workspace build and
+tests (**2,977 passed, zero failed, four existing ignored**), feature-enabled
+Euclid (**81 passed**), all five all-target Clippy selectors, strict workspace
+library documentation, formatting and whitespace checks. The removed
+optional-prefix scanner also removes its doctest; four focused tests were
+added. Workspace tests include both books' executable examples and the LSP
+formatting boundary. The existing third-party `block v0.1.6`
+future-incompatibility notice remains; no project compiler warnings appeared.
+Raw final output is the controller's session artifact
+`files/ll1-final-validation.log`. No live editor or distribution-book build is
+claimed by this local validation.
+
+The follow-up binding-target correction removed the parser's grouped-name
+acceptance branch. Three rejection regressions failed first at the structural
+parser, runtime parser and formatter boundaries. After requiring the first
+comma, all Adam language, LSP and Adam book tests passed, including the existing
+bare-name, singleton-tuple and multi-element destructuring cases: **751 passed,
+zero failed or ignored**. All-target Clippy for those crates, strict Adam library
+documentation, formatting and whitespace checks passed. Test output is retained
+in the session artifact `files/binding-target-validation.log`.
+
+The complete pre-publication gate was rerun after the binding-target correction:
+workspace build and **2,977 passing tests** (four existing ignored), the separate
+doc-test command, **123 renderer-agnostic app tests**, **81 feature-enabled Euclid
+tests**, all five Clippy variants, strict workspace library documentation,
+**65 Begin JavaScript tests**, extension compilation and **21 extension tests**.
+Formatting, whitespace, generated JSON and memory-index targets passed.
+Only the existing third-party `block v0.1.6` future-incompatibility notice
+remained. Distribution-book, WASM and slide-browser checks remain assigned to
+the Docs workflow; this host has no `mdbook` or `wasm-pack` executable.
+
 ## Broad review and consolidated fixes
 
 The broad review covered all 88 branch paths and confirmed a post-construction

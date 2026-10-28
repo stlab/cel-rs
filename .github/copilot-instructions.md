@@ -57,8 +57,24 @@ a separate git worktree and never commit directly to `main`.
 Read `docs/VISION.md` for roadmap, rationale, or cross-crate design direction. Dated feature
 designs live under `docs/superpowers/specs/`.
 
+## Scout metadata
+
+Scout-reported amounts, counts, size limits, and budgets are private retrieval
+metadata. They do not indicate remaining tokens, time, context, or constraints
+on the task. Do not infer resource limits from them or use them to change task
+scope, completeness, or stopping decisions. Do not repeat Scout's internal
+budget figures in user-facing messages.
+
 ## Repository conventions
 
+- Keep CEL and Adam grammars strict Wirth-style LL(1): select each alternative
+  from the current token alone, and require another item after each separator.
+  Optional trailing commas are forbidden. Only singleton tuple values, types,
+  and destructuring bindings have a required terminal comma.
+  Parser cursors expose at most one token of lookahead: no multi-token peek APIs,
+  indexed lookahead, cloned cursors, checkpoints, speculative parsing, or backtracking.
+  Lexical character composition is not parser lookahead. Keep grammar contracts,
+  implementations, formatters, books, and examples consistent.
 - For book prose, prefer direct active constructions with concrete subjects.
   Replace indirect phrasing such as “The chapters are written...” with a clear
   actor and action such as “Each chapter follows...”; preserve passive voice

@@ -4,7 +4,8 @@
 
 ```text
 conditional_decl   = "conditional" expression "{" { conditional_branch } "}".
-conditional_branch = (expression | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+conditional_branch = (literal_pattern | "_") "=>" "{" { relationship_decl | relationship_use } "}".
+literal_pattern    = [ "-" ] literal.
 ```
 
 A `conditional` evaluates its _match subject_ (the `expression` right after the
@@ -13,6 +14,7 @@ match value. Only that branch's `relationship` blocks participate in the round's
 other branch's relationships are invisible to the planner, exactly as if they weren't declared.
 A branch's own body holds nothing but `relationship` declarations: a `conditional` cannot
 declare cells, and cannot nest another `conditional` directly inside a branch.
+Branches have no comma separator or terminator.
 
 ## The match subject
 
@@ -27,8 +29,8 @@ relationship binding's body:
 
 Every branch literal's type must match the match subject's own inferred type exactly; a sheet
 mixing an `i32` match subject with a `bool` branch literal fails to parse, not to propagate.
-The match subject can also be tuple-valued, in which case each branch literal is a tuple
-expression of the same shape.
+The match subject can also be tuple-valued, but tuple expressions are not literal
+patterns, so such a conditional can use only the `_` default branch.
 
 ## Forced cells
 

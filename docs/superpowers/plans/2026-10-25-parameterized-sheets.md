@@ -340,8 +340,8 @@ Produce `parse_module_str`, `attach_module_trivia`, and `format_module`.
   missing AST/parser interfaces to fail compilation.
 - [ ] **Step 3:** Implement the explicit grammar: file-level `use path [as name];`,
   `sheet name [ "(" typed_parameters ")" ] body`, and
-  `relationship path "(" name ":" cell { "," name ":" cell } [ "," ] ")" ";"`.
-  Accept trailing commas in signatures and named argument lists. Do not add
+  `relationship path "(" [ name ":" cell { "," name ":" cell } ] ")" ";"`.
+  Reject trailing commas in signatures and named argument lists. Do not add
   positional arguments, generic syntax, glob imports or parameter clauses.
   Keep the existing ordinary relationship grammar unchanged.
 - [ ] **Step 4:** Run `cargo test -p adam-lang` and

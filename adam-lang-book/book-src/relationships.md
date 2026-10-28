@@ -5,7 +5,7 @@
 ```text
 relationship_decl = "relationship" "{" { binding } "}".
 binding            = binding_target ":=" expression ";".
-binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
+binding_target     = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".
 ```
 
 Each `binding` inside a `relationship` block is a candidate _method_: an expression whose

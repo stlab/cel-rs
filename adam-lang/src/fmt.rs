@@ -8,8 +8,8 @@
 //! Type annotations are re-emitted via `Span::source_text()` directly
 //! via `TypeExpr::span()`; parameter annotations borrow their complete source range so applied
 //! named types retain arguments and comments. Branch-match literals use `ConditionalBranch::literal_span` — see
-//! the design doc for why no `Literal` value is needed. Conditional branches omit the grammar's
-//! optional trailing `,`, matching `begin/assets/demo.adm2`'s existing style.
+//! the design doc for why no `Literal` value is needed. Conditional branches have no comma
+//! separator or terminator.
 //!
 //! Never called on a sheet with any recorded syntax errors — see `adam-lsp`'s
 //! `textDocument/formatting` handler, which refuses to format in that case.
@@ -286,10 +286,8 @@ fn point_span(span: proc_macro2::Span) -> ast::ExprSpan {
 ///   next token (the initializer) is not glued on. A *comment-only* gap (`expected` empty) returns
 ///   `""` when it holds no comments, and never adds a trailing space, so the caller appends its own
 ///   terminator (`;`) or keyword directly.
-///   Comment-free module paths and parameter/argument lists use compact punctuation and omit
-///   optional trailing commas.
-///   The closing-list pattern `[",", ")"]` treats its comma as optional and preserves
-///   every comment on either side of the closing parenthesis.
+///   Comment-free module paths and parameter/argument lists use compact punctuation.
+///   Closing-list gaps preserve every comment on either side of the closing parenthesis.
 ///
 /// `depth` is the caller's own indent depth (the declaration's, not the gap's).
 fn emit_decl_gap(
@@ -299,26 +297,18 @@ fn emit_decl_gap(
     expected: &[&'static str],
     depth: usize,
 ) -> String {
-    use cel_parser::trivia::{
-        GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap,
-        scan_gap_with_optional_prefix,
-    };
-    // Nonempty list closers accept a trailing comma, but do not require one.
-    let scan = |gap| match expected {
-        [",", ")"] => scan_gap_with_optional_prefix(gap, ",", &[")"]),
-        _ => scan_gap(gap, expected),
-    };
+    use cel_parser::trivia::{GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
     // The scanner re-synthesizes required tokens even on an empty or non-resolving gap, so a
     // hand-built declaration (empty `source`) still renders its operator.
     let pieces = if source.is_empty() {
-        scan("")
+        scan_gap("", expected)
     } else {
         let line_starts = line_start_byte_offsets(source);
         let start = line_column_to_byte(source, &line_starts, prev_end.end.end());
         let end = line_column_to_byte(source, &line_starts, next_start.start.start());
         match source.get(start..end) {
-            Some(gap) => scan(gap),
-            None => scan(""),
+            Some(gap) => scan_gap(gap, expected),
+            None => scan_gap("", expected),
         }
     };
     if pieces
@@ -330,7 +320,7 @@ fn emit_decl_gap(
             [","] => Some(", "),
             [":"] => Some(": "),
             ["::"] => Some("::"),
-            [",", ")"] => Some(")"),
+            [")"] => Some(")"),
             ["(", ")"] => Some("()"),
             _ => None,
         };
@@ -940,7 +930,7 @@ pub fn format_sheet(sheet: &ast::Sheet, source: &str) -> String {
             if parameters.is_empty() {
                 &["(", ")"]
             } else {
-                &[",", ")"]
+                &[")"]
             },
             0,
         ));
@@ -1121,7 +1111,7 @@ fn write_relationship_use(
         if call.arguments.is_empty() {
             &["(", ")"]
         } else {
-            &[",", ")"]
+            &[")"]
         },
         depth,
     ));
@@ -1373,11 +1363,11 @@ mod tests {
         assert_eq!(format(source), expected);
     }
 
+    /// Refuses to format parenthesized binding targets without the required first comma.
     #[test]
-    fn drops_redundant_grouping_parens_from_a_non_destructuring_binding() {
+    fn rejects_a_parenthesized_binding_target_without_a_comma() {
         let source = "sheet s {\n    relationship {\n        (x) := a;\n    }\n}";
-        let expected = "sheet s {\n    relationship {\n        x := a;\n    }\n}\n";
-        assert_eq!(format(source), expected);
+        assert!(format_source(source).is_err());
     }
 
     #[test]
@@ -1389,21 +1379,21 @@ mod tests {
 
     #[test]
     fn formats_a_conditional_with_branches_and_a_default_and_no_trailing_commas() {
-        let source = "sheet s {\n    conditional p {\n        0i32 => { relationship { b := a; } },\n        _ => { relationship { a := b; } },\n    }\n}";
+        let source = "sheet s {\n    conditional p {\n        0i32 => { relationship { b := a; } }\n        _ => { relationship { a := b; } }\n    }\n}";
         let expected = "sheet s {\n    conditional p {\n        0i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        _ => {\n            relationship {\n                a := b;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_conditional_branch_with_a_negated_literal_key() {
-        let source = "sheet s {\n    conditional p {\n        -1i32 => { relationship { b := a; } },\n        _ => { relationship { a := b; } },\n    }\n}";
+        let source = "sheet s {\n    conditional p {\n        -1i32 => { relationship { b := a; } }\n        _ => { relationship { a := b; } }\n    }\n}";
         let expected = "sheet s {\n    conditional p {\n        -1i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        _ => {\n            relationship {\n                a := b;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_conditional_with_an_expression_match_subject() {
-        let source = "sheet s {\n    conditional a && b {\n        _ => { relationship { d := c; } },\n    }\n}";
+        let source = "sheet s {\n    conditional a && b {\n        _ => { relationship { d := c; } }\n    }\n}";
         let expected = "sheet s {\n    conditional a && b {\n        _ => {\n            relationship {\n                d := c;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }

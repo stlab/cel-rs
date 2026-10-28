@@ -333,23 +333,19 @@ mod tests {
 
     use super::{format_edits, serve};
 
-    /// Whole-document edits preserve comments around list closers, with optional commas.
+    /// Whole-document edits preserve comments around list closers without trailing commas.
     #[test]
     fn format_edits_preserve_closing_list_comments() {
-        for comma in ["", ","] {
-            let source = format!(
-                "sheet helper(a: i32 {comma} /* HEADER_BEFORE */) // HEADER_AFTER\n\
-                 {{}} sheet app {{ relationship helper(a: x {comma} // CALL_BEFORE\n\
-                 ) /* CALL_AFTER */; }}"
-            );
-            let edits = format_edits(&source);
-            assert_eq!(edits.len(), 1);
-            let formatted = &edits[0].new_text;
-            for marker in ["HEADER_BEFORE", "HEADER_AFTER", "CALL_BEFORE", "CALL_AFTER"] {
-                assert_eq!(formatted.matches(marker).count(), 1, "{formatted}");
-            }
-            assert_eq!(format_edits(formatted)[0].new_text, *formatted);
+        let source = "sheet helper(a: i32 /* HEADER_BEFORE */) // HEADER_AFTER\n\
+                 {} sheet app { relationship helper(a: x // CALL_BEFORE\n\
+                 ) /* CALL_AFTER */; }";
+        let edits = format_edits(source);
+        assert_eq!(edits.len(), 1);
+        let formatted = &edits[0].new_text;
+        for marker in ["HEADER_BEFORE", "HEADER_AFTER", "CALL_BEFORE", "CALL_AFTER"] {
+            assert_eq!(formatted.matches(marker).count(), 1, "{formatted}");
         }
+        assert_eq!(format_edits(formatted)[0].new_text, *formatted);
     }
 
     /// Module formatting preserves imports, aliases, parameter types and named bindings.
@@ -366,6 +362,8 @@ mod tests {
         for malformed in [
             "use lib::; sheet good {}",
             "sheet helper(a: ) {} sheet app {}",
+            "sheet helper(a: i32,) {} sheet app {}",
+            "sheet app { relationship helper(a: x,); }",
             "sheet good {} sheet bad { cell : i32; }",
         ] {
             assert!(format_edits(malformed).is_empty(), "{malformed}");

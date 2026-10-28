@@ -466,11 +466,34 @@ fn record_scalar_types_are_exact() {
     }
 }
 
-/// Verifies nested constructors, trailing commas, and empty schemas.
+/// Rejects trailing field commas in both predictive parser contexts, including nested records.
 #[test]
-fn nested_record_and_trailing_comma() {
+fn record_fields_reject_trailing_commas() {
+    for source in [
+        "TestPoint { x: 1.0, y: 2.0, }",
+        "TestPoint { x: 1.0, y: 2.0, /* trailing */ }",
+        "Wrapper { point: TestPoint { x: 1.0, y: 2.0 }, }",
+        "Wrapper { point: TestPoint { x: 1.0, y: 2.0, } }",
+        "Empty { , }",
+    ] {
+        assert!(
+            Parser::<AstContext>::new(OpLookup::new())
+                .parse_str_ast(source)
+                .is_err(),
+            "{source}"
+        );
+        assert!(
+            CELParser::new(lookup()).parse_str(source).is_err(),
+            "{source}"
+        );
+    }
+}
+
+/// Verifies nested constructors, empty schemas, and malformed field separators.
+#[test]
+fn nested_records_and_empty_schemas() {
     let value = CELParser::new(lookup())
-        .parse_str("Wrapper { point: TestPoint { y: 2.0, x: 1.0, }, }")
+        .parse_str("Wrapper { point: TestPoint { y: 2.0, x: 1.0 } }")
         .unwrap()
         .call0::<(TestPoint,)>()
         .unwrap();
@@ -936,10 +959,10 @@ fn record_array_descriptor_identity_is_exact() {
 #[test]
 fn record_formatting_preserves_comments_and_order() {
     for source in [
-        "TestPoint { y: 2.0, x: 1.0, }",
+        "TestPoint { y: 2.0, x: 1.0 }",
         "Empty { /* empty */ }",
-        "TestPoint /* name */ { /* open */ y /* label */ : /* value */ 2.0, /* next */ x: 1.0, /* close */ }",
-        "TestPoint { y: 2.0, // next\n x: 1.0, // close\n }",
+        "TestPoint /* name */ { /* open */ y /* label */ : /* value */ 2.0, /* next */ x: 1.0 /* close */ }",
+        "TestPoint { y: 2.0, // next\n x: 1.0 // close\n }",
         "TestPoint { x: (1.0 + 2.0), /* tail */ y: 4.0 }",
         "TestPoint { x: ( /* open */ 1.0), y: ((2.0)) /* close */ }",
     ] {

@@ -698,7 +698,7 @@ pub struct ConditionalDecl {
     pub span: ExprSpan,
 }
 
-/// `conditional_branch = literal "=>" "{" { method_decl } "}" [ "," ].`
+/// `conditional_branch = literal "=>" "{" { method_decl } "}".`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
     /// The branch's unresolved match literal.

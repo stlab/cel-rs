@@ -230,7 +230,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `parameters = "(" [ identifier ":" type_expr { "," identifier ":" type_expr } [ "," ] ] ")".`
+    /// `parameters = "(" [ identifier ":" type_expr { "," identifier ":" type_expr } ] ")".`
     ///
     /// - Complexity: O(n) in signature size, excluding embedded type parsing.
     fn parse_parameters(
@@ -250,23 +250,19 @@ impl AdamAstParser {
         }
         cursor.expect_open_paren()?;
         let mut parameters = Vec::new();
-        while !matches!(
-            cursor.peek_token(),
-            Some(Token::CloseDelim {
-                delimiter: Delimiter::Parenthesis,
-                ..
-            })
-        ) {
-            let (name, span) = cursor.consume_ident()?;
-            cursor.expect_punct(":")?;
-            let type_name = self.parse_type_expr(cursor)?;
-            parameters.push(ast::ParameterDecl {
-                name,
-                name_span: point(span),
-                type_name,
-            });
-            if !cursor.consume_punct(",") {
-                break;
+        if !cursor.at_close_paren() {
+            loop {
+                let (name, span) = cursor.consume_ident()?;
+                cursor.expect_punct(":")?;
+                let type_name = self.parse_type_expr(cursor)?;
+                parameters.push(ast::ParameterDecl {
+                    name,
+                    name_span: point(span),
+                    type_name,
+                });
+                if !cursor.consume_punct(",") {
+                    break;
+                }
             }
         }
         cursor.expect_close_paren()?;
@@ -524,24 +520,20 @@ impl AdamAstParser {
         let path = self.parse_path(cursor)?;
         cursor.expect_open_paren()?;
         let mut arguments = Vec::new();
-        while !matches!(
-            cursor.peek_token(),
-            Some(Token::CloseDelim {
-                delimiter: Delimiter::Parenthesis,
-                ..
-            })
-        ) {
-            let (name, name_span) = cursor.consume_ident()?;
-            cursor.expect_punct(":")?;
-            let (cell, cell_span) = cursor.consume_ident()?;
-            arguments.push(ast::NamedArgument {
-                name,
-                name_span: point(name_span),
-                cell,
-                cell_span: point(cell_span),
-            });
-            if !cursor.consume_punct(",") {
-                break;
+        if !cursor.at_close_paren() {
+            loop {
+                let (name, name_span) = cursor.consume_ident()?;
+                cursor.expect_punct(":")?;
+                let (cell, cell_span) = cursor.consume_ident()?;
+                arguments.push(ast::NamedArgument {
+                    name,
+                    name_span: point(name_span),
+                    cell,
+                    cell_span: point(cell_span),
+                });
+                if !cursor.consume_punct(",") {
+                    break;
+                }
             }
         }
         cursor.expect_close_paren()?;
@@ -631,7 +623,6 @@ impl AdamAstParser {
                 let branch_open = cursor.expect_open_brace()?;
                 let relationships = self.parse_branch_relationships(cursor)?;
                 let close = cursor.expect_close_brace()?;
-                cursor.consume_punct(",");
                 default = Some(ast::DefaultBranch {
                     relationships,
                     trailing_comment: None,
@@ -650,7 +641,6 @@ impl AdamAstParser {
             let branch_open = cursor.expect_open_brace()?;
             let relationships = self.parse_branch_relationships(cursor)?;
             let close = cursor.expect_close_brace()?;
-            cursor.consume_punct(",");
             branches.push(ast::ConditionalBranch {
                 literal: lit,
                 negated,
@@ -833,12 +823,13 @@ fn point(span: proc_macro2::Span) -> ast::ExprSpan {
     }
 }
 
-/// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
+/// `binding_target = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".`
 ///
 /// Returns the output names in declaration order alongside whether the left-hand side requests
-/// destructuring: `false` for a bare identifier or a single parenthesized identifier with no
-/// comma (mere grouping, matching Rust's `(a)` pattern); `true` for `(a,)` (a 1-tuple pattern,
-/// trailing comma mandatory) or `(a, b, ...)`.
+/// destructuring: `false` for a bare identifier; `true` for `(a,)` (a singleton tuple pattern,
+/// comma mandatory) or `(a, b, ...)`.
+///
+/// - Complexity: O(n) time and space for n output names.
 fn parse_binding_target(cursor: &mut TokenCursor) -> Result<(Vec<(String, ast::ExprSpan)>, bool)> {
     if !cursor.at_open_paren() {
         let (name, span) = cursor.consume_ident()?;
@@ -847,13 +838,8 @@ fn parse_binding_target(cursor: &mut TokenCursor) -> Result<(Vec<(String, ast::E
 
     cursor.expect_open_paren()?;
     let (first_name, first_span) = cursor.consume_ident()?;
-    if cursor.at_close_paren() {
-        // Grouping: exactly one identifier, no comma -- same as the bare form.
-        cursor.expect_close_paren()?;
-        return Ok((vec![(first_name, point(first_span))], false));
-    }
     if !cursor.consume_punct(",") {
-        return Err(cursor.err_at("expected ',' or closing parenthesis"));
+        return Err(cursor.err_at("expected ',' in tuple binding target"));
     }
     if cursor.at_close_paren() {
         // Single identifier + trailing comma: destructures a 1-tuple.
@@ -994,16 +980,16 @@ mod tests {
         assert_eq!(rel.bindings[0].outputs.len(), 1);
     }
 
+    /// Rejects parenthesized binding targets that omit the required first comma.
     #[test]
-    fn parse_binding_grouped_single_identifier_target_is_not_a_destructure() {
-        let sheet = AdamAstParser::new()
-            .parse_str("sheet s { relationship { (x) := a; } }")
-            .unwrap();
-        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
-            panic!("expected Relationship");
-        };
-        assert!(!rel.bindings[0].destructure);
-        assert_eq!(rel.bindings[0].outputs.len(), 1);
+    fn parse_binding_single_parenthesized_identifier_requires_a_comma() {
+        for source in [
+            "sheet s { relationship { (x) := a; } }",
+            "sheet s { relationship { (x /* missing comma */) := a; } }",
+        ] {
+            let module = AdamAstParser::new().parse_module_str(source).unwrap();
+            assert!(!module.errors.is_empty(), "{source}");
+        }
     }
 
     #[test]
@@ -1067,8 +1053,8 @@ mod tests {
                 r#"
                 sheet s {
                     conditional mode {
-                        0i32 => { relationship { height := width; } },
-                        _ => { relationship { height := width; } },
+                        0i32 => { relationship { height := width; } }
+                        _ => { relationship { height := width; } }
                     }
                 }
             "#,
@@ -1090,8 +1076,8 @@ mod tests {
                 r#"
                 sheet s {
                     conditional mode {
-                        -1i32 => { relationship { height := width; } },
-                        _ => { relationship { height := width; } },
+                        -1i32 => { relationship { height := width; } }
+                        _ => { relationship { height := width; } }
                     }
                 }
             "#,
@@ -1111,7 +1097,7 @@ mod tests {
                 r#"
                 sheet s {
                     conditional mode {
-                        -width => { relationship { height := width; } },
+                        -width => { relationship { height := width; } }
                     }
                 }
             "#,
@@ -1130,7 +1116,7 @@ mod tests {
                 r#"
                 sheet s {
                     conditional mode {
-                        10xyz => { relationship { height := width; } },
+                        10xyz => { relationship { height := width; } }
                     }
                 }
             "#,
@@ -1148,7 +1134,7 @@ mod tests {
                 r#"
                 sheet s {
                     conditional mode {
-                        -1u32 => { relationship { height := width; } },
+                        -1u32 => { relationship { height := width; } }
                     }
                 }
             "#,
@@ -1164,7 +1150,7 @@ mod tests {
                 r#"
                 sheet s {
                     conditional a && b {
-                        _ => { relationship { height := width; } },
+                        _ => { relationship { height := width; } }
                     }
                 }
             "#,
@@ -1213,7 +1199,7 @@ mod tests {
                         0i32 => {
                             relationship { b := a; }
                             relationship { d := c; }
-                        },
+                        }
                     }
                 }
             "#,
@@ -1235,7 +1221,7 @@ mod tests {
                         _ => {
                             relationship { b := a; }
                             relationship { d := c; }
-                        },
+                        }
                     }
                 }
             "#,

@@ -290,7 +290,7 @@ Primitive-only `check_expr` continues using an empty lookup. Use
   Check all new AST children; never treat field/member labels as identifiers.
   Update all callers found by compiler errors and a bounded `Expr::` audit.
 - [ ] **Step 4: Document syntax and error contracts**, including bare vs
-  parenthesized members, value-name shadowing, trailing commas, restricted
+  parenthesized members, value-name shadowing, rejection of trailing commas, restricted
   headers, no implicit integer-to-float conversion, and no member assignment.
   Add examples to existing book example harnesses, not untested prose only.
 - [ ] **Step 5: Run** `cargo test -p cel-parser -p cel-std -p adam-lang -p adam-lsp -p adam-fmt -p cel-lang-book -p adam-lang-book`;

@@ -55,7 +55,7 @@ fn registered_record_and_member_example() {
     let source = "sheet samples {
         cell Sample: bool = true;
         cell value: bool = false;
-        cell reading: Sample = Sample { value: 3.0, };
+        cell reading: Sample = Sample { value: 3.0 };
         out measured: f64 := reading.value();
     }";
     let ast = adam_lang::AdamAstParser::new().parse_str(source).unwrap();

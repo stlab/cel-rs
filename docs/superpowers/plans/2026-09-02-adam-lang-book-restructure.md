@@ -1158,10 +1158,10 @@ case the right-hand side must be a tuple expression of matching arity, split ele
 {{#include examples/relationships-continued/destructuring_binding.adm2}}
 ```
 
-`(a, b) := ...` and the one-element `(a,) := ...` (trailing comma mandatory, matching Rust's
-own 1-tuple pattern) both destructure; a bare `a := ...` or the equivalent single parenthesized
-`(a) := ...` (mere grouping, no comma) instead binds the right-hand side's *whole* result
-(including a tuple-typed one) directly to the one named cell. Destructuring and direct-bind are
+`(a, b) := ...` and the one-element `(a,) := ...` both destructure. Parenthesized
+binding targets require the first comma, so `(a) := ...` is invalid. A bare
+`a := ...` binds the right-hand side's *whole* result (including a tuple-typed one)
+directly to the one named cell. Destructuring and direct-bind are
 otherwise governed by the same type-matching rules as any other binding: each output's declared
 type must structurally match what the expression actually produces, checked at parse time.
 

@@ -8,6 +8,7 @@
 - [[knowledge/adam-slides-graph-baseline-overflow-and-pagination-margin-sizing.md|Adam slides graph baseline overflow and pagination margin sizing]] (discovery, 0.99) `adam-slides` `marp` `css` `svg` `layout` `scrollbars`
 - [[knowledge/architecture-overview.md|Architecture Overview]] (concept, 0.80) `architecture` `cel-rs` `adam-rs` `cel-runtime` `cel-parser` `overview`
 - [[knowledge/canonical-container-value-persistence.md|Canonical Container Value Persistence]] (concept, 0.75) `cel-runtime` `canonical-values` `tuples` `arrays` `value-persistence`
+- [[knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md|CEL and Adam require strict LL1 with terminal commas only for singleton tuples]] (decision, 0.99) `grammar` `ll1` `parser` `trailing-comma` `project-policy`
 - [[knowledge/cel-cleanup-belongs-to-live-values-not-typed-instruction-plans.md|CEL cleanup belongs to live values, not typed instruction plans]] (decision, 0.98) `cel-runtime` `ownership` `unwinding` `allocation` `value-type` `unsafe`
 - [[knowledge/celparser-and-parsercontext-dual-emission.md|CELParser and ParserContext Dual Emission]] (concept, 0.80) `cel-parser` `parser-context` `ast-context` `dyn-segment-context` `cel-expression`
 - [[knowledge/clippy-and-feature-flag-validation-matrix.md|Clippy and Feature Flag Validation Matrix]] (procedure, 0.85) `build` `clippy` `feature-flags` `validation` `cargo`

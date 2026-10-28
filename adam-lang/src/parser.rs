@@ -1593,11 +1593,11 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(x_id).unwrap(), 4);
     }
 
+    /// Rejects a parenthesized binding name instead of treating it as a direct bind.
     #[test]
-    fn parse_binding_single_parenthesized_identifier_without_comma_is_a_direct_bind() {
-        let mut sheet = parser()
-            .parse_str(
-                r#"
+    fn parse_binding_single_parenthesized_identifier_without_comma_is_an_error() {
+        let result = parser().parse_str(
+            r#"
                 sheet s {
                     cell w: i32 = 4;
                     cell x: i32 = 0;
@@ -1606,11 +1606,8 @@ mod tests {
                     }
                 }
             "#,
-            )
-            .unwrap();
-        sheet.propagate().unwrap();
-        let (x_id, _) = sheet.cell_names["x"].clone();
-        assert_eq!(*sheet.read::<i32>(x_id).unwrap(), 4);
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2034,13 +2031,13 @@ mod tests {
                 conditional mode {
                     0i32 => {
                         relationship { height := width; }
-                    },
+                    }
                     1i32 => {
                         relationship { height := width * ratio; }
-                    },
+                    }
                     _ => {
                         relationship { height := width; }
-                    },
+                    }
                 }
             }
         "#,
@@ -2133,7 +2130,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional mode {
-                        -1i32 => { relationship { y := x; } },
+                        -1i32 => { relationship { y := x; } }
                     }
                 }
             "#,
@@ -2153,7 +2150,7 @@ mod tests {
                 cell x: i32 = 1;
                 cell y: i32 = 0;
                 conditional mode {
-                    -1u32 => { relationship { y := x; } },
+                    -1u32 => { relationship { y := x; } }
                 }
             }
         "#,
@@ -2176,7 +2173,7 @@ mod tests {
                     cell x: f64 = 1.0;
                     cell y: f64;
                     conditional mode {
-                        _ => { relationship { y := x * 2.0; } },
+                        _ => { relationship { y := x * 2.0; } }
                     }
                 }
             "#,
@@ -2196,8 +2193,8 @@ mod tests {
                 cell x: f64 = 1.0;
                 cell y: f64;
                 conditional mode {
-                    (0, 0) => { relationship { y := x; } },
-                    _ => { relationship { y := x * 2.0; } },
+                    (0, 0) => { relationship { y := x; } }
+                    _ => { relationship { y := x * 2.0; } }
                 }
             }
         "#,
@@ -2216,7 +2213,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional a && b {
-                        true => { relationship { y := x; } },
+                        true => { relationship { y := x; } }
                     }
                 }
             "#,
@@ -2246,7 +2243,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional a && a {
-                        true => { relationship { y := x; } },
+                        true => { relationship { y := x; } }
                     }
                 }
             "#,
@@ -2267,7 +2264,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional mode {
-                        1i32 => { relationship { y := x; } },
+                        1i32 => { relationship { y := x; } }
                     }
                 }
             "#,

@@ -12,6 +12,8 @@ type Result<T> = std::result::Result<T, ParseError>;
 /// A peekable adam-lang token stream plus the primitive lookahead/consume operations every
 /// adam-lang grammar production needs, independent of what each production builds (a live
 /// `adam_rs::Sheet` mutation, or a syntax tree node).
+///
+/// - Invariant: lookahead exposes only the next token; the lexer cannot be cloned or rewound.
 pub(crate) struct TokenCursor {
     tokens: Option<std::iter::Peekable<LexLexer>>,
     /// Running brace/bracket/paren nesting depth, incremented/decremented only by this cursor's

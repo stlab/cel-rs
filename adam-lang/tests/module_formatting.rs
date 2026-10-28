@@ -2,34 +2,32 @@
 
 use adam_lang::{AdamAstParser, attach_module_trivia, format_module, format_source};
 
-/// Preserves comments on both sides of list closers with or without a trailing comma.
+/// Preserves comments on both sides of list closers without a trailing comma.
 #[test]
-fn closing_lists_preserve_comments_without_mandatory_trailing_comma() {
-    for comma in ["", ","] {
-        for (before, after) in [
-            ("/* KEEP_BEFORE */", "/* KEEP_AFTER */"),
-            ("// KEEP_BEFORE\n", "// KEEP_AFTER\n"),
-            ("/* KEEP_BEFORE */", "// KEEP_AFTER\n"),
-            ("// KEEP_BEFORE\n", "/* KEEP_AFTER */"),
+fn closing_lists_preserve_comments() {
+    for (before, after) in [
+        ("/* KEEP_BEFORE */", "/* KEEP_AFTER */"),
+        ("// KEEP_BEFORE\n", "// KEEP_AFTER\n"),
+        ("/* KEEP_BEFORE */", "// KEEP_AFTER\n"),
+        ("// KEEP_BEFORE\n", "/* KEEP_AFTER */"),
+    ] {
+        for source in [
+            format!("sheet helper(a: i32 {before}) {after} {{}}"),
+            format!("sheet app {{ relationship helper(a: x {before}) {after}; }}"),
         ] {
-            for source in [
-                format!("sheet helper(a: i32 {comma} {before}) {after} {{}}"),
-                format!("sheet app {{ relationship helper(a: x {comma} {before}) {after}; }}"),
-            ] {
-                let formatted = format_source(&source).unwrap();
-                for marker in ["KEEP_BEFORE", "KEEP_AFTER"] {
-                    assert_eq!(
-                        formatted.matches(marker).count(),
-                        1,
-                        "{source}\n{formatted}"
-                    );
-                }
-                assert!(formatted.find("KEEP_BEFORE") < formatted.find(')'));
-                assert!(formatted.find(')') < formatted.find("KEEP_AFTER"));
-                let parsed = AdamAstParser::new().parse_module_str(&formatted).unwrap();
-                assert!(parsed.errors.is_empty(), "{formatted}: {:?}", parsed.errors);
-                assert_eq!(format_source(&formatted).unwrap(), formatted);
+            let formatted = format_source(&source).unwrap();
+            for marker in ["KEEP_BEFORE", "KEEP_AFTER"] {
+                assert_eq!(
+                    formatted.matches(marker).count(),
+                    1,
+                    "{source}\n{formatted}"
+                );
             }
+            assert!(formatted.find("KEEP_BEFORE") < formatted.find(')'));
+            assert!(formatted.find(')') < formatted.find("KEEP_AFTER"));
+            let parsed = AdamAstParser::new().parse_module_str(&formatted).unwrap();
+            assert!(parsed.errors.is_empty(), "{formatted}: {:?}", parsed.errors);
+            assert_eq!(format_source(&formatted).unwrap(), formatted);
         }
     }
 }
@@ -154,7 +152,7 @@ fn parameter_types_preserve_complete_shapes_and_comments() {
 /// Uses compact path/list punctuation when comments require no intervening layout.
 #[test]
 fn module_canonical_punctuation() {
-    let source = "use lib :: helper as h; sheet helper(a:i32,){} sheet empty(){} sheet root{relationship h(a:x,);}";
+    let source = "use lib :: helper as h; sheet helper(a:i32){} sheet empty(){} sheet root{relationship h(a:x);}";
     assert_eq!(
         format_source(source).unwrap(),
         "use lib::helper as h;\nsheet helper(a: i32) {\n}\nsheet empty() {\n}\nsheet root {\n    relationship h(a: x);\n}\n"
@@ -166,10 +164,10 @@ fn module_canonical_punctuation() {
 fn module_comments_round_trip() {
     let source = "// leading\nuse /* import */ constraints::ordered as ord;
         // between
-        sheet helper(/* signature */ left: i32, right: i32, /* signature end */) {}
+        sheet helper(/* signature */ left: i32, right: i32 /* signature end */) {}
         sheet empty(/* empty signature */) {}
         sheet first {
-            relationship /* callee */ ord(/* argument */ left: a, right: /* actual */ b, /* arguments end */);
+            relationship /* callee */ ord(/* argument */ left: a, right: /* actual */ b /* arguments end */);
         }
         // inter-definition
         sheet second {}
@@ -252,7 +250,7 @@ fn module_boundary_comments_are_unique() {
         sheet /* before name */ helper // before signature
         ( // first formal
             a /* before colon */ : /* after colon */ i32 // after type
-            , /* before close */ ) /* before body */ {
+            /* before close */ ) /* before body */ {
         }
         /* between definitions */
         sheet root {
@@ -260,7 +258,7 @@ fn module_boundary_comments_are_unique() {
             relationship /* before callee */ h // before arguments
             ( // first argument
                 a /* argument colon */ : /* before actual */ x // after actual
-                , /* before argument close */ ) /* before use semicolon */ ;
+                /* before argument close */ ) /* before use semicolon */ ;
             conditional true {
                 true => {
                     // before branch use

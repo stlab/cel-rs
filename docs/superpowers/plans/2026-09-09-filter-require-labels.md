@@ -1646,10 +1646,10 @@ type_expr          = identifier
 
 relationship_decl  = "relationship" "{" { binding } "}".
 binding            = binding_target ":=" expression ";".
-binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
+binding_target     = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".
 
 conditional_decl   = "conditional" expression "{" { conditional_branch } "}".
-conditional_branch = (expression | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+conditional_branch = (expression | "_") "=>" "{" { relationship_decl } "}".
 
 out_decl           = "out" identifier [ ":" type_expr ] ":=" expression
                        [ cell_filter ] [ require_block ] ";".

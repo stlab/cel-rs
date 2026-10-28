@@ -437,7 +437,7 @@ pub struct RelationshipDecl {
 }
 
 /// `binding = binding_target ":=" expression ";".`
-/// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
+/// `binding_target = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".`
 ///
 /// Unlike the old `method_decl` this replaces, a binding names no explicit input cell list —
 /// its inputs are whichever already-declared cells `body` references, deduced at compile time
@@ -447,15 +447,15 @@ pub struct RelationshipDecl {
 /// Parenthesizing the left-hand side requests tuple destructuring, matching Rust's tuple-pattern
 /// syntax: `(a, b) := ...` and the single-element `(a,) := ...` (trailing comma mandatory,
 /// exactly as in a Rust 1-tuple pattern) both destructure `body`'s tuple result element-wise into
-/// `outputs`. A bare identifier, or a single parenthesized identifier with no comma (`(a) :=
-/// ...`, mere grouping), binds `body`'s whole result directly to that one output instead — see
-/// [`Self::destructure`].
+/// `outputs`. A bare identifier binds `body`'s whole result directly to that one output instead.
+/// A parenthesized binding target always requires a comma; `(a) := ...` is invalid.
+/// See [`Self::destructure`].
 #[derive(Debug, Clone)]
 pub struct BindingDecl {
     /// The binding's output cell names (the left-hand side), in declaration order.
     pub outputs: Vec<(String, ExprSpan)>,
     /// Whether the left-hand side requests destructuring (`(a, b) := ...` or `(a,) := ...`) as
-    /// opposed to a direct bind (`a := ...` or the equivalent grouping `(a) := ...`). Always
+    /// opposed to a direct bind (`a := ...`). Always
     /// `true` when `outputs.len() > 1`; when `outputs.len() == 1`, distinguishes "destructure
     /// this single-element tuple" from "bind this whole value directly" — a distinction the
     /// parenthesized-or-not left-hand side is the only way to express, since both forms name
@@ -615,7 +615,7 @@ pub struct DefaultBranch {
     pub span: ExprSpan,
 }
 
-/// `conditional_branch = literal_pattern "=>" "{" { relationship_item } "}" [ "," ].`
+/// `conditional_branch = literal_pattern "=>" "{" { relationship_item } "}".`
 /// `literal_pattern = ["-"] literal.`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {

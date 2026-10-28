@@ -146,10 +146,10 @@ that merely shares a zero-sized layout. An explicitly registered opaque host
 ## Host-registered records
 
 A host can register a named record schema and operations without changing CEL.
-Write `Sample { value: 3.0, }` to construct a record when the host supplies that
+Write `Sample { value: 3.0 }` to construct a record when the host supplies that
 schema. Field labels select schema fields rather than variables; values evaluate
-in written order. Supply every field exactly once. Empty schemas accept `{}`,
-and non-empty field lists accept a trailing comma. CEL reports unknown
+in written order. Supply every field exactly once. Empty schemas accept `{}`;
+non-empty field lists reject trailing commas. CEL reports unknown
 constructors, unknown/duplicate/missing fields, and mismatched field types.
 
 Records use exact scalar types: `1` is `i32`, never implicitly `f64`; use `1.0`

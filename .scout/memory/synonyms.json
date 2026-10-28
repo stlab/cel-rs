@@ -7289,6 +7289,96 @@
         "cel-rs",
         1.0
       ]
+    ],
+    "grammar": [
+      [
+        "trailing-comma",
+        1.0
+      ],
+      [
+        "project-policy",
+        1.0
+      ],
+      [
+        "parser",
+        1.0
+      ],
+      [
+        "ll1",
+        1.0
+      ]
+    ],
+    "ll1": [
+      [
+        "project-policy",
+        1.0
+      ],
+      [
+        "parser",
+        1.0
+      ],
+      [
+        "grammar",
+        1.0
+      ],
+      [
+        "trailing-comma",
+        1.0
+      ]
+    ],
+    "parser": [
+      [
+        "trailing-comma",
+        1.0
+      ],
+      [
+        "ll1",
+        1.0
+      ],
+      [
+        "grammar",
+        1.0
+      ],
+      [
+        "project-policy",
+        1.0
+      ]
+    ],
+    "project-policy": [
+      [
+        "ll1",
+        1.0
+      ],
+      [
+        "grammar",
+        1.0
+      ],
+      [
+        "parser",
+        1.0
+      ],
+      [
+        "trailing-comma",
+        1.0
+      ]
+    ],
+    "trailing-comma": [
+      [
+        "ll1",
+        1.0
+      ],
+      [
+        "parser",
+        1.0
+      ],
+      [
+        "project-policy",
+        1.0
+      ],
+      [
+        "grammar",
+        1.0
+      ]
     ]
   },
   "provenance": {
@@ -12501,8 +12591,68 @@
     ],
     "dynsegment|cel-runtime": [
       "knowledge/four-layer-stack-runtime-architecture.md"
+    ],
+    "grammar|ll1": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "grammar|parser": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "grammar|project-policy": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "grammar|trailing-comma": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "ll1|grammar": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "ll1|parser": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "ll1|project-policy": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "ll1|trailing-comma": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "parser|grammar": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "parser|ll1": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "parser|project-policy": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "parser|trailing-comma": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "project-policy|grammar": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "project-policy|ll1": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "project-policy|parser": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "project-policy|trailing-comma": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "trailing-comma|grammar": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "trailing-comma|ll1": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "trailing-comma|parser": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "trailing-comma|project-policy": [
+      "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
     ]
   },
-  "entries_processed": 23,
-  "built_at": "2026-10-27T23:21:32.934620+00:00"
+  "entries_processed": 24,
+  "built_at": "2026-10-28T04:14:40.991256+00:00"
 }

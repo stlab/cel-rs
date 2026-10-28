@@ -56,7 +56,7 @@ fn registered_record_and_member_example() {
         .unwrap();
     let mut parser = CELParser::new(lookup);
     for source in [
-        "Sample { value: 3.0, }.value",
+        "Sample { value: 3.0 }.value",
         "Sample { value: 3.0 }.value()",
     ] {
         assert_eq!(

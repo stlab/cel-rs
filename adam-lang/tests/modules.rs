@@ -2,6 +2,80 @@
 
 use adam_lang::{AdamAstParser, ast};
 
+/// Rejects trailing commas in component signatures and named actuals in both parser paths.
+#[test]
+fn module_lists_reject_trailing_commas() {
+    for source in [
+        "sheet helper(a: i32,) {} sheet root {}",
+        "sheet helper(a: i32, b: (i32,),) {} sheet root {}",
+        "sheet helper(a: i32, /* trailing */) {} sheet root {}",
+        "sheet helper(a: i32) {} sheet root { cell x: i32; relationship helper(a: x,); }",
+        "sheet helper(a: i32, b: i32) {} sheet root { cell x: i32; cell y: i32; relationship helper(a: x, b: y,); }",
+    ] {
+        let module = AdamAstParser::new().parse_module_str(source).unwrap();
+        assert!(!module.errors.is_empty(), "{source}");
+        assert!(adam_lang::format_source(source).is_err(), "{source}");
+        assert!(
+            adam_lang::AdamParser::new(
+                adam_lang::TypeRegistry::new(),
+                cel_parser::OpLookup::new(),
+            )
+            .parse_str(source)
+            .is_err(),
+            "{source}"
+        );
+    }
+}
+
+/// Rejects commas after literal and default conditional branches, including before another branch.
+#[test]
+fn conditional_branches_reject_commas() {
+    for branches in [
+        "true => {},",
+        "_ => {},",
+        "true => {}, _ => {}",
+        "true => {} _ => {},",
+    ] {
+        let source = format!("sheet root {{ conditional true {{ {branches} }} }}");
+        let module = AdamAstParser::new().parse_module_str(&source).unwrap();
+        assert!(!module.errors.is_empty(), "{source}");
+        assert!(adam_lang::format_source(&source).is_err(), "{source}");
+        assert!(
+            adam_lang::AdamParser::new(
+                adam_lang::TypeRegistry::new(),
+                cel_parser::OpLookup::new(),
+            )
+            .parse_str(&source)
+            .is_err(),
+            "{source}"
+        );
+    }
+}
+
+/// Accepts empty and separated lists, grouping and singleton tuples without optional commas.
+#[test]
+fn strict_lists_preserve_empty_lists_and_singleton_tuples() {
+    for source in [
+        "sheet helper() {} sheet root { relationship helper(); }",
+        "sheet helper(a: (i32,), b: (i32)) {} sheet root { cell x: (i32,) = (1,); cell y: (i32) = (2); relationship helper(a: x, b: y); }",
+        "sheet root { conditional true { true => {} _ => {} } }",
+        "sheet root { source x: i32 = 1; cell y: i32; relationship { (y,) := (x,); } }",
+    ] {
+        let module = AdamAstParser::new().parse_module_str(source).unwrap();
+        assert!(module.errors.is_empty(), "{source}: {:?}", module.errors);
+        assert!(adam_lang::format_source(source).is_ok(), "{source}");
+        assert!(
+            adam_lang::AdamParser::new(
+                adam_lang::TypeRegistry::new(),
+                cel_parser::OpLookup::new(),
+            )
+            .parse_str(source)
+            .is_ok(),
+            "{source}"
+        );
+    }
+}
+
 /// Rejects reserved declaration, alias and reference names while recovering later sheets.
 #[test]
 fn reserved_module_identifiers_reject_consistently_and_recover() {
@@ -40,8 +114,8 @@ fn reserved_module_identifiers_reject_consistently_and_recover() {
 #[test]
 fn module_structural_shapes() {
     let source = "use constraints::ordered as ord;
-        sheet first { relationship helper(left: a, right: b,); }
-        sheet helper(left: i32, right: (i32, bool),) {}
+        sheet first { relationship helper(left: a, right: b); }
+        sheet helper(left: i32, right: (i32, bool)) {}
         sheet empty() {}
         sheet second {}";
     let module = AdamAstParser::new().parse_module_str(source).unwrap();
@@ -81,10 +155,12 @@ fn module_recovery_preserves_following_definition() {
         "use constraints:: as ord;",
         "sheet broken(a i32) {}",
         "sheet broken(a) {}",
+        "sheet broken(a: i32,) {}",
         "sheet broken(source a: i32) {}",
         "sheet broken(out a: i32) {}",
         "sheet broken { relationship foo(a x); }",
         "sheet broken { relationship foo(x); }",
+        "sheet broken { relationship foo(a: x,); }",
         "use constraints::*;",
         "sheet broken(a: i32 = 1) {}",
         "use broken sheet next_too {}",
@@ -108,7 +184,7 @@ fn module_recovery_preserves_following_definition() {
 /// Retains the exact names and spans without resolving unknown types or executing initializers.
 #[test]
 fn module_names_types_and_spans_are_structural() {
-    let source = "use lib::helper as local;\nsheet helper(a: [Unknown], b: (i32, bool),) { cell private = not_registered(); }\nsheet root { relationship local(a: x, b: y); }";
+    let source = "use lib::helper as local;\nsheet helper(a: [Unknown], b: (i32, bool)) { cell private = not_registered(); }\nsheet root { relationship local(a: x, b: y); }";
     let module = AdamAstParser::new().parse_module_str(source).unwrap();
     assert!(module.errors.is_empty(), "{:?}", module.errors);
     let ast::ModuleItem::Sheet(helper) = &module.items[1] else {

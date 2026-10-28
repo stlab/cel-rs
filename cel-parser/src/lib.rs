@@ -61,7 +61,7 @@
 //! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ parameter_list ] ")" ]) }.
 //! primary_expression = literal | identifier [ record_fields ] | tuple_or_group | array_expression
 //!                    | if_expression | closure_expression.
-//! record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } [ "," ] ] "}".
+//! record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } ] "}".
 //! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
 //! array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expression ].
 //! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
@@ -1895,7 +1895,7 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } [ "," ] ] "}".`
+    /// `record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } ] "}".`
     ///
     /// - Precondition: the constructor identifier is consumed and the next token is `{`.
     /// - Postcondition: fields are emitted once in source order before the constructor.
@@ -1907,50 +1907,48 @@ impl<C: ParserContext> Parser<C> {
         self.advance();
         let ambient_start = self.context.current_stack_offset();
         let mut fields = Vec::new();
-        loop {
-            if matches!(
-                self.peek_token(),
-                Some(Token::CloseDelim {
-                    delimiter: Delimiter::Brace,
-                    ..
-                })
-            ) {
+        if !matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Brace,
+                ..
+            })
+        ) {
+            loop {
+                let Some(Token::Identifier(field)) = self.peek_token() else {
+                    return Err(self.error_at("expected record field name"));
+                };
+                let field_name = field.to_string();
+                let field_span = field.span();
                 self.advance();
-                break;
-            }
-            let Some(Token::Identifier(field)) = self.peek_token() else {
-                return Err(self.error_at("expected record field name"));
-            };
-            let field_name = field.to_string();
-            let field_span = field.span();
-            self.advance();
-            if !self.is_punctuation(":") {
-                return Err(self.error_at("expected `:` after record field name"));
-            }
-            if !self.is_ordinary_expression()? {
-                return Err(self.error_at("expected record field expression"));
-            }
-            fields.push((
-                field_name,
-                ExprSpan {
-                    start: field_span,
-                    end: field_span,
-                },
-            ));
-            if matches!(
-                self.peek_token(),
-                Some(Token::CloseDelim {
-                    delimiter: Delimiter::Brace,
-                    ..
-                })
-            ) {
-                self.advance();
-                break;
-            }
-            if !self.is_punctuation(",") {
-                return Err(self.error_at("expected `,` or `}` after record field"));
+                if !self.is_punctuation(":") {
+                    return Err(self.error_at("expected `:` after record field name"));
+                }
+                if !self.is_ordinary_expression()? {
+                    return Err(self.error_at("expected record field expression"));
+                }
+                fields.push((
+                    field_name,
+                    ExprSpan {
+                        start: field_span,
+                        end: field_span,
+                    },
+                ));
+                if !self.is_punctuation(",") {
+                    break;
+                }
             }
         }
+        if !matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Brace,
+                ..
+            })
+        ) {
+            return Err(self.error_at("expected `,` or `}` after record field"));
+        }
+        self.advance();
         self.context.make_record(
             &self.op_lookup,
             name,

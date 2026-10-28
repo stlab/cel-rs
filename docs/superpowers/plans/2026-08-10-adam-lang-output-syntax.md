@@ -513,8 +513,8 @@ In `adam-lang/src/lib.rs`, extend the `# Grammar` doc comment:
 //! type_name          = identifier.
 //! relationship_decl  = "relationship" [ identifier ] "{" { method_decl } "}".
 //! conditional_decl   = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".
-//! conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].
-//! default_branch     = "_"   "=>" "{" { relationship_decl } "}" [ "," ].
+//! conditional_branch = literal "=>" "{" { relationship_decl } "}".
+//! default_branch     = "_"   "=>" "{" { relationship_decl } "}".
 //! method_decl        = "method" cell_list "->" cell_list method_body.
 //! out_decl           = "out" identifier [ ":" type_name ] "{" out_method { condition_decl } "}".
 //! out_method         = "method" cell_list method_body.

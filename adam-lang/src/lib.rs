@@ -8,7 +8,7 @@
 //! ```text
 //! module             = { use_decl | sheet }.
 //! use_decl           = "use" qualified_name [ "as" identifier ] ";".
-//! sheet              = "sheet" identifier [ "(" [ parameter { "," parameter } [ "," ] ] ")" ]
+//! sheet              = "sheet" identifier [ "(" [ parameter { "," parameter } ] ")" ]
 //!                        "{" { sheet_item } "}".
 //! parameter          = identifier ":" type_expr.
 //! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
@@ -21,19 +21,23 @@
 //!                    | "[" type_expr "]"
 //!                    | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" "{" { binding } "}".
-//! relationship_use   = "relationship" qualified_name "(" [ actual { "," actual } [ "," ] ] ")" ";".
+//! relationship_use   = "relationship" qualified_name "(" [ actual { "," actual } ] ")" ";".
 //! actual             = identifier ":" identifier.
 //! qualified_name     = identifier { "::" identifier }.
 //! binding            = binding_target ":=" expression ";".
-//! binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
+//! binding_target     = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".
 //! conditional_decl   = "conditional" expression "{" { conditional_branch } "}".
 //! conditional_branch = (literal_pattern | "_") "=>" "{"
-//!                        { relationship_decl | relationship_use } "}" [ "," ].
+//!                        { relationship_decl | relationship_use } "}".
 //! out_decl           = "out" identifier [":" type_expr] ":=" expression
 //!                        [ cell_filter ] [ require_block ] ";".
 //! require_block      = "require" "{" { requirement } "}".
 //! requirement        = [ "@" identifier ] expression ";".
 //! ```
+//!
+//! Every production uses strict LL(1) parsing: a comma commits to another item.
+//! Only singleton tuple values, types and destructuring bindings require a terminal comma.
+//! Conditional branches have no comma separator or terminator.
 //!
 //! A sheet without a parameter list is a root; a sheet with a parameter list
 //! defines a reusable component. [`AdamParser::parse_str`] constructs a module's

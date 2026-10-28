@@ -41,41 +41,6 @@ pub enum GapPiece {
 ///
 /// - Complexity: O(n) in `gap.len()`.
 pub fn scan_gap(gap: &str, expected: &[&'static str]) -> Vec<GapPiece> {
-    scan_gap_prefix(gap, None, expected)
-}
-
-/// Scans a fixed-token gap with an optional leading punctuation token.
-///
-/// Preserves comments before and after the optional token and required tokens.
-/// Missing required tokens are synthesized as in [`scan_gap`]; an absent optional
-/// token is never synthesized.
-///
-/// - Complexity: O(n + e) time and space for n gap bytes and e expected tokens.
-///
-/// # Examples
-/// ```
-/// use cel_parser::trivia::{GapPiece, scan_gap_with_optional_prefix};
-/// assert_eq!(
-///     scan_gap_with_optional_prefix(")", ",", &[")"]),
-///     vec![GapPiece::Punct(")")],
-/// );
-/// ```
-pub fn scan_gap_with_optional_prefix(
-    gap: &str,
-    optional: &'static str,
-    expected: &[&'static str],
-) -> Vec<GapPiece> {
-    scan_gap_prefix(gap, Some(optional), expected)
-}
-
-/// Scans comments and required tokens after consuming at most one optional prefix.
-///
-/// - Complexity: O(n + e) time and space for n gap bytes and e expected tokens.
-fn scan_gap_prefix(
-    gap: &str,
-    mut optional: Option<&'static str>,
-    expected: &[&'static str],
-) -> Vec<GapPiece> {
     let mut pieces = Vec::new();
     let mut next = 0usize;
     let mut rest = gap;
@@ -93,11 +58,6 @@ fn scan_gap_prefix(
         } else if let Some((inner, after)) = take_block_comment(rest) {
             pieces.push(GapPiece::Comment(Comment::Block(normalize_block(inner))));
             rest = after;
-        } else if let Some(prefix) = optional.take() {
-            if let Some(after) = rest.strip_prefix(prefix) {
-                pieces.push(GapPiece::Punct(prefix));
-                rest = after;
-            }
         } else if next < expected.len() && rest.starts_with(expected[next]) {
             pieces.push(GapPiece::Punct(expected[next]));
             rest = &rest[expected[next].len()..];
