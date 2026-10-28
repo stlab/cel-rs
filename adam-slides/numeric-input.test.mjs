@@ -92,6 +92,7 @@ function mountedSlider(raw, value) {
     };
     const scope = vm.createContext({
         setTimeout: callback => scheduled.push(callback),
+        /** Creates independently owned event records consumed by the bridge assertions. */
         Event: class {
             /** Retains the event's observable type and options. */
             constructor(type, options) {

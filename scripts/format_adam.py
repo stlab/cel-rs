@@ -22,18 +22,29 @@ WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
 IGNORED_DIR_NAMES = {"target", "node_modules"}
 
 
+def raise_walk_error(error: OSError) -> None:
+    """Propagates a filesystem failure instead of skipping an unreadable subtree."""
+    raise error
+
+
 def find_adm2_files(start: Path) -> list[Path]:
     """Returns every `.adm2` file at or under `start`, in sorted order.
 
     A `start` that is itself a file is returned as a single-element list if it has an
-    `.adm2` extension, otherwise an empty list. Directories named in IGNORED_DIR_NAMES
-    or starting with '.' are not descended into.
+    `.adm2` extension, otherwise an empty list. Nested directories named in
+    IGNORED_DIR_NAMES or starting with '.' are not descended into.
+
+    Raises OSError when a directory cannot be read; never returns a partial search.
+    Time: O(b + n * l * log(n)), for b directory-entry bytes, n matching files and
+    maximum path length l. Space: O(b + p), including p matching-path bytes.
+
+    Example: find_adm2_files(Path("examples")) selects that tree's Adam sources.
     """
     if start.is_file():
         return [start] if start.suffix == ".adm2" else []
 
     found = []
-    for dirpath, dirnames, filenames in os.walk(start):
+    for dirpath, dirnames, filenames in os.walk(start, onerror=raise_walk_error):
         dirnames[:] = [
             d for d in dirnames if d not in IGNORED_DIR_NAMES and not d.startswith(".")
         ]
@@ -44,37 +55,55 @@ def find_adm2_files(start: Path) -> list[Path]:
 
 
 def main() -> int:
+    """Formats selected sources and returns the formatter's status, or 1 on IO failure.
+
+    Reads paths from sys.argv, defaulting to the current directory. Overlapping
+    inputs select each resolved source once. Discovery completes before formatting.
+    Filesystem and command-launch errors are reported on standard error.
+    Complexity: discovery and formatter costs, plus O(p) deduplication storage for
+    p selected-path bytes.
+
+    Example: python scripts/format_adam.py examples
+    """
     paths = [Path(p) for p in sys.argv[1:]] or [Path(".")]
 
     files: list[Path] = []
     seen: set[Path] = set()
-    for path in paths:
-        if not path.exists():
-            print(f"format_adam.py: {path}: no such file or directory", file=sys.stderr)
-            return 1
-        for found in find_adm2_files(path):
-            resolved = found.resolve()
-            if resolved not in seen:
-                seen.add(resolved)
-                files.append(found)
+    try:
+        for path in paths:
+            if not path.exists():
+                print(f"format_adam.py: {path}: no such file or directory", file=sys.stderr)
+                return 1
+            for found in find_adm2_files(path):
+                resolved = found.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    files.append(found)
+    except OSError as error:
+        print(f"format_adam.py: {error}", file=sys.stderr)
+        return 1
 
     if not files:
         print("format_adam.py: no .adm2 files found")
         return 0
 
-    result = subprocess.run(
-        [
-            "cargo",
-            "run",
-            "--manifest-path",
-            str(WORKSPACE_ROOT / "Cargo.toml"),
-            "--package",
-            "adam-fmt",
-            "--quiet",
-            "--",
-            *(str(f) for f in files),
-        ]
-    )
+    try:
+        result = subprocess.run(
+            [
+                "cargo",
+                "run",
+                "--manifest-path",
+                str(WORKSPACE_ROOT / "Cargo.toml"),
+                "--package",
+                "adam-fmt",
+                "--quiet",
+                "--",
+                *(str(f) for f in files),
+            ]
+        )
+    except OSError as error:
+        print(f"format_adam.py: {error}", file=sys.stderr)
+        return 1
     return result.returncode
 
 
