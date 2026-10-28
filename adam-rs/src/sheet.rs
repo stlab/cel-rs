@@ -4705,7 +4705,7 @@ mod tests {
     }
 
     #[test]
-    /// Checks exclusion of ordinary and source-only cells from Out enumeration.
+    /// Checks exclusion of ordinary cells from Out enumeration.
     fn out_cells_iterates_only_out_kind_cells() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);

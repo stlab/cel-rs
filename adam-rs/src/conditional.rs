@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    /// Checks the input identity and output type of a cell-backed match expression.
+    /// Checks the wrapped cell identity of a cell-backed match expression.
     fn match_expr_cell_wraps_a_single_cell() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();

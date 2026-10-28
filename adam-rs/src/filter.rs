@@ -378,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    /// Checks preservation of an erased filter's declared value and argument types.
+    /// Checks preservation of an erased filter's declared value type.
     fn new_stores_explicit_value_type_and_arg_types() {
         let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
             let v = value.downcast_ref::<i32>().unwrap();

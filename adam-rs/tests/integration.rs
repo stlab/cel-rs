@@ -518,7 +518,7 @@ fn arity_3_2_1() {
 }
 
 #[test]
-/// Checks direct self-reference clamping against an editable bound.
+/// Checks direct self-reference clamping against a fixed zero bound.
 fn self_ref_direct_clamp() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -3372,7 +3372,7 @@ fn conditional_seed_cycle_preserves_completed_queries_and_recovers() {
 }
 
 #[test]
-/// Checks the exact cell, relationship and method sites of a seed cycle.
+/// Checks the exact cell and relationship sites of a seed cycle.
 fn seed_cycle_reports_exact_sites() {
     let (mut sheet, a, b, _c, _d, _s, rel1, rel2) = seed_cycle_sheet();
 
