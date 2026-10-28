@@ -76,15 +76,22 @@ committed.
 From the repository root, run:
 
 ```bash
-node --test adam-lang-book/tests/bootstrap.test.cjs
+node --experimental-vm-modules --test adam-lang-book/tests/bootstrap.test.cjs
 ```
 
 The tests execute the authored classic script with Node's built-in runner and VM.
 They cover mount planning, independent graph lists, dependency selection, manifest
 HTTP failures, script load failures, and visible page errors without installing packages.
+The VM flag lets the fixture observe dynamic imports as well as fetches and script
+insertions, including their absence on pages without mounts.
 When a dependency or manifest fails, every affected live mount displays an accessible
 error instead of remaining silently empty. Real rendered interactions still require
 the staged WebAssembly and browser verification.
+
+Each page may mount an inspector example name only once, with any number of matching
+graphs. Duplicate inspector names produce a visible error before live roots mount,
+even without matching graphs: the live inspector uses the example name to namespace
+its DOM controls. Independent roots with the same name would address the same controls.
 
 ## CI
 

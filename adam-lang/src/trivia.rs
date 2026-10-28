@@ -26,6 +26,14 @@
 //! directly, like any other container).
 //! See <https://github.com/stlab/cel-rs/issues/52>.
 //!
+//! Attachment costs below use `v` for visited AST nodes, `g` for the sum of scanned
+//! gap bytes, `c` for the sum of character-column prefixes traversed by coordinate
+//! conversions, and `h` for attachment call depth. Repeated scans count repeatedly.
+//! A shared line-start table avoids rebuilding the index, but conversions still
+//! traverse each line's character prefix; many items on one long line can make
+//! `c` quadratic in that line's length. Recovered comment storage is included in
+//! the space bounds.
+//!
 //! A `//`/`/* */` comment ending or beginning on the same source line as an adjacent node's own
 //! first/last token — rather than on a fresh line of its own — attaches as that adjacent node's
 //! own `trailing_line_comment` instead of the following node's `leading_comment`; see
@@ -325,6 +333,8 @@ impl TrailingTriviaTarget for crate::ast::DefaultBranch {
 /// behavior) rather than to just the one-character `{` token — the same span value the matching
 /// `CloseDelim` token carries. So `open_brace.start()` is the position of the `{` character
 /// itself; advancing one byte (a brace is always exactly one ASCII byte) lands just past it.
+///
+/// - Complexity: O(c) time for the opening position's character column; O(1) space.
 fn after_open_brace(source: &str, line_starts: &[usize], open_brace: proc_macro2::Span) -> usize {
     line_column_to_byte(source, line_starts, open_brace.start()) + 1
 }
@@ -333,6 +343,8 @@ fn after_open_brace(source: &str, line_starts: &[usize], open_brace: proc_macro2
 /// [`after_open_brace`], exploiting the same whole-group-span quirk from the other end:
 /// `close_brace.end()` is the position just past the `}`; stepping back one byte lands just
 /// before it.
+///
+/// - Complexity: O(c) time for the closing position's character column; O(1) space.
 fn before_close_brace(
     source: &str,
     line_starts: &[usize],
@@ -355,6 +367,8 @@ fn before_close_brace(
 /// have the list) to set it on `items.last_mut()`. Returns `None` when there is no such same-line
 /// comment to route (either no comment was found, or it was a fresh leading-style comment and has
 /// already been attached directly to `container`).
+///
+/// - Complexity: O(g + c) time and O(g) space for scanned gap bytes and converted prefixes.
 fn attach_trailing<C: TrailingTriviaTarget>(
     source: &str,
     line_starts: &[usize],
@@ -390,6 +404,8 @@ fn attach_trailing<C: TrailingTriviaTarget>(
 /// Same-line routing mirrors [`attach_trailing`]: returns the comment instead of attaching it to
 /// `cond` when it belongs on the same line as the default arm's (or last branch's) own last
 /// token, leaving the caller to attach it there. See <https://github.com/stlab/cel-rs/issues/59>.
+///
+/// - Complexity: O(g + c) time and O(g) space for scanned gap bytes and converted prefixes.
 fn attach_conditional_trailing(
     source: &str,
     line_starts: &[usize],
@@ -430,9 +446,11 @@ fn attach_conditional_trailing(
 ///   sharing one ordinary AST attachment normalize to line-comment text; a single
 ///   comment retains its style.
 ///
-/// - Complexity: O(n) in the length of `source` plus the number of nested lists — every gap's
-///   `LineColumn -> byte offset` conversion reuses the shared `line_starts` table computed once
-///   up front (see `line_start_byte_offsets`), rather than rescanning `source` per gap.
+/// - Complexity: O(n + v + g + c) time for source bytes n, visited AST nodes v,
+///   summed scanned gap bytes g, and summed converted character-column prefixes c.
+///   O(l + g + h) space for source lines l, recovered/scanned gaps, and call depth h.
+///   Sharing line starts does not eliminate repeated prefix scans; c can be quadratic
+///   for many declarations on one long line.
 ///
 /// # Examples
 ///
@@ -448,7 +466,8 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
 /// Attaches nested sheet trivia using the caller's shared source-offset table.
 ///
 /// - Precondition: spans and offsets refer to `source`.
-/// - Complexity: O(n) in the sheet's source and nested AST size.
+/// - Complexity: O(v + g + c) time and O(g + h) space for the sheet and its nested
+///   lists, using the module's attachment cost dimensions.
 fn attach_sheet_body(source: &str, line_starts: &[usize], sheet: &mut Sheet) {
     attach_opening(source, line_starts, sheet.open_brace_span, &mut sheet.items);
     attach_gaps(source, line_starts, &mut sheet.items);
@@ -482,7 +501,11 @@ fn attach_sheet_body(source: &str, line_starts: &[usize], sheet: &mut Sheet) {
 ///
 /// - Precondition: `module` was parsed from exactly `source`.
 /// - Postcondition: each file-boundary comment belongs to exactly one gap.
-/// - Complexity: O(n) in source and AST size, excluding nested trivia scans.
+/// - Complexity: O(n + v + g + c) time for source bytes n, visited AST nodes v,
+///   summed scanned gap bytes g, and summed converted character-column prefixes c,
+///   including every nested attachment. O(l + g + h) space for source lines l,
+///   recovered/scanned gaps, and call depth h. Repeated prefix scans can be quadratic
+///   for many declarations on one long line.
 ///
 /// # Examples
 ///
@@ -527,6 +550,9 @@ pub fn attach_module_trivia(source: &str, module: &mut crate::ast::Module) {
 }
 
 /// Recovers trivia for a relationship block's bindings.
+///
+/// - Complexity: O(v + g + c) time and O(g) space for its bindings, scanned gaps,
+///   and converted prefixes.
 fn attach_relationship(source: &str, line_starts: &[usize], rel: &mut RelationshipDecl) {
     attach_opening(source, line_starts, rel.open_brace_span, &mut rel.bindings);
     attach_gaps(source, line_starts, &mut rel.bindings);
@@ -540,6 +566,9 @@ fn attach_relationship(source: &str, line_starts: &[usize], rel: &mut Relationsh
 }
 
 /// Recovers trivia for a conditional's branches, its default, and their nested relationships.
+///
+/// - Complexity: O(v + g + c) time and O(g + h) space for every visited descendant,
+///   using the module's attachment cost dimensions.
 fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut ConditionalDecl) {
     attach_opening(
         source,
@@ -619,6 +648,9 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
 /// expressions carry no trivia of their own. Shared by [`attach_cell`], [`attach_source`], and
 /// [`attach_out`], since a `require` block has the same trivia-recovery rules regardless of which
 /// cell kind it's attached to.
+///
+/// - Complexity: O(v + g + c) time and O(g) space for requirements, scanned gaps,
+///   and converted prefixes; O(1) when no block exists.
 fn attach_require_block(source: &str, line_starts: &[usize], require: Option<&mut RequireBlock>) {
     let Some(require) = require else {
         return;
@@ -642,18 +674,24 @@ fn attach_require_block(source: &str, line_starts: &[usize], require: Option<&mu
 
 /// Recovers trivia for an `out` declaration's `require` block, if present, via
 /// [`attach_require_block`].
+///
+/// - Complexity: the time and space of [`attach_require_block`].
 fn attach_out(source: &str, line_starts: &[usize], out_decl: &mut OutDecl) {
     attach_require_block(source, line_starts, out_decl.require.as_mut());
 }
 
 /// Recovers trivia for a `cell` declaration's `require` block, if present, via
 /// [`attach_require_block`].
+///
+/// - Complexity: the time and space of [`attach_require_block`].
 fn attach_cell(source: &str, line_starts: &[usize], cell: &mut CellDecl) {
     attach_require_block(source, line_starts, cell.require.as_mut());
 }
 
 /// Recovers trivia for a `source` declaration's `require` block, if present, via
 /// [`attach_require_block`].
+///
+/// - Complexity: the time and space of [`attach_require_block`].
 fn attach_source(source: &str, line_starts: &[usize], source_decl: &mut SourceDecl) {
     attach_require_block(source, line_starts, source_decl.require.as_mut());
 }
@@ -661,7 +699,7 @@ fn attach_source(source: &str, line_starts: &[usize], source_decl: &mut SourceDe
 /// Attaches trivia between a container's opening brace and its first child.
 ///
 /// - Precondition: spans and offsets refer to `source`.
-/// - Complexity: O(n) in the opening gap's length.
+/// - Complexity: O(g + c) time and O(g) space for opening-gap bytes and converted prefixes.
 fn attach_opening<T: TriviaTarget>(
     source: &str,
     line_starts: &[usize],
@@ -696,6 +734,10 @@ fn attach_opening<T: TriviaTarget>(
 /// the *previous* item's own last token, in which case it attaches to that previous item's
 /// `trailing_line_comment` instead (see <https://github.com/stlab/cel-rs/issues/59>). The first
 /// item's opening-brace gap belongs to [`attach_opening`], not this sibling-gap pass.
+///
+/// - Complexity: O(v + g + c) time for sibling count v, summed scanned gap bytes g,
+///   and summed converted character-column prefixes c; O(g) space for recovered
+///   comments and scanning. The line index does not cache character-prefix conversions.
 fn attach_gaps<T: TriviaTarget>(source: &str, line_starts: &[usize], items: &mut [T]) {
     if items.len() < 2 {
         return;
@@ -716,6 +758,16 @@ fn attach_gaps<T: TriviaTarget>(source: &str, line_starts: &[usize], items: &mut
     }
 }
 
+/// Detects a complete blank line between a region's initial and final partial lines.
+///
+/// - Complexity: O(n) time for n region bytes; O(1) additional space.
+fn has_blank_line(region: &str) -> bool {
+    region
+        .split_inclusive('\n')
+        .skip(1)
+        .any(|line| line.ends_with('\n') && line.trim().is_empty())
+}
+
 /// Recovers every comment payload, blank-line spacing, and same-line attachment from one gap.
 ///
 /// A single comment retains its style. Multiple runs normalize into one line-comment
@@ -732,6 +784,8 @@ fn analyze_gap(gap: &str) -> (Option<crate::ast::Comment>, bool, bool) {
             GapPiece::Punct(_) => None,
         });
     let first = comments.next();
+    let prefix = &gap[..gap.len() - gap.trim_start().len()];
+    let same_line = first.is_some() && !prefix.contains('\n');
     if let Some(second) = comments.next() {
         // A single AST attachment stores mixed/detached runs as safe line-comment text.
         let text = first
@@ -748,104 +802,15 @@ fn analyze_gap(gap: &str) -> (Option<crate::ast::Comment>, bool, bool) {
                 }
                 joined
             });
-        let same_line = !gap[..gap.find('/').unwrap_or(gap.len())].contains('\n');
-        let complete_lines = gap.rsplit_once('\n').map_or("", |(lines, _)| lines);
-        let blank = complete_lines
-            .lines()
-            .skip(1)
-            .any(|line| line.trim().is_empty());
-        return (Some(Comment::Line(text)), blank, same_line);
+        return (Some(Comment::Line(text)), has_blank_line(gap), same_line);
     }
-    let mut lines: Vec<&str> = gap.lines().collect();
-    // `gap` ends exactly where the following item's first token begins. When that token isn't at
-    // column 0 and its own line is otherwise blank up to that point, `lines()`'s final entry is
-    // only leading whitespace, not a blank source line — drop that fragment before scanning for a
-    // trailing comment run so a real blank line (a genuine empty entry from `lines()`) still
-    // breaks the run. But when the gap has no newline at all (the previous item, an intervening
-    // comment, and the next item all share one physical line — see
-    // <https://github.com/stlab/cel-rs/pull/202>'s review), this same final entry is the *entire*
-    // gap, not just trailing indentation, so a non-whitespace fragment (a same-line `/* */`
-    // comment) must be kept for the scan below rather than discarded unseen.
-    if !gap.ends_with('\n') && lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    let mut comment = None;
-    if let Some(last) = lines.last() {
-        let trimmed = last.trim();
-        if let Some(text) = trimmed.strip_prefix("//") {
-            let mut collected = vec![text.trim().to_string()];
-            lines.pop();
-            while let Some(line) = lines.last() {
-                let trimmed = line.trim();
-                if let Some(text) = trimmed.strip_prefix("//") {
-                    collected.push(text.trim().to_string());
-                    lines.pop();
-                } else {
-                    break;
-                }
-            }
-            collected.reverse();
-            comment = Some(Comment::Line(collected.join("\n")));
-        } else if let Some(inner) = trimmed
-            .strip_prefix("/*")
-            .and_then(|s| s.strip_suffix("*/"))
-        {
-            // A single-line block comment.
-            comment = Some(Comment::Block(inner.trim().to_string()));
-            lines.pop();
-        } else if trimmed.ends_with("*/") {
-            // The close of a block comment that opened on an earlier line — collect backwards
-            // until the line that opens it (see #105). A block comment is one unit; don't merge
-            // with an earlier `//` run.
-            let mut collected = Vec::new();
-            let closing_prefix = trimmed
-                .strip_suffix("*/")
-                .expect("checked ends_with(\"*/\") above")
-                .trim();
-            if !closing_prefix.is_empty() {
-                collected.push(closing_prefix.to_string());
-            }
-            lines.pop();
-            let mut found_open = false;
-            while let Some(line) = lines.last() {
-                let trimmed = line.trim();
-                lines.pop();
-                if let Some(text) = trimmed.strip_prefix("/*") {
-                    let opening_suffix = text.trim();
-                    if !opening_suffix.is_empty() {
-                        collected.push(opening_suffix.to_string());
-                    }
-                    found_open = true;
-                    break;
-                }
-                collected.push(trimmed.to_string());
-            }
-            // If the gap is exhausted without finding a matching `/*` (not expected for
-            // well-formed input), `found_open` stays false and no comment is fabricated.
-            if found_open {
-                collected.reverse();
-                comment = Some(Comment::Block(collected.join("\n")));
-            }
-        }
-    }
-    // If the comment run's backward scan consumed every remaining line, including `lines[0]`
-    // (the trailing remainder of the *previous* item's own source line), then the comment's
-    // first line began immediately after the previous item's last token — a same-line trailing
-    // comment, not a fresh leading comment on the next item. See
-    // <https://github.com/stlab/cel-rs/issues/59>.
-    let same_line = comment.is_some() && lines.is_empty();
-    // `lines[0]` is always the trailing remainder of the *previous* item's own source line (the
-    // fragment before the gap's first `\n`), which is empty whenever that item's last token is
-    // already at end-of-line — the common case. It must be excluded here: only a line strictly
-    // after it sits between two `\n`s in the original gap and can be a genuine blank line.
-    let blank_line_before = lines.len() > 1 && lines[1..].iter().any(|l| l.trim().is_empty());
-    if comment.is_none() {
-        let comment = first;
-        let same_line =
-            comment.is_some() && !gap[..gap.find('/').unwrap_or(gap.len())].contains('\n');
-        return (comment, blank_line_before, same_line);
-    }
-    (comment, blank_line_before, same_line)
+    let blank_line_before = if first.is_some() {
+        let suffix = &gap[gap.trim_end().len()..];
+        has_blank_line(prefix) || has_blank_line(suffix)
+    } else {
+        has_blank_line(gap)
+    };
+    (first, blank_line_before, same_line)
 }
 
 #[cfg(test)]

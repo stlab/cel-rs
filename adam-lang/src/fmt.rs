@@ -13,6 +13,15 @@
 //!
 //! Never called on a sheet with any recorded syntax errors — see `adam-lsp`'s
 //! `textDocument/formatting` handler, which refuses to format in that case.
+//!
+//! Writer cost bounds use `v` for visited AST nodes, `b` for emitted bytes
+//! (including indentation), `g` for summed scanned source-region bytes, `c` for
+//! summed character-prefix coordinate conversions, and `p` for summed output-line
+//! prefix measurements. `T` and `A` denote delegated CEL layout time and peak
+//! temporary space; `h` denotes writer call depth. Repeated work counts repeatedly,
+//! including descendant writers. Bounds amortize growth of the output string.
+//! Sharing line starts saves index construction, not prefix scans or recursive
+//! region/layout work; these bounds do not promise globally linear formatting.
 
 use crate::ast;
 
@@ -48,14 +57,15 @@ impl std::ops::Deref for FormattingSource<'_> {
 
 /// Returns the current output column in Unicode scalar values.
 ///
-/// - Complexity: O(k) in the final line's length.
+/// - Complexity: O(k) time in the final line's length; O(1) space.
 fn output_column(out: &str) -> usize {
     out.rsplit('\n').next().unwrap_or_default().chars().count()
 }
 
 /// Appends one expression using the complete emitted prefix and following punctuation budget.
 ///
-/// - Complexity: O(n) document space plus layout, final-line measurement and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   using the module's writer cost dimensions for this expression.
 fn write_expression(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -76,7 +86,8 @@ fn write_expression(
 
 /// Appends expression layout, removing prefix padding when layout starts on a new line.
 ///
-/// - Complexity: O(n + k) in the expression text and the prefix's trailing padding.
+/// - Complexity: O(n + k) time in expression bytes and the prefix's trailing padding;
+///   O(n) appended output space and O(1) other space.
 fn append_expression_layout(out: &mut String, text: &str) {
     if text.starts_with('\n') {
         out.truncate(out.trim_end_matches(' ').len());
@@ -98,7 +109,9 @@ fn cell_clause_suffix(
     }
 }
 
-/// 4 spaces per nesting level.
+/// Returns four spaces per nesting level.
+///
+/// - Complexity: O(depth) time and owned space.
 fn indent(depth: usize) -> String {
     "    ".repeat(depth)
 }
@@ -111,6 +124,9 @@ fn indent(depth: usize) -> String {
 /// `/* text */` on one line when its text has no internal `\n`, or a multi-line `/*`/`*/`-
 /// delimited block (one line per stored line, indented one level past `depth`) when it does.
 /// Shared by [`write_comment`] and [`write_line_end`].
+///
+/// - Complexity: O(t + b) time for payload bytes t and emitted bytes b, including
+///   per-line indentation; O(b + depth) output and temporary indentation space.
 fn write_comment_inline(out: &mut String, comment: &ast::Comment, depth: usize) {
     match comment {
         ast::Comment::Line(text) => {
@@ -148,6 +164,9 @@ fn write_comment_inline(out: &mut String, comment: &ast::Comment, depth: usize) 
 
 /// Writes one recovered `Comment` on its own line at `depth`'s indentation, via
 /// [`write_comment_inline`].
+///
+/// - Complexity: O(t + b) time for payload bytes t and emitted bytes b, including
+///   indentation; O(b + depth) output and temporary indentation space.
 fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
     out.push_str(&indent(depth));
     write_comment_inline(out, comment, depth);
@@ -157,6 +176,9 @@ fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
 /// indentation. `marker` is `"///"` for a declaration's own doc comment or `"//!"` for the
 /// sheet's own (each stored line already includes the space rustdoc puts after the marker, e.g.
 /// `" the total"` for `/// the total`, so no extra space is inserted here).
+///
+/// - Complexity: O(t + b) time for documentation bytes t and emitted bytes b,
+///   including markers and per-line indentation; O(b + depth) output and temporary space.
 fn write_doc_comment(out: &mut String, marker: &str, doc_comment: Option<&str>, depth: usize) {
     if let Some(doc) = doc_comment {
         for line in doc.split('\n') {
@@ -169,6 +191,9 @@ fn write_doc_comment(out: &mut String, marker: &str, doc_comment: Option<&str>, 
 }
 
 /// Emits `blank_line_before`/`leading_comment` ahead of an item, if either is present.
+///
+/// - Complexity: O(t + b) time for comment bytes t and emitted bytes b, including
+///   indentation; O(b + depth) output and temporary space.
 fn write_trivia(
     out: &mut String,
     blank_line_before: bool,
@@ -186,6 +211,9 @@ fn write_trivia(
 /// Emits a container's trailing comment (honoring `blank_line_before_close`) immediately before
 /// its closing `}` is written, reusing [`write_comment`] so block-vs-line style is preserved
 /// exactly as for leading comments. See <https://github.com/stlab/cel-rs/issues/52>.
+///
+/// - Complexity: O(t + b) time for comment bytes t and emitted bytes b, including
+///   indentation; O(b + depth) output and temporary space.
 fn write_trailing_trivia(
     out: &mut String,
     blank_line_before_close: bool,
@@ -204,6 +232,9 @@ fn write_trailing_trivia(
 /// same-line `trailing_line_comment` inline first when present — a `//` comment always ends the
 /// line it's on, and a `/* */` comment stays inline with what precedes it, so both are written
 /// before the newline rather than after it. See <https://github.com/stlab/cel-rs/issues/59>.
+///
+/// - Complexity: O(t + b) time for comment bytes t and emitted bytes b, including
+///   terminator and indentation; O(b + depth) output and temporary space.
 fn write_line_end(
     out: &mut String,
     terminator: &str,
@@ -223,6 +254,8 @@ fn write_line_end(
 /// Re-emits a literal's exact original text via its span, falling back to an empty string when
 /// none is recoverable — mirrors `cel_parser::fmt`'s identical fallback (see the module doc for
 /// why no `Literal` value is needed here).
+///
+/// - Complexity: O(t) time and owned space for t recovered source bytes.
 fn source_text_or_empty(span: ast::ExprSpan) -> String {
     span.start.source_text().unwrap_or_default()
 }
@@ -265,8 +298,9 @@ fn write_parameter_type(out: &mut String, source: &FormattingSource<'_>, ty: &as
 /// Synthetic declarations use their stored documentation instead.
 ///
 /// - Precondition: spans refer to `source`, or `source` is empty.
-/// - Complexity: O(c + p) time for source-line prefixes and emitted documentation;
-///   O(p) output space.
+/// - Complexity: O(c + r + b) time for converted character prefixes c, examined
+///   documentation-region bytes r, and emitted bytes b including indentation;
+///   O(b + depth) output and temporary indentation space.
 fn write_header_documentation(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -321,8 +355,9 @@ fn point_span(span: proc_macro2::Span) -> ast::ExprSpan {
 ///
 /// `depth` is the caller's own indent depth (the declaration's, not the gap's).
 ///
-/// - Complexity: O(c + g + o) time and O(g + o) space for source-line prefixes,
-///   scanned gap bytes and emitted text. The enclosing operation shares line offsets.
+/// - Complexity: O(c + g + e + b) time and O(g + e + b) space for converted
+///   character prefixes c, scanned gap bytes g, expected-token count plus bytes e,
+///   and emitted bytes b including indentation. The enclosing operation shares line offsets.
 fn emit_decl_gap(
     source: &FormattingSource<'_>,
     prev_end: ast::ExprSpan,
@@ -400,7 +435,8 @@ fn emit_decl_gap(
 /// Writes one `a := ...;` / `(a, b) := ...;` binding, delegating its body to
 /// [`cel_parser::format_expr`].
 ///
-/// - Complexity: O(n) output/document space plus layout and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   using the module's writer cost dimensions for the complete binding.
 fn write_binding(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -460,6 +496,9 @@ fn write_binding(
 }
 
 /// Writes one `relationship { ... }` declaration and its bindings, in declaration order.
+///
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including all binding writers, using the module's writer cost dimensions.
 fn write_relationship(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -500,6 +539,9 @@ fn write_relationship(
 
 /// Writes a `{ ... }` block of relationships, shared by both a named conditional branch and the
 /// default (`_ =>`) arm.
+///
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including every descendant writer, using the module's writer cost dimensions.
 fn write_branch_relationships(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -526,6 +568,9 @@ fn write_branch_relationships(
 /// Writes one `literal_pattern => { ... }` conditional branch, re-emitting the match literal via
 /// its span rather than the (unused) `Literal` value, with a leading `-` when
 /// [`ast::ConditionalBranch::negated`].
+///
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including the branch body, using the module's writer cost dimensions.
 fn write_branch(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -568,7 +613,8 @@ fn write_branch(
 ///
 /// Preserves header-boundary comments across omitted groups while reserving the body brace.
 ///
-/// - Complexity: O(n) output/document space plus layout and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including every branch, using the module's writer cost dimensions.
 fn write_conditional(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -639,7 +685,8 @@ fn write_conditional(
 /// delegating its type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its
 /// initializer/filter body to [`cel_parser::format_expr`].
 ///
-/// - Complexity: O(n) output/document space plus layout and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including clauses and requirements, using the module's writer cost dimensions.
 fn write_cell(out: &mut String, source: &FormattingSource<'_>, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
@@ -690,7 +737,8 @@ fn write_cell(out: &mut String, source: &FormattingSource<'_>, cell: &ast::CellD
 /// [`write_source`], and [`write_out`]. `prev_*` give the end span of whichever of
 /// initializer/type/name precedes the clauses; `terminator` is the declaration's own `;` span.
 ///
-/// - Complexity: O(n) output/document space plus layout and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including all requirements, using the module's writer cost dimensions.
 #[allow(clippy::too_many_arguments)]
 fn write_cell_clauses(
     out: &mut String,
@@ -749,7 +797,8 @@ fn write_cell_clauses(
 
 /// Writes one `[ "@" identifier " " ] ...;` requirement.
 ///
-/// - Complexity: O(n) output/document space plus layout and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   using the module's writer cost dimensions for the requirement and its expression.
 fn write_requirement(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -786,6 +835,9 @@ fn write_requirement(
 /// caller emits the `require` keyword (and any comments around it) via [`emit_decl_gap`] so a
 /// comment between `require` and its `{` is preserved. Shared by [`write_cell`], [`write_source`],
 /// and [`write_out`].
+///
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including every requirement, using the module's writer cost dimensions.
 fn write_require_block(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -808,7 +860,8 @@ fn write_require_block(
 
 /// Writes one `out name[: type] := ...[ filter body][ require { ... } ];` declaration.
 ///
-/// - Complexity: O(n) output/document space plus layout and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including clauses and requirements, using the module's writer cost dimensions.
 fn write_out(out: &mut String, source: &FormattingSource<'_>, decl: &ast::OutDecl, depth: usize) {
     write_trivia(
         out,
@@ -861,7 +914,8 @@ fn write_out(out: &mut String, source: &FormattingSource<'_>, decl: &ast::OutDec
 /// Writes one `source name[: type][ = initializer][ filter body][ require { ... }];` declaration.
 /// Mirrors [`write_cell`] exactly.
 ///
-/// - Complexity: O(n) output/document space plus layout and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including clauses and requirements, using the module's writer cost dimensions.
 fn write_source(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -916,6 +970,8 @@ fn write_source(
 ///
 /// - Precondition: `item` is not `SheetItem::Error` — [`format_sheet`]'s own precondition
 ///   (`sheet.errors.is_empty()`) guarantees no `Error` item ever reaches this function.
+/// - Complexity: the selected writer's complete subtree time and space, using the
+///   module's writer cost dimensions.
 fn write_sheet_item(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -943,9 +999,11 @@ fn write_sheet_item(
 ///
 /// - Precondition: `sheet` has no recorded syntax errors (`sheet.errors.is_empty()`) — a sheet
 ///   with a `SheetItem::Error` placeholder cannot be printed back to valid source.
-/// - Complexity: O(n) source indexing and O(l + b + d) space for n source bytes,
-///   l source lines, b output bytes, and declaration depth d, plus source-gap
-///   scanning and delegated CEL expression layout.
+/// - Complexity: O(n + v + b + g + c + p) time plus delegated CEL layout, for source
+///   bytes n, visited AST nodes v, emitted bytes b including indentation, summed
+///   scanned region bytes g, converted character prefixes c, and measured output-line
+///   prefixes p. O(l + b + g + h) space plus CEL layout storage, for source lines l
+///   and writer call depth h. Repeated prefix/region work is not globally linear.
 ///
 /// # Examples
 ///
@@ -964,7 +1022,8 @@ pub fn format_sheet(sheet: &ast::Sheet, source: &str) -> String {
 /// Formats one sheet using the enclosing operation's shared source index.
 ///
 /// - Precondition: `sheet` contains no recorded syntax errors.
-/// - Complexity: output space plus delegated expression layout and source-gap scans.
+/// - Complexity: O(v + b + g + c + p + T) time and O(b + g + h + A) space,
+///   including every item, using the module's writer cost dimensions. No index is rebuilt.
 fn format_sheet_indexed(sheet: &ast::Sheet, source: &FormattingSource<'_>) -> String {
     debug_assert!(
         sheet.errors.is_empty(),
@@ -1092,9 +1151,11 @@ impl std::error::Error for FormatSourceError {}
 /// Mixed or detached comment runs in ordinary AST attachments normalize to line
 /// comments while retaining payload order; see [`crate::attach_trivia`].
 ///
-/// - Complexity: O(n) parsing and line indexing for n source bytes, plus declaration-gap
-///   scans, source-line prefix conversions and delegated expression layout; O(n + o + h)
-///   space for the AST, output bytes o and recursion height h.
+/// - Complexity: parsing plus [`crate::attach_module_trivia`] and [`format_module`]
+///   time, including their repeated character-prefix and region scans and delegated
+///   CEL layout. Space holds the parsed AST, recovered trivia, line indexes, output,
+///   writer stack, and peak CEL layout temporaries. Sharing indexes does not make
+///   the whole pipeline linear in source length.
 ///
 /// # Errors
 ///
@@ -1136,7 +1197,8 @@ pub fn format_source(source: &str) -> Result<String, FormatSourceError> {
 
 /// Writes an unresolved path, preserving comments between its segments.
 ///
-/// - Complexity: O(n) output space plus source-gap scans.
+/// - Complexity: O(v + b + g + c) time and O(b + g) space for path segments v,
+///   emitted bytes b including indentation, scanned gap bytes g, and converted prefixes c.
 fn write_path(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -1159,7 +1221,9 @@ fn write_path(
 
 /// Writes a named component use through the existing declaration-gap and trivia writers.
 ///
-/// - Complexity: O(n) output space plus source-gap scans.
+/// - Complexity: O(v + b + g + c) time and O(b + g + h) space for arguments/path
+///   segments v, emitted bytes b including indentation, scanned regions g, converted
+///   prefixes c, and writer call depth h.
 fn write_relationship_use(
     out: &mut String,
     source: &FormattingSource<'_>,
@@ -1232,7 +1296,13 @@ fn write_relationship_use(
 /// Formats every module item in order, preserving attached file-boundary comments.
 ///
 /// - Precondition: spans and attached trivia refer to `source`, or use synthetic spans with `""`.
-/// - Complexity: O(n) output space plus nested formatters' source-gap scans.
+/// - Complexity: O(n + v + b + g + c + p) time plus delegated CEL layout, for source
+///   bytes n, visited AST nodes v, emitted bytes b including indentation, summed
+///   scanned region bytes g, converted character prefixes c, and measured output-line
+///   prefixes p. O(l + b + g + h) space plus CEL layout storage, for source lines l
+///   and writer call depth h. Repeated prefix/region work is not globally linear.
+///   Rejection also copies the recorded diagnostics in time and space proportional
+///   to their count and owned text.
 ///
 /// # Errors
 ///
@@ -1674,12 +1744,6 @@ mod tests {
     /// Preserves the delimiters of a single block comment.
     #[test]
     fn formats_a_single_line_block_comment_preserving_its_style() {
-        // A comment immediately after the sheet's opening `{` (before its first item) falls into
-        // the untracked gap from issue #52 (see trivia.rs's module doc) — unrelated to this
-        // change — so a preceding cell is included here to land the comment in a tracked gap.
-        // The comment is on its own source line so it attaches as `x`'s leading comment, not `a`'s
-        // same-line trailing comment (see issue #59) — what this test is actually checking is that
-        // a `/* */` leading comment round-trips as `/* */`, not `//`.
         let source =
             "sheet s {\n    cell a: i32 = 1;\n    /* the total */\n    cell x: i32 = 1;\n}";
         let expected =
@@ -1690,8 +1754,6 @@ mod tests {
     /// Preserves a multiline block comment's style.
     #[test]
     fn formats_a_multi_line_block_comment_preserving_its_style() {
-        // See the comment on `formats_a_single_line_block_comment_preserving_its_style` for why
-        // a preceding cell is included.
         let source = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}";
         let expected = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}\n";
         assert_eq!(format(source), expected);
@@ -1710,10 +1772,6 @@ mod tests {
     /// Reaches a formatting fixed point for block comments.
     #[test]
     fn block_comment_formatting_is_idempotent_through_a_reparse() {
-        // See the comment on `formats_a_single_line_block_comment_preserving_its_style` for why
-        // a preceding cell is included: without it, the comment lands in issue #52's untracked
-        // gap and is dropped on the *first* format, making `once == twice` trivially true
-        // regardless of whether the comment round-trips.
         let source = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}";
         let once = format(source);
         let twice = format(&once);
@@ -1741,10 +1799,6 @@ mod tests {
     /// Preserves the source order of plain and documentation comments.
     #[test]
     fn formats_a_plain_comment_and_doc_comment_together_in_source_order() {
-        // Two items, not one: `trivia::attach_gaps` never attaches a leading plain comment to a
-        // list's first element (a pre-existing, out-of-scope #52-adjacent limitation unrelated to
-        // doc comments — see Tasks 2/3's identical fixture fix), so `x` needs a preceding sibling
-        // for its `// TODO` to actually attach via the normal gap-scanning path.
         let source =
             "sheet s {\n    cell w: i32 = 0;\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}";
         let expected =
@@ -1755,8 +1809,8 @@ mod tests {
     /// Formats documentation on relationships, conditionals, and outputs.
     #[test]
     fn formats_doc_comments_on_a_relationship_conditional_and_out() {
-        let source = "sheet s {\n    /// r\n    relationship { b := a; }\n\n    /// o\n    out area: f64 := w;\n}";
-        let expected = "sheet s {\n    /// r\n    relationship {\n        b := a;\n    }\n\n    /// o\n    out area: f64 := w;\n}\n";
+        let source = "sheet s {\n    /// r\n    relationship { b := a; }\n\n    /// c\n    conditional true { true => { relationship { b := a; } } }\n\n    /// o\n    out area: f64 := w;\n}";
+        let expected = "sheet s {\n    /// r\n    relationship {\n        b := a;\n    }\n\n    /// c\n    conditional true {\n        true => {\n            relationship {\n                b := a;\n            }\n        }\n    }\n\n    /// o\n    out area: f64 := w;\n}\n";
         assert_eq!(format(source), expected);
     }
 

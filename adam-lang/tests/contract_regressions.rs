@@ -3,6 +3,54 @@
 use adam_lang::{AdamAstParser, TypeRegistry};
 use std::any::TypeId;
 
+/// Preserves nested block payloads and valid fixed-point output at leading, inline, and closing gaps.
+#[test]
+fn nested_block_comments_survive_formatting_and_reparsing() {
+    for source in [
+        "sheet s {\n/* outer\n/* inner */\ntail */\ncell x: i32;\n}",
+        "sheet s {\ncell a: i32;\n/* outer\n/* inner */\ntail */\ncell x: i32;\n}",
+        "sheet s {\ncell a: i32; /* outer\n/* inner */\ntail */\ncell x: i32;\n}",
+        "/* outer\n/* inner */\ntail */\nsheet s { cell x: i32; }",
+        "sheet s {\ncell x: i32;\n/* outer\n/* inner */\ntail */\n}",
+    ] {
+        let input = AdamAstParser::new().parse_module_str(source).unwrap();
+        assert!(input.errors.is_empty(), "{source}");
+        let formatted = adam_lang::format_source(source).unwrap();
+        for marker in ["outer", "inner", "tail", "/* inner */"] {
+            assert_eq!(formatted.matches(marker).count(), 1, "{formatted}");
+        }
+        assert!(formatted.find("outer").unwrap() < formatted.find("inner").unwrap());
+        assert!(formatted.find("inner").unwrap() < formatted.find("tail").unwrap());
+        let reparsed = AdamAstParser::new().parse_module_str(&formatted).unwrap();
+        assert!(reparsed.errors.is_empty(), "{formatted}");
+        for item in &reparsed.items {
+            if let adam_lang::ast::ModuleItem::Sheet(sheet) = item {
+                assert!(sheet.errors.is_empty(), "{formatted}");
+            }
+        }
+        assert_eq!(adam_lang::format_source(&formatted).unwrap(), formatted);
+    }
+}
+
+/// Distinguishes blank lines outside a single block comment from blank payload lines.
+#[test]
+fn single_block_comment_spacing_ignores_blank_payload_lines() {
+    for (gap, expected_blank) in [
+        ("\n/* outer\n\n/* inner */\ntail */\n", false),
+        ("\n\n/* outer\n/* inner */\ntail */\n", true),
+        ("\n/* outer\n/* inner */\ntail */\n \t\n", true),
+    ] {
+        let source = format!("sheet s {{ cell a: i32;{gap}    cell x: i32; }}");
+        let mut sheet = AdamAstParser::new().parse_str(&source).unwrap();
+        assert!(sheet.errors.is_empty());
+        adam_lang::attach_trivia(&source, &mut sheet);
+        let adam_lang::ast::SheetItem::Cell(cell) = &sheet.items[1] else {
+            panic!("expected the following cell");
+        };
+        assert_eq!(cell.blank_line_before, expected_blank, "{gap}");
+    }
+}
+
 /// Never equates unrelated erased values, including two mismatches.
 #[test]
 fn erased_equality_rejects_mismatched_operands() {

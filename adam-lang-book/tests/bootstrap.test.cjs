@@ -6,8 +6,10 @@ const { join } = require("node:path");
 const vm = require("node:vm");
 
 // Loads the real classic script with a caller-owned page and blocked external module loading.
+// Records fetches, script insertions, and VM imports; requires --experimental-vm-modules.
 // Time and space follow script evaluation and the supplied page's mount counts.
 function bootstrap(inspectors = [], graphs = []) {
+  const loading = { fetches: [], scripts: [], imports: [] };
   const context = vm.createContext({
     URL,
     document: {
@@ -15,11 +17,18 @@ function bootstrap(inspectors = [], graphs = []) {
       querySelectorAll: (selector) => selector === ".adam-live" ? inspectors : graphs,
       createElement: () => ({}),
       head: {
-        // Completes a caller-supplied script load synchronously.
-        appendChild(script) { script.onload(); },
+        // Records the requested script and completes its load synchronously.
+        appendChild(script) {
+          loading.scripts.push(script.src);
+          script.onload();
+        },
       },
     },
-    fetch: async () => ({ ok: false, status: 503 }),
+    // Records a manifest request and returns an unsuccessful HTTP response.
+    fetch: async (url) => {
+      loading.fetches.push(url);
+      return { ok: false, status: 503 };
+    },
     console: {
       // Discards expected page-level errors in the isolated test context.
       error() {},
@@ -28,9 +37,18 @@ function bootstrap(inspectors = [], graphs = []) {
   context.ready = vm.runInContext(
     readFileSync(join(__dirname, "../book-src/theme/adam-live-bootstrap.js"), "utf8"),
     context,
-    { importModuleDynamically: async () => { throw new Error("blocked module"); } },
+    {
+      // Records the live-module import before preventing external code execution.
+      importModuleDynamically: async (url) => {
+        loading.imports.push(url);
+        throw new Error("blocked module");
+      },
+    },
   );
-  return vm.runInContext("({ createMountPlan, readManifest, showLoadFailure, dependencyScripts, loadScript, document, ready })", context);
+  return {
+    ...vm.runInContext("({ createMountPlan, readManifest, showLoadFailure, dependencyScripts, loadScript, document, ready })", context),
+    loading,
+  };
 }
 
 // Creates an independent caller-owned DOM stand-in with visible attribute and text state.
@@ -42,16 +60,38 @@ function createMount(example = "a") {
   };
 }
 
-test("mount plans preserve shared graph order and own independent graph lists", () => {
+test("mount plans assign each graph to one inspector and preserve graph order", () => {
   const { createMountPlan } = bootstrap();
-  const plan = createMountPlan(["a", "a", "b"], ["a", "b", "a"], { a: "sheet a {}", b: "sheet b {}" });
+  const plan = createMountPlan(["a", "b"], ["a", "b", "a"], { a: "sheet a {}", b: "sheet b {}" });
+  const another = createMountPlan(["a", "b"], ["a", "b", "a"], { a: "sheet a {}", b: "sheet b {}" });
   assert.deepEqual(Array.from(plan[0].graphIds), ["adam-live-graph-0", "adam-live-graph-2"]);
-  assert.deepEqual(Array.from(plan[2].graphIds), ["adam-live-graph-1"]);
+  assert.deepEqual(Array.from(plan[1].graphIds), ["adam-live-graph-1"]);
   plan[0].graphIds.push("changed");
-  assert.equal(plan[1].graphIds.length, 2);
+  assert.equal(plan[1].graphIds.length, 1);
+  assert.deepEqual(Array.from(another[0].graphIds), ["adam-live-graph-0", "adam-live-graph-2"]);
+  another[0].graphIds.splice(0, 1);
+  assert.deepEqual(Array.from(plan[0].graphIds), ["adam-live-graph-0", "adam-live-graph-2", "changed"]);
   plan[1].graphIds.splice(0, 1);
   assert.equal(plan[0].graphIds.length, 3);
   assert.equal(plan[0].source, "sheet a {}");
+});
+
+test("mount plans reject graph ownership shared by duplicate inspector names", () => {
+  const { createMountPlan } = bootstrap();
+  assert.throws(
+    () => createMountPlan(["a", "a", "b"], ["a", "b", "a"], { a: "sheet a {}", b: "sheet b {}" }),
+    /ambiguous inspector name "a"/,
+  );
+});
+
+test("mount plans reject duplicate inspector identities even without matching graphs", () => {
+  const { createMountPlan } = bootstrap();
+  for (const graphs of [[], ["b", "b"]]) {
+    assert.throws(
+      () => createMountPlan(["a", "a", "b"], graphs, { a: "sheet a {}", b: "sheet b {}" }),
+      /ambiguous inspector name "a"/,
+    );
+  }
 });
 
 test("mount plans reject missing sources, malformed manifests and orphan graphs", () => {
@@ -123,10 +163,14 @@ test("script loading resolves on load, rejects on error, and distinguishes modul
 test("page initialization does no loading without mounts and visibly handles dependency rejection", async () => {
   const empty = bootstrap();
   await empty.ready;
+  assert.deepEqual(empty.loading, { fetches: [], scripts: [], imports: [] });
   const inspector = createMount();
   const graph = createMount();
   const page = bootstrap([inspector], [graph]);
   await page.ready;
+  assert.equal(page.loading.fetches.length, 1);
+  assert.equal(page.loading.scripts.length, 3);
+  assert.equal(page.loading.imports.length, 1, "run Node with --experimental-vm-modules");
   assert.equal(inspector.role, "alert");
   assert.equal(graph.role, "alert");
   assert.match(inspector.textContent, /Live example unavailable/);

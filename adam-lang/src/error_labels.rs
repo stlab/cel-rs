@@ -305,7 +305,8 @@ mod tests {
         let name = |_id: adam_rs::CellId| Some("x".to_string());
         let l0 = site_label(&e, 0, &name);
         let l1 = site_label(&e, 1, &name);
-        assert!(!l0.is_empty());
+        assert!(l0.contains("relationship"));
+        assert!(l0.contains("cycle"));
         assert!(l1.contains("x")); // the cell step names the cell
     }
 
@@ -402,6 +403,8 @@ mod tests {
             sites: vec![adam_rs::ErrorSite::Cell(adam_rs::CellId::default())],
         };
         let name = |_id: adam_rs::CellId| None;
-        assert!(!site_label(&e, 0, &name).is_empty());
+        let label = site_label(&e, 0, &name);
+        assert!(label.contains("this cell"));
+        assert!(label.contains("cycle"));
     }
 }

@@ -30,7 +30,9 @@ function dependencyScripts(hasGraphs) {
 }
 
 // Creates independent mount instructions from immutable example names and source strings.
-// Throws for malformed manifest entries or graphs without an inspector.
+// Throws for malformed manifest entries, orphan graphs, or duplicate inspector names.
+// Each inspector name must be unique: live roots use it to namespace DOM controls,
+// even on graph-free pages. One inspector may own several graphs.
 // Time and space: O(i + g + e), for i inspectors, g graphs and e inspector-graph links.
 function createMountPlan(inspectors, graphs, manifest) {
   if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
@@ -39,7 +41,11 @@ function createMountPlan(inspectors, graphs, manifest) {
   if (!inspectors.every((name) => typeof name === "string" && name.length > 0)) {
     throw new Error("adam-live: inspector has no example name");
   }
-  const names = new Set(inspectors);
+  const names = new Set();
+  inspectors.forEach((name) => {
+    if (names.has(name)) throw new Error(`adam-live: ambiguous inspector name "${name}"`);
+    names.add(name);
+  });
   const graphIds = new Map();
   graphs.forEach((name, index) => {
     if (!names.has(name)) throw new Error(`adam-live: graph has no inspector for "${name}"`);
