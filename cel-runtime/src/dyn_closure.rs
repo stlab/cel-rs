@@ -15,7 +15,9 @@
 //! let mut body = DynSegment::new::<()>();
 //! body.push_arg::<i32>(0);
 //! body.push_arg::<i32>(1);
-//! body.op2(|a: i32, b: i32| a + b).unwrap();
+//! body.op2r(|a: i32, b: i32| {
+//!     a.checked_add(b).ok_or_else(|| anyhow::anyhow!("addition overflow"))
+//! }).unwrap();
 //!
 //! // Wrap it as a callable closure with its declared signature.
 //! let closure = DynClosure::new(
@@ -221,6 +223,9 @@ impl Drop for TrustedBindingLease {
 /// (via `finish_non_exhaustive`), since `DynSegment` is not easily debuggable and the signature alone
 /// is typically what callers need to see.
 impl std::fmt::Debug for ClosureData {
+    /// Formats the declared signature without borrowing or evaluating the body.
+    ///
+    /// - Complexity: O(p) formatting for p parameters.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClosureData")
             .field("param_types", &self.param_types)
@@ -366,7 +371,9 @@ impl DynClosure {
     /// let mut body = DynSegment::new::<()>();
     /// body.push_arg::<i32>(0);
     /// body.push_arg::<i32>(1);
-    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    /// body.op2r(|a: i32, b: i32| {
+    ///     a.checked_add(b).ok_or_else(|| anyhow::anyhow!("addition overflow"))
+    /// }).unwrap();
     ///
     /// let closure = DynClosure::new(
     ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
@@ -651,7 +658,9 @@ impl DynClosure {
     /// let mut body = DynSegment::new::<()>();
     /// body.push_arg::<i32>(0);
     /// body.push_arg::<i32>(1);
-    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    /// body.op2r(|a: i32, b: i32| {
+    ///     a.checked_add(b).ok_or_else(|| anyhow::anyhow!("addition overflow"))
+    /// }).unwrap();
     ///
     /// let closure = DynClosure::new(
     ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
@@ -676,7 +685,9 @@ impl DynClosure {
     /// let mut body = DynSegment::new::<()>();
     /// body.push_arg::<i32>(0);
     /// body.push_arg::<i32>(1);
-    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    /// body.op2r(|a: i32, b: i32| {
+    ///     a.checked_add(b).ok_or_else(|| anyhow::anyhow!("addition overflow"))
+    /// }).unwrap();
     ///
     /// let closure = DynClosure::new(
     ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
@@ -709,7 +720,9 @@ impl DynClosure {
     /// let mut body = DynSegment::new::<()>();
     /// body.push_arg::<i32>(0);
     /// body.push_arg::<i32>(1);
-    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    /// body.op2r(|a: i32, b: i32| {
+    ///     a.checked_add(b).ok_or_else(|| anyhow::anyhow!("addition overflow"))
+    /// }).unwrap();
     ///
     /// let closure = DynClosure::new(
     ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
@@ -756,7 +769,9 @@ impl DynClosure {
     /// let mut body = DynSegment::new::<()>();
     /// body.push_arg::<i32>(0);
     /// body.push_arg::<i32>(1);
-    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    /// body.op2r(|a: i32, b: i32| {
+    ///     a.checked_add(b).ok_or_else(|| anyhow::anyhow!("addition overflow"))
+    /// }).unwrap();
     ///
     /// let closure = DynClosure::new(
     ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
@@ -916,11 +931,16 @@ mod tests {
         );
     }
 
+    /// Builds a signed adder that reports overflow through the runtime error channel.
     fn adder_closure() -> DynClosure {
         let mut body = DynSegment::new::<()>();
         body.push_arg::<i32>(0);
         body.push_arg::<i32>(1);
-        body.op2(|a: i32, b: i32| a + b).unwrap();
+        body.op2r(|a: i32, b: i32| {
+            a.checked_add(b)
+                .ok_or_else(|| anyhow::anyhow!("addition overflow"))
+        })
+        .unwrap();
         DynClosure::new(
             vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
             TypeId::of::<i32>(),
@@ -928,14 +948,7 @@ mod tests {
         )
     }
 
-    #[test]
-    fn call_invokes_body_with_positional_args() {
-        let closure = adder_closure();
-        let (a, b) = (2i32, 3i32);
-        let result: i32 = closure.call(&[&a, &b]).unwrap();
-        assert_eq!(result, 5);
-    }
-
+    /// Calls the body repeatedly with distinct positional arguments.
     #[test]
     fn call_is_repeatable_with_different_args() {
         let closure = adder_closure();
@@ -945,6 +958,15 @@ mod tests {
         assert_eq!(closure.call::<i32>(&[&a2, &b2]).unwrap(), 30);
     }
 
+    /// Reports arithmetic overflow and leaves the shared body callable afterward.
+    #[test]
+    fn checked_adder_recovers_after_overflow() {
+        let closure = adder_closure();
+        assert!(closure.call::<i32>(&[&i32::MAX, &1i32]).is_err());
+        assert_eq!(closure.call::<i32>(&[&2i32, &3i32]).unwrap(), 5);
+    }
+
+    /// Keeps both carrier aliases callable after cloning.
     #[test]
     fn clone_shares_the_same_body_and_both_remain_callable() {
         let closure = adder_closure();
@@ -954,9 +976,11 @@ mod tests {
         assert_eq!(cloned.call::<i32>(&[&a, &b]).unwrap(), 2);
     }
 
+    /// Invokes the supplied monomorphized dispatcher and returns its boxed result.
     #[test]
     fn call_boxed_dispatches_through_a_supplied_call_dyn_fn() {
         let closure = adder_closure();
+        /// Evaluates and boxes the exact signed result.
         fn call_dyn_fn(seg: &mut DynSegment, inputs: &[&dyn Any]) -> anyhow::Result<Box<dyn Any>> {
             let v: i32 = seg.call_dyn(inputs)?;
             Ok(Box::new(v))
@@ -966,6 +990,7 @@ mod tests {
         assert_eq!(*result.downcast_ref::<i32>().unwrap(), 9);
     }
 
+    /// Returns the declared source-ordered parameter and result identities.
     #[test]
     fn param_types_and_return_type_are_queryable() {
         let closure = adder_closure();

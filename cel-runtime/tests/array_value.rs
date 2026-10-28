@@ -28,25 +28,6 @@ fn tracked(count: usize, drops: &Rc<RefCell<Vec<usize>>>) -> Vec<Tracked> {
         .collect()
 }
 
-/// Checks that both ownership transfers preserve allocation and contents.
-#[test]
-fn vector_transfers_preserve_pointer_and_capacity() {
-    let mut values = Vec::with_capacity(8);
-    values.extend([3_i32, 5]);
-    let pointer = values.as_ptr();
-    let capacity = values.capacity();
-    let array = Array::from_vec(values);
-    assert_eq!(array.as_slice(), &[3, 5]);
-    assert_eq!(array.as_slice().as_ptr(), pointer);
-    assert_eq!(array.len(), 2);
-    assert_eq!(array.capacity(), capacity);
-    assert!(!array.is_empty());
-    let values = array.into_vec();
-    assert_eq!(values.as_ptr(), pointer);
-    assert_eq!(values.capacity(), capacity);
-    assert_eq!(values, vec![3, 5]);
-}
-
 /// Checks that canonical nested arrays preserve outer and inner allocations.
 #[test]
 fn nested_array_keeps_outer_allocation() {

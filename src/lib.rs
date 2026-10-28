@@ -88,32 +88,55 @@ pub mod parser {
 pub mod macros {
     pub use cel_rs_macros::*;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exposes the parser, runtime and validating macro through the facade aliases.
+    #[test]
+    fn facade_aliases_compose() {
+        use runtime::SegmentCallable;
+        macros::expression! { 6 * 7 };
+        let mut segment = parser::CELParser::new(parser::OpLookup::new())
+            .parse_str("6 * 7")
+            .unwrap();
+        assert_eq!(segment.call0::<i32>().unwrap(), 42);
+        assert_eq!(runtime::Segment::<(u8,)>::new().call((42,)).unwrap(), 42);
+    }
+}
+
 #[cfg(all(test, feature = "playground"))]
 mod playground {
+    /// Owns the experiment's mutable input.
     struct Experiment {
         a: u32,
     }
 
+    /// Owns a context and its statically dispatched formatter.
     struct Segment<T, F: Fn(&mut T) -> String> {
         context: T,
         f: F,
     }
 
     impl<T, F: Fn(&mut T) -> String> Segment<T, F> {
+        /// Takes ownership of a context and its formatter.
         fn new(context: T, f: F) -> Self {
             Self { context, f }
         }
 
+        /// Formats the owned context using its callback.
         fn call(&mut self) -> String {
             (self.f)(&mut self.context)
         }
     }
 
+    /// Returns the formatter's result from the owned context.
     #[test]
     fn context_segment() {
         let experiment = Experiment { a: 1 };
         let mut segment = Segment::new(experiment, |e| e.a.to_string());
-        println!("{}", segment.call());
+        assert_eq!(segment.call(), "1");
     }
 
     /*

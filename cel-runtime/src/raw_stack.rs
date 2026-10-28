@@ -53,6 +53,8 @@ impl Drop for RawStack {
 impl RawStack {
     /// Creates a new `RawStack` with base alignment.
     ///
+    /// - Precondition: `base_alignment` is a power of two.
+    ///
     /// # Examples
     ///
     /// ```
@@ -200,6 +202,9 @@ impl RawStack {
     /// `T: 'static` prevents owned destructors from retaining nonstatic borrows;
     /// borrowed inputs must instead use explicitly borrowed adapters.
     ///
+    /// - Precondition: `T` requires no greater alignment than this stack's base alignment.
+    ///   This requirement is checked in release builds to preserve memory safety.
+    ///
     /// # Type Parameters
     ///
     /// * `T`: The type of the value to push.
@@ -238,9 +243,12 @@ impl RawStack {
     ///
     /// The function has an amortized O(1) time complexity.
     pub fn push<T: 'static>(&mut self, value: T) -> bool {
+        assert!(align_of::<T>() <= self.buffer.base_alignment());
         let len = self.buffer.len();
         let aligned_index = align_index(align_of::<T>(), len);
-        let new_len = aligned_index + size_of::<T>();
+        let new_len = aligned_index
+            .checked_add(size_of::<T>())
+            .expect("stack size overflow");
 
         self.owners.reserve(1);
         self.buffer.reserve((new_len - len).max(1));
@@ -275,7 +283,7 @@ impl RawStack {
     /// be undefined behavior even though this function never inspects the
     /// bytes' values.
     ///
-    /// - Precondition: `align` is a power of two.
+    /// - Precondition: `align` is a power of two no greater than the stack's base alignment.
     /// - Postcondition: A raw-byte slot is registered; its bytes are not destroyed
     ///   as a typed value unless upgraded with `own_top`.
     /// - Complexity: Amortized O(size) time and space.
@@ -290,6 +298,7 @@ impl RawStack {
         src: *const MaybeUninit<u8>,
     ) -> bool {
         debug_assert!(align.is_power_of_two());
+        assert!(align <= self.buffer.base_alignment());
         let len = self.buffer.len();
         let aligned_index = align_index(align, len);
         let new_len = aligned_index + size;
@@ -320,7 +329,7 @@ impl RawStack {
     /// bookkeeping as [`push`](Self::push)) and calls `write` with a pointer
     /// to that space instead of copying from a source buffer.
     ///
-    /// - Precondition: `align` is a power of two.
+    /// - Precondition: `align` is a power of two no greater than the stack's base alignment.
     /// - Postcondition: `write` is called exactly once, before this method
     ///   returns, with a pointer to `size` freshly-reserved bytes.
     /// - Postcondition: Normal return registers a raw-byte slot; a panicking
@@ -338,6 +347,7 @@ impl RawStack {
         write: impl FnOnce(*mut u8),
     ) -> bool {
         debug_assert!(align.is_power_of_two());
+        assert!(align <= self.buffer.base_alignment());
         let len = self.buffer.len();
         let aligned_index = align_index(align, len);
         let new_len = aligned_index + size;

@@ -169,3 +169,67 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reorders a valid permutation and preserves empty and singleton inputs.
+    #[test]
+    fn source_field_mapping() {
+        assert_eq!(ordered([], []), []);
+        assert_eq!(ordered([7.0], [0]), [7.0]);
+        assert_eq!(ordered([3.0, 1.0, 2.0], [2, 0, 1]), [1.0, 2.0, 3.0]);
+    }
+
+    /// Builds every schema from source fields, including reversed heterogeneous fields.
+    #[test]
+    fn record_adapters_preserve_named_values() {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup).unwrap();
+        let mut parser = cel_parser::CELParser::new(lookup);
+        /// Evaluates a record literal and checks its concrete named-field values.
+        macro_rules! check {
+            ($source:literal, $ty:ty, $expected:expr) => {
+                assert_eq!(
+                    parser.parse_str($source).unwrap().call0::<$ty>().unwrap(),
+                    $expected,
+                );
+            };
+        }
+        check!(
+            "Point2D { y: 2.0, x: 1.0 }",
+            Point2D,
+            Point2D::new(1.0, 2.0)
+        );
+        check!(
+            "Vector2D { y: 4.0, x: 3.0 }",
+            Vector2D,
+            Vector2D::new(3.0, 4.0)
+        );
+        check!(
+            "Size2D { height: 6.0, width: 5.0 }",
+            Size2D,
+            Size2D::new(5.0, 6.0)
+        );
+        check!(
+            "Rect { size: Size2D { width: 5.0, height: 6.0 }, origin: Point2D { x: 1.0, y: 2.0 } }",
+            Rect,
+            Rect::new(Point2D::new(1.0, 2.0), Size2D::new(5.0, 6.0))
+        );
+        check!(
+            "Box2D { max: Point2D { x: 3.0, y: 4.0 }, min: Point2D { x: 1.0, y: 2.0 } }",
+            Box2D,
+            Box2D::new(Point2D::new(1.0, 2.0), Point2D::new(3.0, 4.0))
+        );
+        check!("Angle { radians: 0.5 }", Angle, Angle::radians(0.5));
+        check!(
+            "Transform2D { m32: 6.0, m31: 5.0, m22: 4.0, m21: 3.0, m12: 2.0, m11: 1.0 }",
+            Transform2D,
+            Transform2D::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+        );
+        let mut lookup = OpLookup::new();
+        install(&mut lookup).unwrap();
+        assert!(install(&mut lookup).is_err());
+    }
+}

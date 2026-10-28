@@ -8,14 +8,17 @@ use anyhow::{Result, ensure};
 use std::any::TypeId;
 use std::result::Result::Ok;
 
-/// Extracts a typed segment's result or its empty-stack marker.
+/// Extracts a canonical typed segment's result or its empty-stack marker.
+///
+/// The sealed layout requirement prevents foreign list implementations from
+/// substituting unchecked stack representation metadata.
 ///
 /// # Examples
 /// ```
 /// use cel_runtime::{Segment, SegmentCallable};
 /// assert!(Segment::<()>::new().call(()).is_ok());
 /// ```
-pub trait StackResult: List {
+pub trait StackResult: List + CStackListHeadLimit {
     /// Moves the final result out, or returns the empty-stack marker.
     ///
     /// # Safety
@@ -51,12 +54,12 @@ impl<H: 'static, T: List + CStackListHeadLimit> StackResult for CStackList<H, T>
 /// ```rust
 /// use cel_runtime::segment::*;
 ///
-/// assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 argument
-///     .op1(|x| x * 2)                 // push a unary operation that multiplies the argument by 2
-///     .op0(|| 10)                     // push a nullary operation that returns 10
+/// assert_eq!(Segment::<(f64,)>::new() // create a new segment that takes an f64 argument
+///     .op1(|x| x * 2.0)               // push a unary operation that doubles the argument
+///     .op0(|| 10.0)                   // push a nullary operation that returns 10
 ///     .op2(|x, y| x + y)              // push a binary operation that adds two arguments
 ///     .op1(|x| x.to_string())         // push a unary operation returning a string of the argument
-///     .call((42, )).unwrap(),         // call the segment with an argument 42
+///     .call((42.0, )).unwrap(),       // call the segment with an argument 42
 ///     "94");                          // the result is (42 * 2 + 10).to_string()
 /// ```
 pub struct Segment<
@@ -219,14 +222,20 @@ where
 
     /// Executes a one-argument segment and returns its statically described result.
     pub(crate) fn call1<A: 'static>(&self, (a,): (A,)) -> Result<Stack::Head> {
-        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        let mut stack =
+            RawStack::with_base_alignment(self.segment.base_alignment().max(align_of::<A>()));
         stack.push(a);
         self.finish(stack)
     }
 
     /// Executes a two-argument segment and returns its statically described result.
     pub(crate) fn call2<A: 'static, B: 'static>(&self, (a, b): (A, B)) -> Result<Stack::Head> {
-        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        let mut stack = RawStack::with_base_alignment(
+            self.segment
+                .base_alignment()
+                .max(align_of::<A>())
+                .max(align_of::<B>()),
+        );
         stack.push(a);
         stack.push(b);
         self.finish(stack)
@@ -290,11 +299,56 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
+    /// Aligns input storage independently of the result's smaller alignment.
+    #[test]
+    fn over_aligned_arguments() {
+        /// Supplies a value with a stricter alignment than a byte result.
+        #[repr(align(4096))]
+        struct Aligned(u8);
+
+        assert_eq!(
+            Segment::<(Aligned,)>::new()
+                .op1(|value| value.0)
+                .call((Aligned(42),))
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            Segment::<(u8, Aligned)>::new()
+                .op2(|first, second| (first, second.0))
+                .call((7, Aligned(42)))
+                .unwrap(),
+            (7, 42)
+        );
+        assert_eq!(
+            Segment::<(Aligned, u8)>::new()
+                .op2(|first, second| (first.0, second))
+                .call((Aligned(42), 7))
+                .unwrap(),
+            (42, 7)
+        );
+    }
+
+    /// Returns an unmodified argument even when the segment has no instructions.
+    #[test]
+    fn identity_segment() {
+        assert_eq!(
+            Segment::<(String,)>::new()
+                .call((String::from("owned"),))
+                .unwrap(),
+            "owned"
+        );
+    }
+
+    /// Validates and executes a dynamically checked signed segment through its typed view.
     #[test]
     fn segment_from_dyn_segment() -> Result<()> {
         let mut dyn_segment = DynSegment::new::<(i32,)>();
         dyn_segment.op0(|| 42);
-        dyn_segment.op2(|x: i32, y: i32| x + y)?;
+        dyn_segment.op2r(|x: i32, y: i32| {
+            x.checked_add(y)
+                .ok_or_else(|| anyhow::anyhow!("addition overflow"))
+        })?;
         let segment = Segment::<(i32,), CStackList<i32, CNil<()>>>::try_from(dyn_segment)?;
 
         assert_eq!(segment.call((10,)).unwrap(), 52);
@@ -403,13 +457,14 @@ mod tests {
         assert_eq!(result.unwrap(), "Hello 12");
     }
 
+    /// Changes value types while composing infallible arithmetic and formatting operations.
     #[test]
     fn type_safe_operations() {
         let result = Segment::new()
-            .op0(|| 42)
-            .op0(|| 10)
+            .op0(|| 42f64)
+            .op0(|| 10f64)
             .op2(|x, y| x + y)
-            .op1(|x| x * 2)
+            .op1(|x| x * 2.0)
             .op1(|x| format!("{}", x))
             .call(());
 
@@ -427,10 +482,14 @@ mod tests {
         assert_eq!(result.unwrap(), "Length * 2 = 10");
     }
 
+    /// Executes a checked signed operation on a supplied argument.
     #[test]
     fn call_with_args() {
-        let result = Segment::new() //
-            .op1(|x: i32| x * 2) //
+        let result = Segment::new()
+            .op1r(|x: i32| {
+                x.checked_mul(2)
+                    .ok_or_else(|| anyhow::anyhow!("multiplication overflow"))
+            })
             .call((21,));
 
         assert_eq!(result.unwrap(), 42);

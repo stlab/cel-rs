@@ -369,6 +369,53 @@ mod ownership_tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
+    /// Preserves vector ownership and exposes exactly the initialized elements.
+    #[test]
+    fn vector_transfers_preserve_raw_parts() {
+        let mut values = Vec::with_capacity(8);
+        values.push(String::from("owned"));
+        values.push(String::from("second"));
+        let pointer = values.as_ptr();
+        let capacity = values.capacity();
+        let array = Array::from_vec(values);
+        assert_eq!(array.len(), 2);
+        assert!(!array.is_empty());
+        assert_eq!(array.capacity(), capacity);
+        assert_eq!(array.as_slice().as_ptr(), pointer);
+        assert_eq!(array.as_slice(), ["owned", "second"]);
+        assert_eq!(format!("{array:?}"), "Array([\"owned\", \"second\"])");
+        let values = array.into_vec();
+        assert_eq!(values.as_ptr(), pointer);
+        assert_eq!(values.capacity(), capacity);
+        assert_eq!(values, ["owned", "second"]);
+
+        assert!(Array::from_vec(Vec::<String>::new()).is_empty());
+        let zero_sized = Array::from_vec(vec![(); 3]);
+        assert_eq!(zero_sized.len(), 3);
+        assert_eq!(zero_sized.into_vec(), [(); 3]);
+    }
+
+    /// Preserves value equality while keeping cloned mutable values independent.
+    #[test]
+    fn clone_and_equality_laws() {
+        let first = Array::from_vec(vec![String::from("first")]);
+        let second = first.clone();
+        let third = second.clone();
+        assert!(first == first);
+        assert_eq!(first, second);
+        assert_eq!(second, first);
+        assert_eq!(second, third);
+        assert_eq!(first, third);
+        assert!(!(first != second));
+        let mut original = first.into_vec();
+        let mut cloned = second.into_vec();
+        original[0].push_str(" changed");
+        assert_eq!(cloned, ["first"]);
+        cloned[0].push_str(" copied");
+        assert_eq!(original, ["first changed"]);
+        assert_eq!(third.as_slice(), ["first"]);
+    }
+
     /// Releases members when only the erased owning header remains.
     #[test]
     fn raw_header_owns_its_members() {

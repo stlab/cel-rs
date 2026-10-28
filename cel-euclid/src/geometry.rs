@@ -213,3 +213,47 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Normalizes finite vectors and reports unusable lengths as runtime errors.
+    #[test]
+    fn normalization_contract() {
+        assert_eq!(
+            normalize(Vector2D::new(3.0, 4.0)).unwrap(),
+            Vector2D::new(0.6, 0.8)
+        );
+        for vector in [
+            Vector2D::zero(),
+            Vector2D::new(f64::NAN, 1.0),
+            Vector2D::new(f64::INFINITY, 1.0),
+            Vector2D::new(f64::MAX, f64::MAX),
+        ] {
+            assert!(normalize(vector).is_err());
+        }
+    }
+
+    /// Emits unary, binary and ternary registrations through ordinary source calls.
+    #[test]
+    fn geometry_registration_dispatch() {
+        let mut lookup = OpLookup::new();
+        crate::install(&mut lookup);
+        let mut parser = cel_parser::CELParser::new(lookup);
+        let mut scalar = parser
+            .parse_str("Vector2D { x: 3.0, y: 4.0 }.normalize().dot(Vector2D { x: 5.0, y: 0.0 })")
+            .unwrap();
+        assert_eq!(scalar.call0::<f64>().unwrap(), 3.0);
+        let mut rect = parser.parse_str(
+            "Rect { origin: Point2D { x: 1.0, y: 2.0 }, size: Size2D { width: 3.0, height: 4.0 } }.inflate(1.0, 2.0)"
+        ).unwrap();
+        assert_eq!(
+            rect.call0::<Rect>().unwrap(),
+            Rect::new(Point2D::zero(), Size2D::new(5.0, 8.0))
+        );
+        let mut lookup = OpLookup::new();
+        install(&mut lookup).unwrap();
+        assert!(install(&mut lookup).is_err());
+    }
+}

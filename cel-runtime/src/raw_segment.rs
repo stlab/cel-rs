@@ -3,21 +3,54 @@ use crate::raw_stack::RawStack;
 use anyhow::Result;
 use std::cmp::max;
 
+/// Executes one instruction and returns the next instruction-state position.
 type Operation = fn(&RawSequence, usize, &mut RawStack) -> Result<usize>;
+
+/// Advances the state cursor before destroying one stored instruction capture.
+type StorageDrop = fn(&mut RawSequence, &mut usize);
+
+/// Owns the remaining instruction-state destruction during unwinding.
+struct StorageCleanup<'a> {
+    storage: &'a mut RawSequence,
+    droppers: std::slice::Iter<'a, StorageDrop>,
+    position: usize,
+}
+
+impl StorageCleanup<'_> {
+    /// Destroys the remaining captures in insertion order.
+    ///
+    /// - Complexity: O(n) plus destruction costs for n remaining captures.
+    fn drop_remaining(&mut self) {
+        // Consume each dropper before invoking a potentially panicking destructor.
+        for destroy in self.droppers.by_ref() {
+            destroy(self.storage, &mut self.position);
+        }
+    }
+}
+
+impl Drop for StorageCleanup<'_> {
+    /// Resumes capture destruction if a previous destructor unwinds.
+    fn drop(&mut self) {
+        self.drop_remaining();
+    }
+}
 
 /// A segment represents a sequence of operations that can be executed.
 ///
 /// Each operation is stored along with its data in the segment's storage,
 /// and can manipulate values on a stack during execution.
+/// Destruction releases instruction captures in insertion order, including
+/// remaining captures when one destructor panics.
 pub struct RawSegment {
     ops: Vec<Operation>,
     storage: RawSequence,
-    dropper: Vec<fn(&mut RawSequence, usize) -> usize>,
+    dropper: Vec<StorageDrop>,
     base_alignment: usize,
     frame: Option<(usize, usize)>,
 }
 
 impl Default for RawSegment {
+    /// Creates an empty segment.
     fn default() -> Self {
         Self::new()
     }
@@ -31,7 +64,7 @@ impl RawSegment {
             ops: Vec::new(),
             storage: RawSequence::new(),
             dropper: Vec::new(),
-            base_alignment: 0,
+            base_alignment: 1,
             frame: None,
         }
     }
@@ -68,9 +101,10 @@ impl RawSegment {
     where
         T: 'static,
     {
+        self.dropper.reserve(1);
         self.storage.push(value);
         self.dropper
-            .push(|storage, p| unsafe { storage.drop_in_place::<T>(p) });
+            .push(|storage, p| unsafe { storage.drop_next::<T>(p) });
     }
 
     /// Pushes a closure that manipulates the stack directly and returns `()`.
@@ -431,7 +465,7 @@ impl RawSegment {
     where
         T: 'static,
     {
-        let mut stack = RawStack::with_base_alignment(self.base_alignment);
+        let mut stack = RawStack::with_base_alignment(self.base_alignment.max(align_of::<A>()));
         stack.push(arg);
         unsafe { self.call0_stack(&mut stack)? };
         Ok(unsafe { stack.pop(false) })
@@ -450,7 +484,11 @@ impl RawSegment {
     where
         T: 'static,
     {
-        let mut stack = RawStack::with_base_alignment(self.base_alignment);
+        let mut stack = RawStack::with_base_alignment(
+            self.base_alignment
+                .max(align_of::<A>())
+                .max(align_of::<B>()),
+        );
         stack.push(arg.0);
         stack.push(arg.1);
         unsafe { self.call0_stack(&mut stack)? };
@@ -459,17 +497,110 @@ impl RawSegment {
 }
 
 impl Drop for RawSegment {
+    /// Releases instruction captures, preserving cleanup across destructor unwinding.
+    ///
+    /// - Complexity: O(n) plus destruction costs for n captures.
     fn drop(&mut self) {
-        let mut p = 0;
-        for e in &self.dropper {
-            p = e(&mut self.storage, p);
-        }
+        let mut cleanup = StorageCleanup {
+            storage: &mut self.storage,
+            droppers: self.dropper.iter(),
+            position: 0,
+        };
+        cleanup.drop_remaining();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Supports captured values whose alignment exceeds the initial storage alignment.
+    #[test]
+    fn instruction_capture_alignment_grows_without_losing_earlier_state() {
+        /// Requires a wider alignment than the initial instruction buffer.
+        #[repr(align(8192))]
+        struct Aligned(u8);
+
+        impl Aligned {
+            /// Reads the captured value without narrowing the closure's capture.
+            fn value(&self) -> u8 {
+                self.0
+            }
+        }
+
+        let captured = Aligned(42);
+        let earlier = String::from("retained");
+        let mut segment = RawSegment::new();
+        segment.push_op0(move || earlier.clone());
+        segment.push_op0(move || captured.value());
+        segment.push_op2(|first: String, second: u8| (first, second), false, false);
+        assert_eq!(
+            unsafe { segment.call0::<(String, u8)>() }.unwrap(),
+            (String::from("retained"), 42)
+        );
+    }
+
+    /// Aligns the supplied arguments even when instructions produce only bytes.
+    #[test]
+    fn over_aligned_call_arguments() {
+        /// Requires a stricter alignment than the operation result.
+        #[repr(align(4096))]
+        struct Aligned(u8);
+
+        let mut one = RawSegment::new();
+        one.push_op1(|value: Aligned| value.0, false);
+        assert_eq!(unsafe { one.call1::<_, u8>(Aligned(42)) }.unwrap(), 42);
+
+        let mut two = RawSegment::new();
+        two.push_op2(|first: Aligned, second: u8| (first.0, second), false, false);
+        assert_eq!(
+            unsafe { two.call2::<_, _, (u8, u8)>((Aligned(42), 7u8)) }.unwrap(),
+            (42, 7)
+        );
+        let mut reversed = RawSegment::new();
+        reversed.push_op2(|first: u8, second: Aligned| (first, second.0), false, true);
+        assert_eq!(
+            unsafe { reversed.call2::<_, _, (u8, u8)>((7u8, Aligned(42))) }.unwrap(),
+            (7, 42)
+        );
+    }
+
+    /// Releases later instruction captures when an earlier capture destructor panics.
+    #[test]
+    fn capture_destruction_continues_after_panic() {
+        use std::{cell::RefCell, rc::Rc};
+
+        /// Records destruction and optionally starts unwinding.
+        struct Capture {
+            id: u8,
+            panic: bool,
+            destroyed: Rc<RefCell<Vec<u8>>>,
+        }
+
+        impl Drop for Capture {
+            /// Records this capture before any requested panic.
+            fn drop(&mut self) {
+                self.destroyed.borrow_mut().push(self.id);
+                assert!(!self.panic, "capture destructor panic");
+            }
+        }
+
+        let destroyed = Rc::new(RefCell::new(Vec::new()));
+        let mut segment = RawSegment::new();
+        for id in 0..3 {
+            let capture = Capture {
+                id,
+                panic: id == 1,
+                destroyed: destroyed.clone(),
+            };
+            segment.push_op0(move || {
+                let _keep_capture = &capture;
+                42u32
+            });
+        }
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(segment))).is_err());
+        assert_eq!(*destroyed.borrow(), [0, 1, 2]);
+    }
 
     #[test]
     fn nullary_operation() {

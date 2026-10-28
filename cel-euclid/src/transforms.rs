@@ -281,3 +281,59 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Gives equal encodings to exact equal products without underflowing small products.
+    #[test]
+    fn exact_product_equivalence() {
+        assert_eq!(exact_product(3.0, 4.0), exact_product(2.0, 6.0));
+        assert_eq!(exact_product(-3.0, 4.0), exact_product(2.0, -6.0));
+        assert_eq!(exact_product(-0.0, 4.0), exact_product(0.0, -6.0));
+        let smallest = f64::from_bits(1);
+        assert_eq!(
+            exact_product(smallest, 2.0),
+            exact_product(f64::from_bits(2), 1.0)
+        );
+        assert_ne!(exact_product(smallest, 0.5), exact_product(0.0, 1.0));
+    }
+
+    /// Inverts finite nonsingular transforms and rejects unusable coefficients.
+    #[test]
+    fn checked_inverse_contract() {
+        let matrix = Transform2D::translation(3.0, -4.0);
+        assert_eq!(
+            inverse(matrix).unwrap(),
+            Transform2D::translation(-3.0, 4.0)
+        );
+        assert!(inverse(Transform2D::scale(0.0, 1.0)).is_err());
+        assert!(inverse(Transform2D::scale(f64::MAX, f64::MAX)).is_err());
+        assert!(inverse(Transform2D::translation(f64::NAN, 0.0)).is_err());
+        assert!(!is_finite(Transform2D::translation(f64::INFINITY, 0.0)));
+    }
+
+    /// Encloses every mapped corner and detects invalid extents or projected edges.
+    #[test]
+    fn outer_bounds_contract() {
+        let rect = Rect::new(Point2D::new(1.0, 2.0), Size2D::new(3.0, 4.0));
+        assert_eq!(
+            outer_transformed_rect(Transform2D::identity(), rect).unwrap(),
+            rect
+        );
+        assert_eq!(projected_edge(-2.0, 3.0).unwrap(), 6.0);
+        assert!(projected_edge(f64::MAX, 2.0).is_err());
+        assert!(projected_edge(f64::from_bits(1), 0.5).is_err());
+        let extent = enclosing_extent(-1.0, f64::EPSILON).unwrap();
+        assert!(-1.0 + extent >= f64::EPSILON);
+        assert!(enclosing_extent(-f64::MAX, f64::MAX).is_err());
+        assert!(
+            outer_transformed_rect(
+                Transform2D::identity(),
+                Rect::new(Point2D::zero(), Size2D::new(-1.0, 1.0))
+            )
+            .is_err()
+        );
+    }
+}

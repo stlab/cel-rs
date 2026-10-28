@@ -194,12 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn tuple_list() {
-        let list = (1, 2.5, "Hello").into_tuple_list();
-        println!("{:?}", list);
-    }
-
-    #[test]
     fn list_index() {
         let list = (1, 2.5, "Hello").into_tuple_list();
         assert_eq!(*list.index(U0::new()), 1);

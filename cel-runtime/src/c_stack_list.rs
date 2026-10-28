@@ -44,21 +44,58 @@ use crate::list_traits::{
     ListTypeProperty,
 };
 
+/// Restricts layout metadata to representations controlled by this module.
+mod sealed {
+    /// Marks canonical representations whose field offsets the crate defines.
+    pub trait Layout {}
+}
+
+impl sealed::Layout for () {}
+impl<T: CStackListHeadLimit> sealed::Layout for CNil<T> {}
+impl<H: 'static, T: CStackListHeadLimit> sealed::Layout for CStackList<H, T> {}
+
 /// A list using a guaranteed memory layout (`repr(C)`), with tail stored first so appending items
 /// does not change the memory layout of prior items.
+///
+/// Cloning copies each field according to its `Clone` contract. Equality compares
+/// lengths and corresponding logical fields, independently of physical layout.
+///
+/// # Examples
+/// ```
+/// use cel_runtime::IntoCStackList;
+/// let list = (String::from("owned"), 7u8).into_c_stack_list();
+/// assert_eq!(list, list.clone());
+/// ```
 #[repr(C)]
 #[derive(Clone)]
 pub struct CStackList<H, T: CStackListHeadLimit>(pub T, pub H);
 
-/// A trait describing the memory layout of a [`CStackList`].
-/// Describes the memory layout of a [`CStackList`]'s head and tail boundary.
-pub trait CStackListHeadLimit {
+/// Describes the trusted head boundary of a canonical stack-list representation.
+///
+/// Only this crate defines layout metadata used by safe indexing and execution.
+///
+/// # Examples
+/// ```
+/// use cel_runtime::{CStackList, CStackListHeadLimit, CNil};
+/// assert_eq!(CStackList::<u32, CNil<()>>::HEAD_LIMIT, 4);
+/// ```
+///
+/// Foreign types cannot supply unchecked representation metadata:
+///
+/// ```compile_fail
+/// use cel_runtime::CStackListHeadLimit;
+/// struct Foreign;
+/// impl CStackListHeadLimit for Foreign {
+///     const HEAD_LIMIT: usize = 0;
+/// }
+/// ```
+pub trait CStackListHeadLimit: sealed::Layout {
     /// The offset to the _end_ of the head element.
     const HEAD_LIMIT: usize;
 }
 
 /// Indicates whether the head element is padded to satisfy alignment.
-pub trait CStackListHeadPadded {
+pub trait CStackListHeadPadded: CStackListHeadLimit {
     /// Whether the head element is padded to the next alignment boundary.
     const HEAD_PADDED: bool;
 }
@@ -373,8 +410,11 @@ where
     H: PartialEq<O::Head>,
     T: PartialEq<O::Tail>,
 {
+    /// Compares lengths and corresponding logical elements.
+    ///
+    /// - Complexity: O(n) field comparisons for n elements, excluding field costs.
     fn eq(&self, other: &O) -> bool {
-        self.head() == other.head() && self.tail() == other.tail()
+        self.len() == other.len() && self.head() == other.head() && self.tail() == other.tail()
     }
 }
 
@@ -417,6 +457,31 @@ mod tests {
     use crate::list_traits::Item;
 
     use super::*;
+
+    /// Compares list lengths before accessing a potentially absent head.
+    #[test]
+    fn equality_handles_different_lengths() {
+        /// Compares equal to another token but not to an absent value.
+        #[derive(Clone, PartialEq)]
+        struct Token;
+
+        impl PartialEq<crate::list_traits::Undefined> for Token {
+            /// Distinguishes a present token from an empty-list marker.
+            fn eq(&self, _: &crate::list_traits::Undefined) -> bool {
+                false
+            }
+        }
+
+        let empty = ().into_c_stack_list();
+        let one = (Token,).into_c_stack_list();
+        let two = (Token, Token).into_c_stack_list();
+        assert!(one != empty);
+        assert!(empty != one);
+        assert!(two != one);
+        assert!(one != two);
+        assert!(one == one.clone());
+    }
+
     #[test]
     fn into_c_stack_list() {
         let list = (1, 2.5, 3, 4, "world", "Hello").into_c_stack_list();
