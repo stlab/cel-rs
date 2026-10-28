@@ -25,7 +25,7 @@ cel-parser = { path = "../cel-parser" }
 cel-std = { path = "../cel-std" }
 adam-lang = { path = "../adam-lang" }
 rfd = { version = "0.17.2", optional = true }
-notify = { version = "8.2.0", optional = true }
+notify = { version = "8.2.1", optional = true }
 
 [lints]
 workspace = true
