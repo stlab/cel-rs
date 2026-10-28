@@ -1,9 +1,10 @@
 ---
-description: Standards for Rust documentation comments
-globs: *.rs
-alwaysApply: true
+applyTo: "**/*.rs"
 ---
-This rule establishes standards for Rust documentation comments across all code.
+
+# Rust documentation contracts
+
+Document public and private Rust components with adjacent contracts.
 
 ## General Principles
 
@@ -25,14 +26,17 @@ These sections are only needed if they are not implied by the summary sentence.
 - Use `# Arguments` for parameter descriptions
 - Use `# Returns` for complex return value explanations
 - Use `# Errors` to document error conditions
-- Use `# Panics` to document panic conditions
+- State non-obvious preconditions as `- Precondition:` bullets
+- State postconditions not implied by the summary as `- Postcondition:` bullets
+- Document non-O(1) time and space as a `- Complexity:` bullet
 - Use `# Safety` for unsafe functions
 
 ## Specific Guidelines
 
 ### Functions and Methods
 - Start with what the function **does** (not what it "will do")
-- Document preconditions that may cause errors or panics
+- Check preconditions with `debug_assert!()`; do not document or test the consequences of violating them
+- Distinguish runtime errors, documented in `# Errors`, from precondition violations
 - Follow recommendations from [Better Code: Contracts](https://github.com/stlab/better-code/blob/main/better-code/src/chapter-2-contracts.md) adapted to Rust conventions
 - For grammar production parsers, the production itself is sufficient documentation
 
@@ -109,29 +113,25 @@ When functions can return errors:
 pub fn lookup(&self, name: &str, types: &[TypeId], segment: &mut DynSegment) -> Result<()>
 ```
 
-## Panic Documentation
+## Preconditions
 
-When functions can panic:
-- Document **all** panic conditions in `# Panics` section
-- Be specific about what causes the panic
+State valid inputs rather than describing what happens when callers violate the
+contract. Preconditions have unspecified behavior on violation; `# Safety` is
+the exception that must describe undefined behavior for unsafe contracts.
 
 **Good:**
 ```rust
-/// Returns the TypeId for this signature.
+/// Returns the type identifier at the given signature index.
 ///
-/// # Panics
+/// - Precondition: `type_id_index` is within this signature.
 ///
-/// Panics if the type_id_index is out of bounds (should never happen for valid signatures).
-fn type_id(&self) -> TypeId
+fn type_id(&self, type_id_index: usize) -> TypeId
 ```
 
 ## Examples
 
-Include examples (`# Examples`) for:
-- Public APIs
-- Non-obvious usage patterns
-- Types with specific initialization requirements
-- Functions with multiple valid usage patterns
+Include `# Examples` for every public API. Add examples for non-obvious private
+usage, initialization requirements, or multiple valid usage patterns when useful.
 
 Use triple backticks with `rust` for proper syntax highlighting.
 
@@ -149,6 +149,6 @@ Use triple backticks with `rust` for proper syntax highlighting.
 
 ## Special Cases
 
-- **Getters/Setters:** Brief description is sufficient ("Returns the X" / "Sets the X")
+- **Getters/Setters:** Use a brief contract summary and include examples for public APIs
 - **Grammar Productions:** The production itself is sufficient for parser functions
-- **Internal/Private Items:** Documentation encouraged but not required; focus on public API clarity
+- **Internal/Private Items:** Contracts are required, including valid inputs, observable results, and non-constant complexity where applicable
