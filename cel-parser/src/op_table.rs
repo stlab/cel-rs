@@ -55,6 +55,9 @@ fn span_err(_span: SourceSpan, e: anyhow::Error) -> anyhow::Error {
 /// Receives the segment and the source span of the expression that triggered
 /// this operation. This is a simple function pointer since built-in operations
 /// have no state.
+///
+/// # Examples
+/// See [`OpLookup::register_tuple_op`] for an operation emitter.
 pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 
 /// A signature for an operator/function whose selected operand is a tuple.
@@ -76,6 +79,9 @@ pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 /// tuple at that position regardless of its inner arity or element types.
 /// Two registrations that would only differ by that inner shape are not
 /// distinguishable — do not rely on nested-tuple precision at this level.
+///
+/// # Examples
+/// See [`OpLookup::register_tuple_op`].
 pub struct TupleOpSignature {
     /// Operator/function name this signature is registered under.
     pub name: String,
@@ -100,6 +106,9 @@ pub struct TupleOpSignature {
 ///
 /// Error messages returned by scope functions surface verbatim to the user. They should be
 /// lowercase, end without a period, and wrap identifiers and type names in backticks.
+///
+/// # Examples
+/// See [`OpLookup::push_scope`] for callback ownership and dispatch.
 pub type ScopeFn =
     Box<dyn Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync>;
 
@@ -1037,6 +1046,9 @@ static BUILTINS: phf::Map<&'static str, &'static [OpSignature]> = phf_map! {
 
 /// A single built-in overload's declared operand types, exposed for the static type checker
 /// (`cel_parser::ty::check_expr`) — never `op_fn`, which is execution-only and stays private.
+///
+/// # Examples
+/// See [`builtin_operand_types`] for inspecting overload metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OperandTypes {
     /// Number of operands this overload accepts (1 or 2).
@@ -1425,8 +1437,8 @@ fn complete_builtin_leaf<T: Clone + PartialEq + std::fmt::Debug + 'static>()
         .expect("same concrete leaf")
 }
 
-/// Declares the one built-in scalar table every built-in name lookup reads: the name list
-/// [`BUILTIN_SCALAR_NAMES`] exposes and the descriptors [`builtin_scalar_type`] resolves, so a
+/// Declares the one built-in scalar table every built-in name lookup reads: the test-only name list
+/// `BUILTIN_SCALAR_NAMES` exposes and the descriptors [`builtin_scalar_type`] resolves, so a
 /// name can never be recognized by one and missed by the other.
 macro_rules! builtin_scalars {
     ($($name:literal => $ty:ty),* $(,)?) => {
@@ -1686,6 +1698,29 @@ impl OpLookup {
     /// Registers a tuple-shaped operator signature, matched by element
     /// `TypeId` sequence the same way built-in operators are matched by flat
     /// `TypeId`.
+    ///
+    /// - Complexity: Amortized O(1) registration, transferring the owned signature.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::op_table::{OpLookup, TupleOpSignature};
+    /// use cel_runtime::DynSegment;
+    /// use proc_macro2::Span;
+    /// use std::any::TypeId;
+    /// let mut lookup = OpLookup::new();
+    /// lookup.register_tuple_op(TupleOpSignature {
+    ///     name: "first".into(),
+    ///     shape: vec![TypeId::of::<i32>()],
+    ///     tuple_operand_index: 0,
+    ///     operand_type_ids: Vec::new(),
+    ///     op_fn: |segment, _| segment.tuple_index(0),
+    /// });
+    /// let mut segment = DynSegment::new::<()>();
+    /// segment.just(42i32);
+    /// segment.make_tuple(1, 0).unwrap();
+    /// lookup.lookup("first", &mut segment, 1, Span::call_site(), Span::call_site()).unwrap();
+    /// assert_eq!(segment.call0::<i32>().unwrap(), 42);
+    /// ```
     pub fn register_tuple_op(&mut self, signature: TupleOpSignature) {
         self.tuple_signatures.push(signature);
     }
@@ -1739,6 +1774,29 @@ impl OpLookup {
     /// `Ok(true)` if it handled the operation, `Ok(false)` to pass to the next scope,
     /// or `Err` on error. Error messages surface verbatim; they should be lowercase, end
     /// without a period, and wrap identifiers and type names in backticks.
+    ///
+    /// - Complexity: Amortized O(1) registration, including owned callback storage.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::OpLookup;
+    /// use cel_runtime::DynSegment;
+    /// use proc_macro2::Span;
+    /// let mut lookup = OpLookup::new();
+    /// lookup.push_library_scope(|name, segment, arity, _| {
+    ///     if name == "answer" && arity == 0 {
+    ///         segment.just(42i32);
+    ///         Ok(true)
+    ///     } else {
+    ///         Ok(false)
+    ///     }
+    /// });
+    /// lookup.push_scope(|_, _, _, _| Ok(false));
+    /// assert!(lookup.pop_scope().is_some());
+    /// let mut segment = DynSegment::new::<()>();
+    /// lookup.lookup("answer", &mut segment, 0, Span::call_site(), Span::call_site()).unwrap();
+    /// assert_eq!(segment.call0::<i32>().unwrap(), 42);
+    /// ```
     pub fn push_scope<F>(&mut self, scope: F)
     where
         F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,
@@ -1753,6 +1811,9 @@ impl OpLookup {
     /// - Precondition: must not remove a library scope registered via
     ///   [`push_library_scope`](Self::push_library_scope) — those are permanent setup-time
     ///   registrations that must survive across multiple parses.
+    ///
+    /// # Examples
+    /// See [`Self::push_scope`] for adding and removing a transient scope without removing a library.
     pub fn pop_scope(&mut self) -> Option<ScopeFn> {
         debug_assert!(
             self.scopes.len() > self.library_scope_count,
@@ -1772,7 +1833,11 @@ impl OpLookup {
     /// Do not use for scopes tied to a single parse's lifetime — use [`push_scope`](Self::push_scope)
     /// for those, which can be isolated during nested body compilation (closures).
     ///
-    /// - Complexity: O(1).
+    /// - Precondition: no transient scopes are installed.
+    /// - Complexity: Amortized O(1) registration, including owned callback storage.
+    ///
+    /// # Examples
+    /// See [`Self::push_scope`] for permanent and transient registrations.
     pub fn push_library_scope<F>(&mut self, scope: F)
     where
         F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,

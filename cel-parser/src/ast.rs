@@ -28,6 +28,9 @@ use crate::type_expr::TypeExpr;
 ///
 /// `proc_macro2::Span` isn't `PartialEq`, so neither is this type — shape tests should match
 /// structurally and ignore spans rather than assert exact span equality.
+///
+/// # Examples
+/// See [`Self::for_text`].
 #[derive(Clone, Copy, Debug)]
 pub struct ExprSpan {
     /// Start of the first token of the node.
@@ -91,6 +94,9 @@ impl ExprSpan {
 /// are indistinguishable here — both become `Literal::U8`; a formatter that must reproduce exact
 /// original syntax should re-slice the node's original source text from its span instead of
 /// relying on this enum to recover lexical form.
+///
+/// # Examples
+/// See [`crate::Parser::parse_tokens_ast`] for retained literal values.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Literal {
     /// `i8` literal (e.g. `1i8`).
@@ -136,6 +142,9 @@ pub enum Literal {
 }
 
 /// The two short-circuiting logical operators.
+///
+/// # Examples
+/// See [`crate::ParserContext::apply_logical`] for lazy logical composition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalOp {
     /// `&&`.
@@ -154,6 +163,9 @@ pub enum LogicalOp {
 /// `Logical` is kept distinct from `If` (rather than desugaring `a || b` to
 /// `if a { true } else { b }`, which is how [`DynSegmentContext`](crate::parser_context::DynSegmentContext)
 /// executes it) so a formatter can round-trip `a || b` as `a || b`.
+///
+/// # Examples
+/// See [`crate::Parser::parse_tokens_ast`] for building retained expressions.
 #[derive(Clone, Debug)]
 pub enum Expr {
     /// A named record constructor, unresolved until semantic checking.
@@ -309,6 +321,14 @@ pub enum Expr {
 
 impl Expr {
     /// Returns this node's source span.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, OpLookup, Parser};
+    /// let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast("1 + 2").unwrap();
+    /// assert_eq!(expr.span().start.start().column, 0);
+    /// assert_eq!(expr.span().end.end().column, 5);
+    /// ```
     pub fn span(&self) -> ExprSpan {
         match self {
             Expr::Literal { span, .. }
@@ -351,6 +371,14 @@ pub struct RecordInit {
 
 /// One `closure_param = identifier ":" type_expression` — a closure literal's declared
 /// parameter.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, Expr, OpLookup, Parser};
+/// let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast("|x: i32| x").unwrap();
+/// let Expr::Closure { params, .. } = expr else { unreachable!() };
+/// assert_eq!(params[0].name, "x");
+/// ```
 #[derive(Clone, Debug)]
 pub struct ClosureParam {
     /// The parameter's declared name.

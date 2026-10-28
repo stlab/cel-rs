@@ -92,6 +92,49 @@ fn reserved_value_names_are_rejected() {
     }
 }
 
+/// Both parser targets retain the reserved identifier's complete source range.
+///
+/// - Complexity: Includes both parser targets' traversal and emission costs for `source`.
+fn assert_reserved_value_name_range(source: &str, start: usize, end: usize) {
+    [
+        CELParser::new(OpLookup::new()).parse_str(source).err(),
+        Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .err(),
+    ]
+    .into_iter()
+    .for_each(|error| {
+        let error = error.expect("reserved value name must be rejected");
+        assert!(error.message().contains("reserved keyword"));
+        assert_eq!(
+            (error.span().start(), error.span().end()),
+            (
+                proc_macro2::LineColumn {
+                    line: 1,
+                    column: start,
+                },
+                proc_macro2::LineColumn {
+                    line: 1,
+                    column: end,
+                },
+            ),
+            "{source}"
+        );
+    });
+}
+
+/// A following token does not steal the reserved identifier's diagnostic range.
+#[test]
+fn reserved_value_name_error_precedes_another_token() {
+    assert_reserved_value_name_range("else + 1", 0, 4);
+}
+
+/// End of input does not replace a reserved identifier's range with a call-site span.
+#[test]
+fn reserved_value_name_error_at_eof_keeps_full_range() {
+    assert_reserved_value_name_range("1 + else", 4, 8);
+}
+
 /// Syntax retains every representable tuple index while execution validates bounds.
 #[test]
 fn maximum_tuple_index_is_deferred_without_a_sentinel_collision() {

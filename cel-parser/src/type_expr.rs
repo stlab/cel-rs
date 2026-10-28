@@ -24,6 +24,9 @@ use crate::{ExprSpan, ParseError, Result, op_table};
 /// `Fn((A, B), R)` reserves structural callable syntax: the first argument must be a tuple
 /// of parameter types and the second is the result. `Fn((), R)` has no parameters;
 /// `Fn((A,), R)` has one. This syntax is resolved before host generic-leaf lookup.
+///
+/// # Examples
+/// See [`Self::resolve`] for parsing and resolving syntax.
 #[derive(Clone, Debug)]
 pub enum TypeExpr {
     /// A single type name, optionally applying type arguments, resolved later through a
@@ -252,6 +255,9 @@ pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<R
 /// [`Self::with_complete_value_type`] to enrich its optional capabilities;
 /// metadata cannot be recovered from a `TypeId`.
 /// Equality compares registered identity, not optional capability availability.
+///
+/// # Examples
+/// See [`Self::leaf`] for concrete leaf registration.
 #[derive(Clone, Debug)]
 pub struct ResolvedLeafType {
     type_id: TypeId,
@@ -420,6 +426,9 @@ impl ResolvedLeafType {
 }
 
 /// A resolved recursive CEL type expression.
+///
+/// # Examples
+/// See [`Self::display_name`] for recursive type construction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ResolvedType {
     /// A resolved scalar leaf.
@@ -573,6 +582,9 @@ impl ResolvedType {
 }
 
 /// The resolved descriptor for one complete array type annotation.
+///
+/// # Examples
+/// See [`Self::from_resolved_type`] for conversion and element metadata.
 #[derive(Clone, Debug)]
 pub struct ResolvedArrayType {
     element_type: cel_runtime::ValueType,
@@ -614,6 +626,20 @@ impl ResolvedArrayType {
     /// # Errors
     ///
     /// Returns `Err` if `resolved` is not an array type or its layout is unrepresentable.
+    ///
+    /// - Complexity: Matches recursive descriptor conversion, or diagnostic name construction
+    ///   when the resolved type is not an array.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup, ResolvedArrayType};
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// let syntax = parser.parse_type_expr_str("[i32]").unwrap();
+    /// let resolved = parser.resolve_type_expr(&syntax).unwrap();
+    /// let array = ResolvedArrayType::from_resolved_type(resolved, syntax.span()).unwrap();
+    /// assert_eq!(array.element_type().type_name(), "i32");
+    /// assert_eq!(array.into_element_type().type_id(), std::any::TypeId::of::<i32>());
+    /// ```
     pub fn from_resolved_type(resolved: ResolvedType, span: ExprSpan) -> Result<Self> {
         match resolved {
             ResolvedType::Array { element } => Ok(Self {
@@ -633,12 +659,18 @@ impl ResolvedArrayType {
     }
 
     /// Returns the recursive element descriptor this array annotation resolves to.
+    ///
+    /// # Examples
+    /// See [`Self::from_resolved_type`].
     #[must_use]
     pub fn element_type(&self) -> &cel_runtime::ValueType {
         &self.element_type
     }
 
     /// Returns the recursive element descriptor, consuming `self`.
+    ///
+    /// # Examples
+    /// See [`Self::from_resolved_type`] for transferring the descriptor.
     #[must_use]
     pub fn into_element_type(self) -> cel_runtime::ValueType {
         self.element_type

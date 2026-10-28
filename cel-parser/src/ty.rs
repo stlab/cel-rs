@@ -12,6 +12,9 @@ use crate::type_expr::{BuiltinTypeResolver, ResolvedType, TypeExpr, TypeResolver
 use crate::{Expr, ExprSpan, Literal, OpLookup, ParseError, ResolvedLeafType};
 
 /// A complete recursive source type, or an unresolved editor value.
+///
+/// # Examples
+/// See [`Self::unify`] for recursive compatibility and result construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ty {
     /// `i8`.

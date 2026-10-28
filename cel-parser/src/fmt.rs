@@ -572,7 +572,8 @@ fn unary_op_token(name: &str) -> &'static str {
 /// identically. Recursive arrays keep their bracket nesting, and tuple type expressions keep the
 /// same reusable syntax the parser accepts for future typed CEL surfaces.
 ///
-/// - Complexity: O(n + b) time and O(b + d) space for n nodes, b emitted bytes and depth d.
+/// - Complexity: O(t + n + b) time for t inspected type-source bytes, n type nodes and
+///   b emitted bytes; O(b) output and O(d) auxiliary stack space for type depth d.
 fn render_type_expr(type_expr: &crate::TypeExpr, source: &Source<'_>) -> String {
     let span = type_expr.span();
     let original = source.between(span.start.start(), span.end.end());

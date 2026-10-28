@@ -375,6 +375,9 @@ use std::iter::Peekable;
 use std::str::FromStr;
 
 /// Parser result type.
+///
+/// # Examples
+/// See [`Parser::parse_str`] for a fallible parsing result.
 pub type Result<T> = std::result::Result<T, ParseError>;
 
 /// Pushes a literal value from `token` onto `output`.
@@ -572,6 +575,14 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
 ///
 /// Returns `Err` for an unrecognized numeric suffix, or a numeric value out of range for its
 /// width.
+///
+/// - Complexity: Includes literal-token cloning and value parsing for the token's text.
+///
+/// # Examples
+/// ```
+/// let literal: syn::Lit = syn::parse_str("42i32").unwrap();
+/// cel_parser::validate_literal(&literal).unwrap();
+/// ```
 pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
     push_literal_token(&mut DynSegmentContext::new_context(), lit.clone())
 }
@@ -699,6 +710,9 @@ pub enum ExpressionRestriction {
 ///
 /// This is the parser every existing caller uses; behavior is unchanged from before [`Parser`]
 /// became generic over [`ParserContext`].
+///
+/// # Examples
+/// See [`Parser::parse_str`] for parsing and execution.
 pub type CELParser = Parser<DynSegmentContext>;
 
 impl<C: ParserContext> Parser<C> {
@@ -711,6 +725,9 @@ impl<C: ParserContext> Parser<C> {
     /// # Arguments
     ///
     /// * `op_lookup` - Operation lookup for resolving operators and identifiers
+    ///
+    /// # Examples
+    /// See [`Self::parse_str_ctx`] for constructing and using a parser.
     pub fn new(op_lookup: OpLookup) -> Self {
         Self::with_boxed_type_resolver(op_lookup, type_expr::builtin_type_resolver())
     }
@@ -795,6 +812,9 @@ impl<C: ParserContext> Parser<C> {
     /// # Errors
     ///
     /// Returns `Err` if some named leaf in `expr` is not recognized.
+    ///
+    /// # Examples
+    /// See [`Self::parse_type_expr_str`] for resolving parsed type syntax.
     pub fn resolve_type_expr(&self, expr: &TypeExpr) -> Result<ResolvedType> {
         expr.resolve(self.type_resolver.as_ref())
     }
@@ -803,6 +823,9 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// Call before [`is_expression`](Self::is_expression) or use
     /// [`parse_tokens_ctx`](Self::parse_tokens_ctx) which sets tokens and parses in one step.
+    ///
+    /// # Examples
+    /// See [`Self::parse_tokens_ctx`] for setting and consuming a token cursor.
     pub fn set_tokens(&mut self, tokens: TokenStreamIter) {
         self.tokens = Some(LexLexer::new(tokens).peekable());
         self.context = C::new_context();
@@ -815,6 +838,9 @@ impl<C: ParserContext> Parser<C> {
     /// Resets the context. Use together with [`parse_expression_ctx`](Self::parse_expression_ctx)
     /// and [`take_lex_tokens`](Self::take_lex_tokens) to share a token stream between adam-lang and
     /// [`CELParser`].
+    ///
+    /// # Examples
+    /// See [`Self::parse_tokens_ctx`] for installing an already lexed cursor.
     pub fn set_lex_tokens(&mut self, tokens: std::iter::Peekable<lex_lexer::LexLexer>) {
         self.tokens = Some(tokens);
         self.context = C::new_context();
@@ -841,6 +867,9 @@ impl<C: ParserContext> Parser<C> {
     /// the stream — regardless of whether the parse succeeded or failed — and folding it into the
     /// caller's own depth counter keeps that counter consistent with the physical nesting left
     /// behind in the stream.
+    ///
+    /// # Examples
+    /// See [`Self::parse_tokens_ctx`] for the balanced-input case.
     pub fn unbalanced_delimiter_count(&self) -> i32 {
         self.unbalanced_delimiters
     }
@@ -856,6 +885,9 @@ impl<C: ParserContext> Parser<C> {
     /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
+    ///
+    /// # Examples
+    /// See [`Self::parse_tokens_ctx`] for parsing from an installed cursor.
     pub fn parse_expression_ctx(&mut self) -> Result<C> {
         self.parse_expression_ctx_restricted(ExpressionRestriction::None)
     }
@@ -913,6 +945,18 @@ impl<C: ParserContext> Parser<C> {
     /// # Errors
     ///
     /// Returns an error if the input does not contain a valid `literal_pattern`.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup};
+    /// use proc_macro2::TokenStream;
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// parser.set_tokens("7".parse::<TokenStream>().unwrap().into_iter());
+    /// let context = parser.parse_literal_pattern_ctx().unwrap();
+    /// assert_eq!(context.into_inner().call0::<i32>().unwrap(), 7);
+    /// parser.set_tokens("8".parse::<TokenStream>().unwrap().into_iter());
+    /// assert_eq!(parser.parse_literal_pattern().unwrap().call0::<i32>().unwrap(), 8);
+    /// ```
     pub fn parse_literal_pattern_ctx(&mut self) -> Result<C> {
         if !self.is_literal_pattern()? {
             return Err(self.error_at("literal pattern expected"));
@@ -952,6 +996,9 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// Call after [`parse_expression_ctx`](Self::parse_expression_ctx) to recover the
     /// shared [`LexLexer`] for continued adam-lang parsing.
+    ///
+    /// # Examples
+    /// See [`Self::parse_tokens_ctx`] for recovering the remaining cursor.
     pub fn take_lex_tokens(&mut self) -> Option<std::iter::Peekable<lex_lexer::LexLexer>> {
         self.tokens.take()
     }
@@ -963,6 +1010,25 @@ impl<C: ParserContext> Parser<C> {
     /// # Errors
     ///
     /// Returns an error if the input does not contain a valid CEL expression.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup, lex_lexer::LexLexer};
+    /// use proc_macro2::TokenStream;
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// parser.set_tokens("42".parse::<TokenStream>().unwrap().into_iter());
+    /// assert!(parser.is_expression().unwrap());
+    /// assert_eq!(parser.unbalanced_delimiter_count(), 0);
+    /// assert!(parser.take_lex_tokens().unwrap().peek().is_none());
+    /// let tokens = "42".parse::<TokenStream>().unwrap();
+    /// parser.set_lex_tokens(LexLexer::new(tokens.into_iter()).peekable());
+    /// let context = parser.parse_expression_ctx().unwrap();
+    /// assert_eq!(context.into_inner().call0::<i32>().unwrap(), 42);
+    /// assert!(parser.take_lex_tokens().unwrap().peek().is_none());
+    /// let tokens = "43".parse::<TokenStream>().unwrap();
+    /// let context = parser.parse_tokens_ctx(tokens.into_iter()).unwrap();
+    /// assert_eq!(context.into_inner().call0::<i32>().unwrap(), 43);
+    /// ```
     pub fn parse_tokens_ctx(&mut self, tokens: TokenStreamIter) -> Result<C> {
         self.set_tokens(tokens);
         if !self.is_expression()? {
@@ -982,6 +1048,13 @@ impl<C: ParserContext> Parser<C> {
     /// # Errors
     ///
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup};
+    /// let context = CELParser::new(OpLookup::new()).parse_str_ctx("40 + 2").unwrap();
+    /// assert_eq!(context.into_inner().call0::<i32>().unwrap(), 42);
+    /// ```
     pub fn parse_str_ctx(&mut self, s: &str) -> Result<C> {
         let input = TokenStream::from_str(s).map_err(|e| ParseError::from_lex_error(s, e))?;
         self.parse_tokens_ctx(input.into_iter())
@@ -996,6 +1069,9 @@ impl<C: ParserContext> Parser<C> {
     /// # Errors
     ///
     /// Returns an error if the current token stream does not begin with a valid type expression.
+    ///
+    /// # Examples
+    /// See [`Self::parse_type_expr_str`] for parsing from strings and installed cursors.
     pub fn parse_type_expr(&mut self) -> Result<TypeExpr> {
         self.parse_type_expression()
     }
@@ -1005,6 +1081,9 @@ impl<C: ParserContext> Parser<C> {
     /// # Errors
     ///
     /// Returns an error if `tokens` does not contain a valid complete type expression.
+    ///
+    /// # Examples
+    /// See [`Self::parse_type_expr_str`] for parsing a complete token stream.
     pub fn parse_type_expr_tokens(&mut self, tokens: TokenStreamIter) -> Result<TypeExpr> {
         self.set_tokens(tokens);
         let expr = self.parse_type_expr()?;
@@ -1020,6 +1099,24 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// Returns an error on lex failure or if `s` does not contain a valid complete type
     /// expression.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup};
+    /// use proc_macro2::TokenStream;
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// let syntax = parser.parse_type_expr_str("[i32]").unwrap();
+    /// assert_eq!(parser.resolve_type_expr(&syntax).unwrap().display_name(), "[i32]");
+    /// let tokens = "u32".parse::<TokenStream>().unwrap();
+    /// let syntax = parser.parse_type_expr_tokens(tokens.into_iter()).unwrap();
+    /// assert_eq!(parser.resolve_type_expr(&syntax).unwrap().display_name(), "u32");
+    /// parser.set_tokens("bool".parse::<TokenStream>().unwrap().into_iter());
+    /// let syntax = parser.parse_type_expr().unwrap();
+    /// assert_eq!(parser.resolve_type_expr(&syntax).unwrap().display_name(), "bool");
+    /// parser.set_tokens("i64".parse::<TokenStream>().unwrap().into_iter());
+    /// let syntax = parser.parse_type_expression().unwrap();
+    /// assert_eq!(parser.resolve_type_expr(&syntax).unwrap().display_name(), "i64");
+    /// ```
     pub fn parse_type_expr_str(&mut self, s: &str) -> Result<TypeExpr> {
         let input = TokenStream::from_str(s).map_err(|e| ParseError::from_lex_error(s, e))?;
         self.parse_type_expr_tokens(input.into_iter())
@@ -1208,6 +1305,9 @@ impl<C: ParserContext> Parser<C> {
     }
 
     /// `expression = range_expression.`
+    ///
+    /// # Examples
+    /// See [`Self::parse_tokens_ctx`] for recognizing an expression on the current cursor.
     pub fn is_expression(&mut self) -> Result<bool> {
         self.is_range_expression()
     }
@@ -1871,7 +1971,10 @@ impl<C: ParserContext> Parser<C> {
                     return self.is_if_expression(ident_span);
                 }
                 if matches!(ident_name.as_str(), "else" | "as") {
-                    return Err(self.error_at("reserved keyword is not a value name"));
+                    return Err(ParseError::new(
+                        "reserved keyword is not a value name",
+                        ident_span,
+                    ));
                 }
 
                 if self.restriction == ExpressionRestriction::None
@@ -2162,6 +2265,9 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// Returns an error if a named leaf is missing, if an array, tuple, or type-argument list is
     /// malformed, or if a closing `]`/`)` is missing.
+    ///
+    /// # Examples
+    /// See [`Self::parse_type_expr_str`] for recognizing type syntax on the current cursor.
     pub fn parse_type_expression(&mut self) -> Result<TypeExpr> {
         if let Some(Token::Identifier(_)) = self.peek_token() {
             let name = self.expect_identifier("expected a type name")?;
@@ -2492,6 +2598,9 @@ impl Parser<DynSegmentContext> {
     /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
+    ///
+    /// # Examples
+    /// See [`Self::parse_tokens`] for executing an expression from an installed cursor.
     pub fn parse_expression(&mut self) -> Result<DynSegment> {
         self.parse_expression_ctx()
             .map(DynSegmentContext::into_inner)
@@ -2521,6 +2630,9 @@ impl Parser<DynSegmentContext> {
     /// # Errors
     ///
     /// Returns an error if the input does not contain a valid `literal_pattern`.
+    ///
+    /// # Examples
+    /// See [`Self::parse_literal_pattern_ctx`] for parsing and executing literal patterns.
     pub fn parse_literal_pattern(&mut self) -> Result<DynSegment> {
         self.parse_literal_pattern_ctx()
             .map(DynSegmentContext::into_inner)
@@ -2535,6 +2647,17 @@ impl Parser<DynSegmentContext> {
     /// Returns an error if the input does not contain a valid CEL expression.
     ///
     /// - Complexity: O(n) in the number of tokens.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup};
+    /// use proc_macro2::TokenStream;
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// let tokens = "42".parse::<TokenStream>().unwrap();
+    /// assert_eq!(parser.parse_tokens(tokens.into_iter()).unwrap().call0::<i32>().unwrap(), 42);
+    /// parser.set_tokens("43".parse::<TokenStream>().unwrap().into_iter());
+    /// assert_eq!(parser.parse_expression().unwrap().call0::<i32>().unwrap(), 43);
+    /// ```
     pub fn parse_tokens(&mut self, tokens: TokenStreamIter) -> Result<DynSegment> {
         self.parse_tokens_ctx(tokens)
             .map(DynSegmentContext::into_inner)
@@ -2550,6 +2673,13 @@ impl Parser<DynSegmentContext> {
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
     ///
     /// - Complexity: O(n) in the length of `s`.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup};
+    /// let mut segment = CELParser::new(OpLookup::new()).parse_str("40 + 2").unwrap();
+    /// assert_eq!(segment.call0::<i32>().unwrap(), 42);
+    /// ```
     pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
         self.parse_str_ctx(s).map(DynSegmentContext::into_inner)
     }
@@ -2567,6 +2697,9 @@ impl Parser<AstContext> {
     /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
+    ///
+    /// # Examples
+    /// See [`Self::parse_tokens_ast`] for retaining syntax from an installed cursor.
     pub fn parse_expression_ast(&mut self) -> Result<Expr> {
         self.parse_expression_ctx().map(AstContext::into_expr)
     }
@@ -2580,6 +2713,19 @@ impl Parser<AstContext> {
     /// Returns an error if the input does not contain a valid CEL expression.
     ///
     /// - Complexity: O(n) in the number of tokens.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, Expr, Literal, OpLookup, Parser};
+    /// use proc_macro2::TokenStream;
+    /// let mut parser = Parser::<AstContext>::new(OpLookup::new());
+    /// let tokens = "42".parse::<TokenStream>().unwrap();
+    /// assert!(matches!(parser.parse_tokens_ast(tokens.into_iter()).unwrap(),
+    ///     Expr::Literal { value: Literal::I32(42), .. }));
+    /// parser.set_tokens("43".parse::<TokenStream>().unwrap().into_iter());
+    /// assert!(matches!(parser.parse_expression_ast().unwrap(),
+    ///     Expr::Literal { value: Literal::I32(43), .. }));
+    /// ```
     pub fn parse_tokens_ast(&mut self, tokens: TokenStreamIter) -> Result<Expr> {
         self.parse_tokens_ctx(tokens).map(AstContext::into_expr)
     }

@@ -33,6 +33,9 @@ use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, ResolvedType, Sour
 /// Emitters validate fallible setup before changing the segment. The lookup uniquely owns
 /// each emitter and invokes it only while compiling; segments own the emitted operations.
 /// Boxing a zero-sized, captureless closure does not allocate.
+///
+/// # Examples
+/// See [`OpLookup::register_operation`] for a registered emitter.
 pub type OperationEmitter = Box<dyn Fn(&mut DynSegment, SourceSpan) -> Result<()> + Send + Sync>;
 
 /// Consumes source-order fields using source-position to schema-position indices,
@@ -40,12 +43,18 @@ pub type OperationEmitter = Box<dyn Fn(&mut DynSegment, SourceSpan) -> Result<()
 ///
 /// The lookup uniquely owns this compile-time callback. Boxing a zero-sized,
 /// captureless closure does not allocate.
+///
+/// # Examples
+/// See [`OpLookup::register_record`] for source-order field construction.
 pub type RecordEmitter =
     Box<dyn Fn(&mut DynSegment, &[usize], usize, SourceSpan) -> Result<()> + Send + Sync>;
 
 /// Describes one named operation with complete concrete operand and result identities.
 ///
 /// The emitter consumes exactly `operands` and produces exactly `result`.
+///
+/// # Examples
+/// See [`OpLookup::register_operation`] for signature construction.
 pub struct OperationSignature {
     /// The shared operation name.
     pub name: &'static str,
@@ -58,6 +67,9 @@ pub struct OperationSignature {
 }
 
 /// Describes one required record field.
+///
+/// # Examples
+/// See [`OpLookup::register_record`] for declaring required fields.
 pub struct RecordField {
     /// The source field name.
     pub name: &'static str,
@@ -66,6 +78,9 @@ pub struct RecordField {
 }
 
 /// Describes a named record's required fields and construction implementation.
+///
+/// # Examples
+/// See [`OpLookup::register_record`] for constructing and installing a schema.
 pub struct RecordSchema {
     /// The constructed type, whose source name keys this schema.
     pub ty: ResolvedLeafType,

@@ -8,6 +8,9 @@ use proc_macro2::LineColumn;
 
 /// A recovered `//`/`/* */` comment, remembering which delimiter style the source used so a
 /// formatter can reproduce it instead of normalizing every comment to one style.
+///
+/// # Examples
+/// See [`scan_gap`] for comment recovery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Comment {
     /// A line comment's text — its `//` and surrounding whitespace stripped. A producer that
@@ -21,6 +24,9 @@ pub enum Comment {
 
 /// One element of a scanned gap: either a recovered comment or one of the literal tokens the
 /// caller declared it expected to find there.
+///
+/// # Examples
+/// See [`scan_gap`] for ordered comment and punctuation pieces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GapPiece {
     /// A comment found in the gap.
@@ -43,8 +49,11 @@ pub enum GapPiece {
 ///
 /// # Examples
 /// ```
-/// use cel_parser::trivia::{GapPiece, scan_gap};
-/// assert_eq!(scan_gap(" + ", &["+"]), vec![GapPiece::Punct("+")]);
+/// use cel_parser::trivia::{Comment, GapPiece, scan_gap};
+/// assert_eq!(scan_gap("/* note */ + ", &["+"]), vec![
+///     GapPiece::Comment(Comment::Block("note".into())),
+///     GapPiece::Punct("+"),
+/// ]);
 /// ```
 pub fn scan_gap(gap: &str, expected: &[&'static str]) -> Vec<GapPiece> {
     let mut pieces = Vec::new();
@@ -128,6 +137,9 @@ fn normalize_block(inner: &str) -> String {
 /// of 1-based line `line` (matching [`proc_macro2::LineColumn::line`]'s convention).
 ///
 /// - Complexity: O(n) in `source.len()`.
+///
+/// # Examples
+/// See [`line_column_to_byte`] for conversion using the returned line index.
 pub fn line_start_byte_offsets(source: &str) -> Vec<usize> {
     let mut offsets = vec![0usize];
     let mut byte = 0usize;
@@ -144,6 +156,15 @@ pub fn line_start_byte_offsets(source: &str) -> Vec<usize> {
 /// - Precondition: `line_starts` was built from exactly `source`, and `pos.line - 1` is in range.
 ///
 /// - Complexity: O(k) in `pos.column`.
+///
+/// # Examples
+/// ```
+/// use cel_parser::trivia::{line_column_to_byte, line_start_byte_offsets};
+/// let source = "é\nβ";
+/// let lines = line_start_byte_offsets(source);
+/// let end = proc_macro2::LineColumn { line: 2, column: 1 };
+/// assert_eq!(line_column_to_byte(source, &lines, end), source.len());
+/// ```
 pub fn line_column_to_byte(source: &str, line_starts: &[usize], pos: LineColumn) -> usize {
     debug_assert!(
         pos.line >= 1 && pos.line - 1 < line_starts.len(),
