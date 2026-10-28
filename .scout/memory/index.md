@@ -26,4 +26,5 @@
 - [[knowledge/oplookup-scoping-and-resolution-hierarchy.md|OpLookup Scoping and Resolution Hierarchy]] (concept, 0.80) `cel-parser` `op-lookup` `operator-resolution` `scope` `builtins`
 - [[knowledge/sheet-constraint-planning-and-method-selection-flow.md|Sheet Constraint Planning and Method Selection Flow]] (observation, 0.80) `adam-rs` `sheet` `planner` `multi-way-constraints` `method-selection`
 - [[knowledge/vendored-spectrum-bundle-maintenance-via-xtask.md|Vendored Spectrum Bundle Maintenance via xtask]] (procedure, 0.85) `xtask` `spectrum` `swc-js` `assets` `build-js`
+- [[knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md|VS Code module events must share canonical dependency ownership with the loader]] (pattern, 0.98) `vscode` `modules` `symlinks` `canonical-paths` `cache-invalidation` `source-ownership`
 

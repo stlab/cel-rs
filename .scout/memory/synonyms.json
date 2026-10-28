@@ -1186,6 +1186,26 @@
       [
         "configuration",
         0.5
+      ],
+      [
+        "cache-invalidation",
+        0.5
+      ],
+      [
+        "canonical-paths",
+        0.5
+      ],
+      [
+        "modules",
+        0.5
+      ],
+      [
+        "symlinks",
+        0.5
+      ],
+      [
+        "vscode",
+        0.5
       ]
     ],
     "cel-parser": [
@@ -7379,6 +7399,116 @@
         "grammar",
         1.0
       ]
+    ],
+    "cache-invalidation": [
+      [
+        "canonical-paths",
+        1.0
+      ],
+      [
+        "modules",
+        1.0
+      ],
+      [
+        "source-ownership",
+        1.0
+      ],
+      [
+        "symlinks",
+        1.0
+      ],
+      [
+        "vscode",
+        1.0
+      ]
+    ],
+    "canonical-paths": [
+      [
+        "cache-invalidation",
+        1.0
+      ],
+      [
+        "modules",
+        1.0
+      ],
+      [
+        "source-ownership",
+        1.0
+      ],
+      [
+        "symlinks",
+        1.0
+      ],
+      [
+        "vscode",
+        1.0
+      ]
+    ],
+    "modules": [
+      [
+        "cache-invalidation",
+        1.0
+      ],
+      [
+        "canonical-paths",
+        1.0
+      ],
+      [
+        "source-ownership",
+        1.0
+      ],
+      [
+        "symlinks",
+        1.0
+      ],
+      [
+        "vscode",
+        1.0
+      ]
+    ],
+    "symlinks": [
+      [
+        "cache-invalidation",
+        1.0
+      ],
+      [
+        "canonical-paths",
+        1.0
+      ],
+      [
+        "modules",
+        1.0
+      ],
+      [
+        "source-ownership",
+        1.0
+      ],
+      [
+        "vscode",
+        1.0
+      ]
+    ],
+    "vscode": [
+      [
+        "cache-invalidation",
+        1.0
+      ],
+      [
+        "canonical-paths",
+        1.0
+      ],
+      [
+        "modules",
+        1.0
+      ],
+      [
+        "source-ownership",
+        1.0
+      ],
+      [
+        "symlinks",
+        1.0
+      ]
     ]
   },
   "provenance": {
@@ -12651,8 +12781,98 @@
     ],
     "trailing-comma|project-policy": [
       "knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md"
+    ],
+    "cache-invalidation|canonical-paths": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "cache-invalidation|modules": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "cache-invalidation|source-ownership": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "cache-invalidation|symlinks": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "cache-invalidation|vscode": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "canonical-paths|cache-invalidation": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "canonical-paths|modules": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "canonical-paths|source-ownership": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "canonical-paths|symlinks": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "canonical-paths|vscode": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "modules|cache-invalidation": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "modules|canonical-paths": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "modules|source-ownership": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "modules|symlinks": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "modules|vscode": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "source-ownership|cache-invalidation": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "source-ownership|canonical-paths": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "source-ownership|modules": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "source-ownership|symlinks": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "source-ownership|vscode": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "symlinks|cache-invalidation": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "symlinks|canonical-paths": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "symlinks|modules": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "symlinks|source-ownership": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "symlinks|vscode": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "vscode|cache-invalidation": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "vscode|canonical-paths": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "vscode|modules": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "vscode|source-ownership": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
+    ],
+    "vscode|symlinks": [
+      "knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md"
     ]
   },
-  "entries_processed": 24,
-  "built_at": "2026-10-28T04:14:40.991256+00:00"
+  "entries_processed": 25,
+  "built_at": "2026-10-28T05:13:03.368271+00:00"
 }

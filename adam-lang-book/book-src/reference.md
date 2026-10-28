@@ -198,8 +198,8 @@ and custom calls without metadata remain best-effort, with all children checked.
 Record fields are required exactly once and match their types exactly: no
 implicit integer-to-float conversion. Unknown constructors and
 unknown/duplicate/missing/mistyped fields are errors. Field evaluation follows
-written order. Empty schemas accept `{}`; non-empty fields permit a trailing
-comma (call arguments do not). Records must be parenthesized in `if` conditions
+written order. Empty schemas accept `{}`; record fields and call arguments reject
+trailing commas. Records must be parenthesized in `if` conditions
 and `conditional` subjects unless inside a parenthesized, call, tuple, or array
 subexpression. Members are never assignment targets; binding targets remain
 whole cell names or tuple patterns. See the
@@ -234,8 +234,8 @@ type in the current design.
   _cycle_ if every valid assignment forms a closed dependency loop with no source anywhere in
   it. See [when no assignment exists](relationships.md#when-no-assignment-exists).
 - A binding's left-hand side destructures a tuple result element-wise when parenthesized with
-  more than one name, or exactly one name plus a trailing comma; a bare name or a single
-  parenthesized name with no comma binds the whole result directly. See
+  more than one name, or exactly one name plus its required comma. A bare name binds
+  the whole result directly; a single parenthesized name without a comma is invalid. See
   [destructuring bindings](relationships-continued.md#destructuring-bindings).
 - A `source` cell can never be a binding's output: a `relationship` (or `conditional` branch)
   naming one as an output is a parse-time error. See [source cells](source.md).

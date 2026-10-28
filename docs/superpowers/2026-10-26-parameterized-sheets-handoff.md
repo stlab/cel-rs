@@ -137,6 +137,51 @@ Only the existing third-party `block v0.1.6` future-incompatibility notice
 remained. Distribution-book, WASM and slide-browser checks remain assigned to
 the Docs workflow; this host has no `mdbook` or `wasm-pack` executable.
 
+## Canonical module events and reference contracts — 2026-10-28
+
+The follow-up Talos fix wave starts at
+`445c888401cab6acded6e4fbc8029f1cfd576355`. One `ModuleSourceLoader` now owns
+the current lexical module mappings and their approved canonical event aliases.
+Initialization and the existing serialized refresh queue share that loader.
+Wire records and editor overlays retain lexical URIs; reads still require
+canonical workspace containment.
+
+Event selection includes canonical targets, including non-`.adm2` files, and
+lexical/canonical ancestor replacements for directory and workspace links.
+Canonical targets also rebase beneath the lexical workspace root because VS Code
+preserves that spelling in watcher events for symlinked workspace folders.
+Each lexical owner retains its approved alias across read and realpath failures.
+Loading visits every owner even if another module fails. Current configuration
+prunes removed owners before event selection, and successful resolution replaces
+retargeted aliases without removing aliases belonging to other owners.
+
+An initial realpath failure cannot reveal its canonical URI. While any owner has
+an unresolved realpath, all watcher/save events request a retry; the extension
+does not discover or load unconfigured modules. Successful resolution restores
+unrelated-event suppression, including when a subsequent text read fails.
+Existing explicit error snapshots and visible error reporting remain unchanged.
+
+The reference now rejects record trailing commas and grouped singleton binding
+targets. Singleton tuple destructuring still requires its comma; bare names
+still bind whole results.
+
+Before implementation, `npm test` in `editors/vscode-adam-lang` reported
+**21 passed, three failed**, all through behavioral assertions for canonical
+target selection, read-failure ownership and initial-resolution recovery.
+The first implementation passed **24 tests**. Scoped review then reproduced two
+defects: a suspended load could mix old options with new owners, and event
+selection missed canonical targets spelled beneath a symlinked lexical root.
+Three added regressions failed through behavioral assertions before correction.
+Each load now retains a read-only owner-map snapshot before its first suspension,
+including for root-failure handling. Event-time pruning replaces maps without
+mutating captured snapshots. Owner identity includes the lexical workspace root,
+so detached generations cannot change replacement owners' aliases or failure
+state. Rebased watcher aliases survive failures and prune on retargeting/removal.
+After correction, `npm run compile` and `npm test` passed with **27 tests,
+zero failures**. `cargo fmt --all` and `git diff --check` also passed.
+This is targeted adapter/prose validation, not a fresh workspace gate, live
+VS Code session or distribution-book build. No commit or push occurs in this wave.
+
 ## Broad review and consolidated fixes
 
 The broad review covered all 88 branch paths and confirmed a post-construction

@@ -49,23 +49,149 @@ export type ModuleSourceSnapshot =
  * Example: await loadModuleSources({ modules: { lib: "lib.adm2" }, workspaceRoot, toUri, realPath, readText }).
  */
 export async function loadModuleSources(options: ModuleSourceOptions): Promise<readonly ModuleSource[]> {
-  const records: ModuleSource[] = [];
-  const files = resolveModuleFiles(options);
-  if (files.length === 0) { return records; }
-  // Resolve the root too: the workspace folder itself may be a valid symlink.
-  const root = await options.realPath(options.workspaceRoot!);
-  for (const { modulePath, file, absolute, uri } of files) {
+  return new ModuleSourceLoader(() => options).load();
+}
+
+/** Owns a lexical mapping and its last approved canonical dependency, even after IO failure. */
+interface ModuleFileOwner {
+  readonly file: ModuleFile;
+  readonly workspaceRoot: string;
+  target?: string;
+  root?: string;
+  unresolved: boolean;
+}
+
+/**
+ * Owns canonical event aliases separately from lexical wire/overlay identities.
+ * Failed realpath resolution temporarily selects all source events for recovery;
+ * successful resolution restores precise dependency selection, even if reading fails.
+ * Configuration changes prune removed owners; successful retargeting replaces aliases.
+ * Load calls must not overlap; event selection may run during a suspended load.
+ * Retained space: O(p) configured/canonical path bytes, excluding source snapshots.
+ * Example: const sources = new ModuleSourceLoader(currentOptions); await sources.load().
+ */
+export class ModuleSourceLoader {
+  private owners: ReadonlyMap<string, ModuleFileOwner> = new Map();
+
+  /** Retains the caller-owned current-options provider without capturing a configuration snapshot. */
+  constructor(private readonly currentOptions: () => ModuleSourceOptions) {}
+
+  /**
+   * Loads lexical wire records after validating canonical containment for every owner.
+   * Resolves all owners even when another owner fails, retaining aliases before reads.
+   * Uses one options/owner snapshot throughout suspension; detached owners cannot update
+   * replacement configurations' aliases or failure state.
+   * Rejects invalid configuration, physical escapes and IO failures without partial success.
+   * Time/space: O(p + t) plus IO for path bytes p and source bytes t.
+   * Example: const records = await sources.load().
+   */
+  async load(): Promise<readonly ModuleSource[]> {
+    const options = this.currentOptions();
+    this.synchronize(options);
+    const owners = this.owners;
+    if (owners.size === 0) { return []; }
+    let root: string;
     try {
-      const target = await options.realPath(absolute);
-      if (!isContained(root, target)) {
-        throw new Error('module target must stay inside the workspace');
-      }
-      records.push({ path: modulePath, uri, text: await options.readText(target) });
+      root = await options.realPath(options.workspaceRoot!);
     } catch (error: unknown) {
-      throw new Error(`Cannot read module "${modulePath}" (${file}): ${errorMessage(error)}`);
+      // The shared root must resolve before any owner's canonical dependency is known.
+      for (const owner of owners.values()) { owner.unresolved = true; }
+      throw error;
+    }
+    const records: ModuleSource[] = [];
+    let failure: Error | undefined;
+    // Visit every owner so a failed module cannot hide later modules' event dependencies.
+    for (const owner of owners.values()) {
+      const { modulePath, file, absolute, uri } = owner.file;
+      let target: string;
+      try {
+        target = await options.realPath(absolute);
+        if (!isContained(root, target)) {
+          throw new Error('module target must stay inside the workspace');
+        }
+        owner.target = target;
+        owner.root = root;
+        owner.unresolved = false;
+      } catch (error: unknown) {
+        owner.unresolved = true;
+        failure ??= new Error(`Cannot read module "${modulePath}" (${file}): ${errorMessage(error)}`);
+        continue;
+      }
+      try {
+        records.push({ path: modulePath, uri, text: await options.readText(target) });
+      } catch (error: unknown) {
+        failure ??= new Error(`Cannot read module "${modulePath}" (${file}): ${errorMessage(error)}`);
+      }
+    }
+    if (failure) { throw failure; }
+    return records;
+  }
+
+  /**
+   * Selects lexical/canonical files and their ancestor replacement events, including
+   * canonical targets rebased beneath the lexical workspace root used by watchers.
+   * Unresolved realpaths select every event until a subsequent load resolves them.
+   * Invalid configuration selects no events; loading reports that error.
+   * Time: O(p * d) for path bytes p and maximum directory depth d; space: O(p).
+   * Example: sources.isSource("file:///repo/physical/library.txt").
+   */
+  isSource(uri: string): boolean {
+    const options = this.currentOptions();
+    try {
+      this.synchronize(options);
+    } catch {
+      return false;
+    }
+    // Inspect owner dependencies without materializing another collection.
+    for (const owner of this.owners.values()) {
+      if (owner.unresolved ||
+          isDependencyUri(uri, owner.file.absolute, owner.workspaceRoot, options.toUri) ||
+          (owner.target !== undefined && owner.root !== undefined &&
+            (isDependencyUri(uri, owner.target, owner.root, options.toUri) ||
+              isDependencyUri(uri, path.resolve(owner.workspaceRoot, path.relative(owner.root, owner.target)),
+                owner.workspaceRoot, options.toUri)))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Rebuilds current lexical ownership while preserving only still-configured aliases.
+   * Invalid configuration clears aliases and propagates the validation error.
+   * Time/space: O(p) configured path bytes.
+   */
+  private synchronize(options: ModuleSourceOptions): void {
+    try {
+      const files = resolveModuleFiles(options);
+      const workspaceRoot = options.workspaceRoot === undefined ? '' : path.resolve(options.workspaceRoot);
+      this.owners = new Map(files.map((file) => {
+        const previous = this.owners.get(file.uri);
+        // Reuse only the same generation; suspended loads retain any detached owners.
+        const owner = previous?.file.modulePath === file.modulePath &&
+          previous.file.absolute === file.absolute && previous.file.file === file.file &&
+          previous.workspaceRoot === workspaceRoot
+          ? previous : { file, workspaceRoot, unresolved: false };
+        return [file.uri, owner];
+      }));
+    } catch (error: unknown) {
+      this.owners = new Map();
+      throw error;
     }
   }
-  return records;
+}
+
+/**
+ * Selects an exact file or an ancestor whose replacement can change that dependency.
+ * Precondition: absolute and root are absolute paths, and absolute is contained in root.
+ * Time: O(p * d) for path bytes p and directory depth d; space: O(p).
+ */
+function isDependencyUri(uri: string, absolute: string, root: string, toUri: (file: string) => string): boolean {
+  const boundary = path.resolve(root);
+  for (let file = absolute; ; file = path.dirname(file)) {
+    if (toUri(file) === uri) { return true; }
+    if (file === boundary || file === path.dirname(file)) { return false; }
+  }
 }
 
 /**
@@ -96,7 +222,7 @@ export function isConfiguredModuleFile(uri: string, options: ModuleSourceOptions
  * See createModuleSourceHandlers for construction and an example.
  */
 export interface ModuleSourceHandlers {
-  /** Schedules a refresh only when the URI belongs to the current explicit mapping. */
+  /** Schedules a refresh for a current source dependency or unresolved-path recovery. */
   readonly sourceChanged: (uri: string) => void;
   /** Schedules a refresh only when the modules configuration changed. */
   readonly configurationChanged: (affectsModules: boolean) => void;
@@ -104,17 +230,18 @@ export interface ModuleSourceHandlers {
 
 /**
  * Creates editor-event handlers that select refreshes from the current configuration.
- * The options provider and scheduler remain caller-owned; no options snapshot is retained.
- * Source-event time/space: O(n) configured paths; configuration events take O(1).
- * Example: createModuleSourceHandlers(currentOptions, requestRefresh).configurationChanged(true).
+ * The loader owns dependency identities; the scheduler remains caller-owned.
+ * Source-event time: O(p * d) for path bytes p and directory depth d; space: O(p).
+ * Configuration events take O(1).
+ * Example: createModuleSourceHandlers(sources, requestRefresh).configurationChanged(true).
  */
 export function createModuleSourceHandlers(
-  currentOptions: () => ModuleSourceOptions,
+  sources: ModuleSourceLoader,
   requestRefresh: () => void,
 ): ModuleSourceHandlers {
   return {
     sourceChanged: (uri) => {
-      if (isConfiguredModuleFile(uri, currentOptions())) { requestRefresh(); }
+      if (sources.isSource(uri)) { requestRefresh(); }
     },
     configurationChanged: (affectsModules) => {
       if (affectsModules) { requestRefresh(); }

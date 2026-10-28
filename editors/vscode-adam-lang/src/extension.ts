@@ -6,7 +6,7 @@ import {
   createModuleSourceRefresh,
   createModuleSourceHandlers,
   errorMessage,
-  loadModuleSources,
+  ModuleSourceLoader,
   ModuleSourceRefresh,
   ModuleSourceSnapshot,
 } from './moduleSources';
@@ -59,8 +59,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     realPath: (file: string) => fs.promises.realpath(file),
     readText: async (file: string) => new TextDecoder('utf-8', { fatal: true }).decode(await vscode.workspace.fs.readFile(vscode.Uri.file(file))),
   });
-  /** Loads one current snapshot through the contract-tested explicit mapping adapter. */
-  const load = () => loadModuleSources(sourceOptions());
+  const sources = new ModuleSourceLoader(sourceOptions);
+  /** Loads one current snapshot and retains its canonical event dependencies across failures. */
+  const load = () => sources.load();
   /** Reports source/configuration/transport errors in VS Code's visible error channel. */
   const report = (message: string) => { void vscode.window.showErrorMessage(`adam-lang: ${message}`); };
   // Initialization and refresh share exactly the same loader and wire schema.
@@ -86,8 +87,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Close the startup race between the initial disk snapshot and event registration.
     /** Schedules one complete refresh and reports transport failure without an unhandled rejection. */
     const requestRefresh = () => { void refresh().catch((error: unknown) => report(errorMessage(error))); };
-    const handlers = createModuleSourceHandlers(sourceOptions, requestRefresh);
-    /** Refreshes only mapped source files; watching does not discover or load unconfigured files. */
+    const handlers = createModuleSourceHandlers(sources, requestRefresh);
+    /** Selects mapped dependencies or resolution recovery; watching never discovers modules. */
     const sourceChanged = (uri: vscode.Uri) => handlers.sourceChanged(uri.toString());
     const watcher = vscode.workspace.createFileSystemWatcher('**/*');
     context.subscriptions.push(
