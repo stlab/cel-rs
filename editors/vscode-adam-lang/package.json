@@ -35,6 +35,12 @@
     "configuration": {
       "title": "adam-lang",
       "properties": {
+        "adam-lang.modules": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "description": "Explicit module path to workspace-relative .adm2 file mapping, resolved against the first workspace folder. Include every importing root and imported module. No package discovery occurs; configuration/read failures are shown as errors."
+        },
         "adam-lang.serverPath": {
           "type": "string",
           "default": "",

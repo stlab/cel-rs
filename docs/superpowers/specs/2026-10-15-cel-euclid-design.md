@@ -142,7 +142,7 @@ This is a general host-registration facility, not parser knowledge of Euclid.
 
 Each field is required exactly once. Diagnose unknown, missing, duplicate,
 and incorrectly typed fields with useful source spans. Allow arbitrary field
-order and a trailing comma. Evaluate field expressions exactly once in written
+order, without trailing commas. Evaluate field expressions exactly once in written
 order, even if the constructor's canonical field order differs. Preserve
 concrete Rust type identity on the runtime stack.
 
@@ -189,7 +189,7 @@ Left-factor the identifier primary and extend the existing postfix loop:
 
 ```text
 identifier_primary = identifier [ struct_body ].
-struct_body = "{" [ field_init { "," field_init } [ "," ] ] "}".
+struct_body = "{" [ field_init { "," field_init } ] "}".
 field_init = identifier ":" expression.
 postfix_expression = primary_expression {
     "(" [ parameter_list ] ")"
@@ -373,7 +373,7 @@ agreement after interaction stops.
 
 Derive tests from the public contracts, including:
 
-- Constructors: arbitrary field order, trailing commas, nested records,
+- Constructors: arbitrary field order, rejection of trailing commas, nested records,
   source-order evaluation, duplicate/missing/unknown fields, wrong scalar
   types, unknown constructors, and value/type namespace separation.
 - Postfix operations: named access/calls/chaining, tuple indexing coexistence,

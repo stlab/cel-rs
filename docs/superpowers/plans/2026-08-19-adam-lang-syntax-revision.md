@@ -715,13 +715,13 @@ element type, `Vec<RelationshipDecl>` → `Vec<RelateDecl>` (field name unchange
 above), and the grammar doc comment above `ConditionalBranch`:
 
 ```rust
-/// `conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].`
+/// `conditional_branch = literal "=>" "{" { relationship_decl } "}".`
 ```
 
 to:
 
 ```rust
-/// `conditional_branch = literal "=>" "{" { relate_decl } "}" [ "," ].`
+/// `conditional_branch = literal "=>" "{" { relate_decl } "}".`
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
@@ -2946,8 +2946,8 @@ In `adam-lang/src/lib.rs`, change (~lines 6-24):
 //! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" [ identifier ] "{" { method_decl } "}".
 //! conditional_decl   = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".
-//! conditional_branch = or_expression "=>" "{" { relationship_decl } "}" [ "," ].
-//! default_branch     = "_"   "=>" "{" { relationship_decl } "}" [ "," ].
+//! conditional_branch = or_expression "=>" "{" { relationship_decl } "}".
+//! default_branch     = "_"   "=>" "{" { relationship_decl } "}".
 //! method_decl        = "method" cell_list "->" cell_list method_body.
 //! out_decl           = "out" identifier [ ":" type_expr ] "{" out_method { condition_decl } "}".
 //! out_method         = "method" cell_list method_body.

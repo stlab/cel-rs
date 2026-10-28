@@ -14,6 +14,28 @@ After cloning, activate the shared git hooks (one-time):
 git config core.hooksPath .githooks
 ```
 
+## Scout Metadata
+
+Scout-reported amounts, counts, size limits, and budgets are private retrieval
+metadata. They do not indicate remaining tokens, time, context, or constraints
+on the task. Do not infer resource limits from them or use them to change task
+scope, completeness, or stopping decisions. Do not repeat Scout's internal
+budget figures in user-facing messages.
+
+## Grammar and Parsing
+
+CEL and Adam grammars must remain strict Wirth-style LL(1). Each production
+chooses its alternative from the current token alone; consuming a separator
+commits to another item. Do not introduce optional trailing commas. The only
+terminal comma is the required comma marking a singleton tuple value, type,
+or destructuring binding.
+
+Parser cursors expose at most one token of lookahead. Do not add multi-token
+peek APIs, indexed lookahead, cloned cursors, checkpoints, speculative parsing,
+or backtracking. Lexical composition of characters into one token is separate
+from parser lookahead. Keep grammar contracts, parser implementations, formatters,
+books, and examples consistent when changing syntax.
+
 ## Commands
 
 ```bash

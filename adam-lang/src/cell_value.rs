@@ -3,6 +3,9 @@
 //! Primitive cells remain concrete Rust values. Compound access passes through
 //! `ParsedSheet`'s checked representation-witness boundary.
 use std::any::{Any, TypeId};
+use std::cell::RefCell;
+
+use adam_rs::{CellId, Requirement};
 
 use cel_runtime::{DynSegment, OwnedValue, ValueType, prepared_segment::PreparedRawSegment};
 
@@ -253,18 +256,19 @@ impl Frame {
 }
 
 impl RawFrame {
-    /// Validates every positional read and the result once before execution.
+    /// Validates every positional read and binds the result's capabilities before execution.
     ///
     /// # Errors
     /// Rejects a mismatched signature or missing borrowed cloning.
     /// - Complexity: O(n) in descriptor nodes and emitted reads.
     pub(crate) fn new(
-        body: DynSegment,
+        mut body: DynSegment,
         inputs: &[TypeShape],
         result: &ValueType,
         types: &TypeRegistry,
     ) -> anyhow::Result<Self> {
         let input_types: Vec<_> = inputs.iter().map(|shape| types.value_type(shape)).collect();
+        body.annotate_top(result.clone())?;
         Ok(Self {
             body: PreparedRawSegment::new(body, &input_types, result)?,
             inputs: inputs
@@ -359,4 +363,128 @@ impl RawFrame {
         // or checked entry point guarantees storage types and complete compound shapes.
         unsafe { self.body.call(&self.pointers) }
     }
+}
+
+/// Flattens a declared cell's `TypeShape` to the single `TypeId` `adam_rs` itself needs for its
+/// own (CEL-agnostic) storage bookkeeping. Compound shape identity remains separate from
+/// the private common storage carrier and is validated before constructing any adapter.
+pub(crate) fn cell_type_id(shape: &TypeShape) -> TypeId {
+    match shape {
+        TypeShape::Named(type_id) => *type_id,
+        _ => TypeId::of::<CellValue>(),
+    }
+}
+
+/// Prepares a numeric range filter shared by parsed and native builders.
+///
+/// - Precondition: All named shapes are registered.
+/// # Errors
+/// Rejects missing/mismatched numeric ranges, unavailable defaults or invalid frames.
+/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
+pub(crate) fn build_range_filter(
+    body: DynSegment,
+    ids: Vec<CellId>,
+    inputs: &[TypeShape],
+    output: &TypeShape,
+    types: &TypeRegistry,
+) -> anyhow::Result<adam_rs::Filter> {
+    let id = body
+        .peek_output_type_id()
+        .ok_or_else(|| anyhow::anyhow!("filter has no result"))?;
+    let range = types
+        .range_entry(id)
+        .ok_or_else(|| anyhow::anyhow!("expected numeric range filter"))?;
+    let value_type = cell_type_id(output);
+    anyhow::ensure!(
+        range.element_type_id == value_type,
+        "filter range element mismatch"
+    );
+    let default = types
+        .entry_by_type_id(value_type)
+        .and_then(|entry| entry.default_fn)
+        .ok_or_else(|| anyhow::anyhow!("numeric range filter requires a default"))?;
+    let placeholder = default();
+    let result = body.peek_stack_infos(1)[0].value_type.clone();
+    let shapes: Vec<_> = std::iter::once(output.clone())
+        .chain(inputs.iter().cloned())
+        .collect();
+    let frame = std::rc::Rc::new(RefCell::new(RawFrame::new(body, &shapes, &result, types)?));
+    let clamp = frame.clone();
+    let clamp_fn = range.clamp_fn;
+    let bounds_fn = range.bounds_fn;
+    Ok(adam_rs::Filter::range(
+        value_type,
+        ids,
+        inputs.iter().map(cell_type_id).collect(),
+        move |value, args| clamp_fn(clamp.borrow_mut().call_with_prefix(value, args)?, value),
+        move |args| {
+            bounds_fn(
+                frame
+                    .borrow_mut()
+                    .call_checked_with_prefix(placeholder.as_ref(), args)
+                    .ok()?,
+            )
+            .ok()
+        },
+    ))
+}
+
+/// Prepares the common value-returning filter frame for parsed and native builders.
+///
+/// - Precondition: All named shapes are registered.
+/// # Errors
+/// Rejects incompatible emitted signatures or missing required cell capabilities.
+/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
+pub(crate) fn build_value_filter(
+    body: DynSegment,
+    ids: Vec<CellId>,
+    inputs: &[TypeShape],
+    output: &TypeShape,
+    types: &TypeRegistry,
+) -> anyhow::Result<adam_rs::Filter> {
+    let shapes: Vec<_> = std::iter::once(output.clone())
+        .chain(inputs.iter().cloned())
+        .collect();
+    let frame = RefCell::new(Frame::new(
+        body,
+        &shapes,
+        std::slice::from_ref(output),
+        false,
+        types,
+    )?);
+    Ok(adam_rs::Filter::new(
+        cell_type_id(output),
+        ids,
+        inputs.iter().map(cell_type_id).collect(),
+        move |value, args| Ok(frame.borrow_mut().call_with_prefix(value, args)?.remove(0)),
+    ))
+}
+
+/// Prepares the common bool-returning requirement frame for both builder paths.
+///
+/// - Precondition: All named shapes are registered.
+/// # Errors
+/// Rejects incompatible signatures or unavailable borrowed cloning.
+/// - Complexity: O(n + e + i) descriptor nodes, reads and inputs.
+pub(crate) fn build_requirement(
+    body: DynSegment,
+    ids: Vec<CellId>,
+    inputs: &[TypeShape],
+    types: &TypeRegistry,
+) -> anyhow::Result<Requirement> {
+    let frame = RefCell::new(RawFrame::new(
+        body,
+        inputs,
+        &cel_runtime::ValueType::leaf::<bool>(),
+        types,
+    )?);
+    Ok(Requirement::new(
+        ids,
+        inputs.iter().map(cell_type_id).collect(),
+        move |args| {
+            let value = frame.borrow_mut().call(args)?;
+            // SAFETY: RawFrame bound the result to the complete concrete bool descriptor.
+            Ok(unsafe { value.into_typed_bound::<cel_runtime::Leaf<bool>>() })
+        },
+    ))
 }

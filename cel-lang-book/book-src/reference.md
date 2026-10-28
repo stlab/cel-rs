@@ -14,6 +14,10 @@ table.
 
 ## Syntax
 
+CEL uses strict LL(1) parsing with one token of lookahead. A comma requires
+another item, except for the required terminal comma in a singleton tuple value
+or type. No other list accepts a trailing comma.
+
 ```text
 expression = range_expression .
 range_expression = ".." [ or_expression ]
@@ -42,7 +46,7 @@ primary_expression = literal
                    | if_expression
                    | closure_expression .
 record_fields = "{"
-    [ field_initializer { "," field_initializer } [ "," ] ] "}" .
+    [ field_initializer { "," field_initializer } ] "}" .
 field_initializer = identifier ":" expression .
 tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
 array_expression = "[" [ expression { "," expression } ] "]"
@@ -217,7 +221,7 @@ when the evaluation environment installs it. See
   Field labels are not variable references. Every schema field is required exactly
   once; unknown, duplicate, missing, and incorrectly typed fields are errors.
   Field expressions evaluate once in written order, independent of schema order.
-  An empty schema permits `TypeName {}`; a non-empty field list permits a trailing comma.
+  An empty schema permits `TypeName {}`. Field lists do not permit trailing commas.
 - Field types match exactly: an `f64` field accepts `1.0`, not the `i32` literal `1`.
   The static checker uses installed record schemas and operation signatures; known
   custom types retain their identities instead of unifying with unrelated types.

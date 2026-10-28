@@ -199,7 +199,7 @@ Change `ConditionalBranch.literal`'s field type from `cel_parser::lex_lexer::Lit
 Find `parse_conditional_decl`'s branch-key parsing (currently a single `cursor.consume_literal()` call). Replace with a new helper that tries a parenthesized group first:
 
 ```rust
-/// `match_literal = literal | "(" match_literal { "," match_literal } [ "," ] ")".`
+/// `match_literal = literal | "(" match_literal [ "," [ match_literal { "," match_literal } ] ] ")".`
 fn parse_match_literal(&mut self, cursor: &mut TokenCursor) -> Result<MatchLiteral> {
     if cursor.peek_is_open_paren() {
         cursor.consume_open_paren()?;

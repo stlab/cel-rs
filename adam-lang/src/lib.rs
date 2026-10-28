@@ -6,9 +6,13 @@
 //! # Grammar
 //!
 //! ```text
-//! sheet              = "sheet" identifier "{" { sheet_item } "}".
+//! module             = { use_decl | sheet }.
+//! use_decl           = "use" qualified_name [ "as" identifier ] ";".
+//! sheet              = "sheet" identifier [ "(" [ parameter { "," parameter } ] ")" ]
+//!                        "{" { sheet_item } "}".
+//! parameter          = identifier ":" type_expr.
 //! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
-//!                        | source_decl).
+//!                        | source_decl | relationship_use).
 //! cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 //! cell_filter        = "filter" expression.
 //! cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
@@ -17,15 +21,102 @@
 //!                    | "[" type_expr "]"
 //!                    | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" "{" { binding } "}".
+//! relationship_use   = "relationship" qualified_name "(" [ actual { "," actual } ] ")" ";".
+//! actual             = identifier ":" identifier.
+//! qualified_name     = identifier { "::" identifier }.
 //! binding            = binding_target ":=" expression ";".
-//! binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
+//! binding_target     = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".
 //! conditional_decl   = "conditional" expression "{" { conditional_branch } "}".
-//! conditional_branch = (literal_pattern | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+//! conditional_branch = (literal_pattern | "_") "=>" "{"
+//!                        { relationship_decl | relationship_use } "}".
 //! out_decl           = "out" identifier [":" type_expr] ":=" expression
 //!                        [ cell_filter ] [ require_block ] ";".
 //! require_block      = "require" "{" { requirement } "}".
 //! requirement        = [ "@" identifier ] expression ";".
 //! ```
+//!
+//! Every production uses strict LL(1) parsing: a comma commits to another item.
+//! Only singleton tuple values, types and destructuring bindings require a terminal comma.
+//! Conditional branches have no comma separator or terminator.
+//!
+//! A sheet without a parameter list is a root; a sheet with a parameter list
+//! defines a reusable component. [`AdamParser::parse_str`] constructs a module's
+//! sole root through [`ModuleCompiler`]. Collections with several roots use
+//! [`CompiledModules::instantiate_root`] for explicit selection. Construction
+//! checks the final combined graph without propagation. [`check_module`] checks
+//! registered sources and imports without executing any expressions.
+//!
+//! # Reusable components and explicit roots
+//!
+//! A component aliases caller-owned cells; it does not copy their values. Formal
+//! parameters have concrete types and no initializers, filters or requirements.
+//! Each use supplies every formal exactly once, in any named order, with distinct
+//! actual cells of exactly matching complete types. Actuals may be ordinary cells
+//! or fixed sources, never `out` cells, expressions or literals. A component may
+//! allocate private cells and diagnostic outputs, but cannot attach policies to
+//! parameters or turn parameters into outputs. The caller owns boundary policies.
+//!
+//! The following example registers both the library and importing root. It uses
+//! builtin arithmetic only; hosts needing standard or custom functions install
+//! their operation libraries before moving the lookup into the immutable compiler.
+//!
+//! ```
+//! use adam_lang::{ModuleCompiler, ModuleSet, TypeRegistry};
+//! let mut modules = ModuleSet::new();
+//! modules.insert_source("numbers".parse()?, "numbers.adm2", r#"
+//!     sheet multiply(a: f64, b: f64, product: f64) {
+//!         relationship {
+//!             product := a * b;
+//!             a := product / b;
+//!             b := product / a;
+//!         }
+//!     }
+//! "#)?;
+//! modules.insert_source("app".parse()?, "app.adm2", r#"
+//!     use numbers::multiply as mul;
+//!     sheet app {
+//!         source factor: f64 = 3.0;
+//!         cell value: f64 = 2.0;
+//!         cell result: f64 = 0.0;
+//!         relationship mul(product: result, b: factor, a: value);
+//!     }
+//!     sheet other {}
+//! "#)?;
+//! let compiled = ModuleCompiler::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+//!     .compile(modules).map_err(|mut errors| errors.remove(0))?;
+//! let path = "app".parse()?;
+//! assert_eq!(compiled.roots(&path).collect::<Vec<_>>(), ["app", "other"]);
+//! let mut parsed = compiled.instantiate_root(&path, "app")?;
+//! drop(compiled); // Live methods and diagnostics retain their own resources.
+//! let value = parsed.cell_names["value"].0;
+//! let result = parsed.cell_names["result"].0;
+//! assert_eq!(*parsed.read::<f64>(result).unwrap(), 0.0); // No propagation yet.
+//! parsed.sheet.write(value, 7.0f64).unwrap();
+//! parsed.propagate().unwrap();
+//! assert_eq!(*parsed.read::<f64>(result).unwrap(), 21.0);
+//! parsed.sheet.write(result, 12.0f64).unwrap();
+//! parsed.propagate().unwrap();
+//! assert_eq!(*parsed.read::<f64>(value).unwrap(), 4.0);
+//! # Ok::<(), adam_lang::ModuleDiagnostic>(())
+//! ```
+//!
+//! Source specialization removes methods that write fixed sources, including
+//! through nested uses. It does not infer equations or inspect current values.
+//! An empty specialized relationship fails construction, even in an inactive
+//! conditional branch. Conditional uses must contain only relationships
+//! transitively: private cells, outputs and policies make a component ineligible.
+//! Unconditional uses may contain those private declarations.
+//!
+//! Compilation checks every definition without executing host expressions;
+//! construction runs defaults, initializers and factories but does not propagate.
+//! Runtime division and conversion errors still require handling. Requirements
+//! report validity, not propagation failure; inspect
+//! [`Sheet::cell_requirements_valid`](adam_rs::Sheet::cell_requirements_valid).
+//! Native instantiation failures leave the destination safely discardable, not
+//! necessarily unchanged. Owning [`ModuleDiagnostic`] labels identify real files;
+//! [`ParsedSheet::locate_error`] resolves runtime errors to definition/use sites.
+//! No filesystem loader, implicit module search or generic type parameter exists.
+//! Imports name declared components, not roots or imported aliases.
 //!
 //! The design spec for `cell_decl` also calls for an optional trailing `":=" expression`
 //! clause, not shown above because **this crate does not yet implement it** — see
@@ -193,21 +284,33 @@
 pub mod ast;
 mod ast_parser;
 mod cell_value;
+pub mod composition;
 mod error_labels;
 mod fmt;
+pub mod module;
 mod parser;
+pub mod source_map;
 mod token_cursor;
 mod trivia;
 pub mod type_registry;
 mod typecheck;
 
-// adam-lang reuses cel_parser::ParseError directly; no new error type is introduced.
-// All parse errors carry a proc_macro2::Span for source-location diagnostics.
+// Live-root errors keep their owning ModuleDiagnostic in ParseError's source chain.
 pub use ast_parser::AdamAstParser;
 pub use cel_parser::ParseError;
 pub use cell_value::{debug_compound_cell, prepare_compound_cell_formatter};
-pub use fmt::{FormatSourceError, format_sheet, format_source};
+pub use composition::{
+    AuthoredItem, AuthoredRole, CellOrigin, CellSlot, CompositionBuilder, InstanceOrigin,
+    MethodRecipe, OccurrenceOrigin, TypedTemplate,
+};
+pub use fmt::{FormatSourceError, format_module, format_sheet, format_source};
+pub use module::{
+    CompiledModules, ModuleCompiler, ModulePath, ModuleSet, PreparedRoot, RootCell, check_module,
+};
 pub use parser::{AdamParser, ParsedSheet};
-pub use trivia::attach_trivia;
+pub use source_map::{
+    ModuleCause, ModuleDiagnostic, SourceId, SourceLabel, SourceLocation, SourceMap,
+};
+pub use trivia::{attach_module_trivia, attach_trivia};
 pub use type_registry::TypeRegistry;
 pub use typecheck::check_sheet;

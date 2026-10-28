@@ -125,6 +125,8 @@ impl PartialEq<&str> for PunctOp {
 /// Each group emits matching delimiters, including `Delimiter::None`. Operators
 /// combine only across joint punctuation within the same group. Combined tokens
 /// retain the first punctuation's span; delimiters retain their group's span.
+/// The lexer is forward-only and non-cloneable; parsers use a single-token
+/// [`std::iter::Peekable`] cursor, not indexed lookahead or speculative copies.
 ///
 /// - Invariant: The group stack owns open groups in nesting order; lookahead and
 ///   pending close tokens precede any further tokens from their parent iterator.

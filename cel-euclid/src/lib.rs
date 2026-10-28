@@ -80,6 +80,64 @@
 //! source-preserving crop/straighten and pan/zoom sheets. Crop fitting, its
 //! eight-epsilon inward guard, and precision/coverage requirements live in CEL,
 //! not in library operations. The example's Rust boundary validates inputs only.
+//!
+//! # Composing numeric image constraints
+//!
+//! With `adam`, the shipped component-only `image_constraints` module composes
+//! two resampling axes, a caller-selected aspect relation and crop fitting through
+//! caller-owned ordinary cells.
+//! Register the importing root too, and install both optional operation libraries
+//! before creating the immutable compiler:
+//!
+//! ```
+//! # #[cfg(feature = "adam")] {
+//! let mut types = adam_lang::TypeRegistry::new();
+//! cel_euclid::register_adam_types(&mut types);
+//! let mut lookup = cel_parser::OpLookup::new();
+//! cel_std::install(&mut lookup);
+//! cel_euclid::install(&mut lookup);
+//! let mut modules = adam_lang::ModuleSet::new();
+//! modules.insert_source("image_constraints".parse().unwrap(), "image_constraints.adm2",
+//!     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/image_constraints.adm2"))).unwrap();
+//! modules.insert_source("resize_straighten".parse().unwrap(), "resize_straighten.adm2",
+//!     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/resize_straighten.adm2"))).unwrap();
+//! let compiled = adam_lang::ModuleCompiler::new(types, lookup).compile(modules).unwrap();
+//! let mut parsed = compiled.instantiate_root(
+//!     &"resize_straighten".parse().unwrap(), "resize_straighten").unwrap();
+//! drop(compiled);
+//! let crop = parsed.cell_names["crop"].0;
+//! let requested_crop = *parsed.source::<cel_euclid::Rect>(crop).unwrap();
+//! let width = parsed.cell_names["width_inches"].0;
+//! let height = parsed.cell_names["height_inches"].0;
+//! parsed.sheet.write(width, 4.0f64).unwrap();
+//! parsed.propagate().unwrap();
+//! assert_eq!(*parsed.read::<f64>(height).unwrap(), 3.0);
+//! assert_eq!(*parsed.source::<f64>(width).unwrap(), 4.0);
+//! assert!(parsed.cell_requirements_valid(crop));
+//! assert!(*parsed.read::<bool>(parsed.cell_names["coverage"].0).unwrap());
+//! assert!(*parsed.read::<bool>(parsed.cell_names["precise"].0).unwrap());
+//! assert_eq!(*parsed.source::<cel_euclid::Rect>(crop).unwrap(), requested_crop);
+//! parsed.sheet.write(height, 4.0f64).unwrap();
+//! parsed.propagate().unwrap();
+//! assert_eq!(*parsed.read::<f64>(width).unwrap(), 1600.0 / 300.0);
+//! assert_eq!(*parsed.source::<f64>(height).unwrap(), 4.0);
+//! assert_eq!(*parsed.read::<cel_euclid::Rect>(crop).unwrap(), requested_crop);
+//! # }
+//! ```
+//!
+//! The caller owns pixel filters, source resolution/aspect/transform, positive
+//! finite dimension/ratio requirements, image/crop requirements and precision
+//! requirements. The aspect relation uses the two floating multiplication
+//! directions for a positive finite, nonzero ratio; selected products/quotients
+//! must remain representable. It expresses equal normalized width/height
+//! percentages without importing the original UI's percentage/toggle machinery.
+//! Each axis retains independent ties-even pixel conversion and checked casts;
+//! the physical aspect relation does not promise an exact integer pixel ratio.
+//! The crop fit retains the existing 8/32/64-epsilon guards. Its requested image
+//! anchor must lie strictly inside the image. Invalid inverses/conversions return
+//! evaluation errors; inadequate finite precision invalidates an explicit
+//! requirement. A successful propagation alone does not certify a valid result.
+//! Neither example changes the general Euclid operations or permits `out` actuals.
 
 #![doc = include_str!("../SIGNATURES.md")]
 

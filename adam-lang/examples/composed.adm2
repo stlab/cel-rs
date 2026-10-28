@@ -1,0 +1,26 @@
+use relationships::ordered;
+use relationships::multiply as mul;
+
+sheet ordered_demo {
+    cell low: f64 = 0.0;
+    cell high: f64 = 10.0;
+    relationship ordered(high: high, low: low);
+}
+
+sheet source_specialized {
+    source factor: f64 = 3.0;
+    cell value: f64 = 2.0;
+    cell product: f64 = 6.0;
+    relationship mul(product: product, b: factor, a: value);
+}
+
+sheet repeated_products {
+    cell a: f64 = 2.0;
+    cell b: f64 = 3.0;
+    cell c: f64 = 6.0;
+    cell d: f64 = 4.0;
+    cell e: f64 = 5.0;
+    cell f: f64 = 20.0;
+    relationship mul(a: a, b: b, product: c);
+    relationship mul(product: f, b: e, a: d);
+}

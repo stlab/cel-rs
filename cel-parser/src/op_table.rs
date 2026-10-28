@@ -1901,7 +1901,14 @@ impl OpLookup {
         start: proc_macro2::Span,
         end: proc_macro2::Span,
     ) -> std::result::Result<(), crate::ParseError> {
-        self.lookup_impl(name, segment, num_operands, start, end, false)
+        self.lookup_scoped(
+            name,
+            segment,
+            num_operands,
+            crate::ExprSpan { start, end },
+            false,
+            false,
+        )
     }
 
     /// Applies a direct named operation without looking up a zero-arity value binding.
@@ -1936,28 +1943,39 @@ impl OpLookup {
         start: proc_macro2::Span,
         end: proc_macro2::Span,
     ) -> crate::Result<()> {
-        self.lookup_impl(name, segment, arity, start, end, true)
+        self.lookup_scoped(
+            name,
+            segment,
+            arity,
+            crate::ExprSpan { start, end },
+            true,
+            false,
+        )
     }
 
-    /// Resolves direct scoped operations and shared signatures without value lookup.
+    /// Resolves direct operations with either all scopes or only persistent library scopes.
     ///
-    /// Zero-operand dispatch skips scopes, which cannot distinguish a value binding
-    /// from a direct operation at that arity.
+    /// Zero-operand dispatch skips scopes, which cannot distinguish value bindings
+    /// from direct operations at that arity.
     ///
     /// # Errors
-    /// Returns a scope or registered emitter error without trying a later overload.
-    ///
-    /// - Complexity: O(k + s * a * d) for k scopes, s signatures, a operands
-    ///   and descriptor depth d.
-    pub(crate) fn lookup_direct_operation(
+    /// Returns the selected scope or registered emitter error.
+    /// - Complexity: O(k + s * a * d) for k scopes, s signatures, a operands and depth d.
+    pub(crate) fn lookup_direct_operation_scoped(
         &self,
         name: &str,
         segment: &mut DynSegment,
         arity: usize,
         span: SourceSpan,
+        library_only: bool,
     ) -> Result<bool> {
         if arity > 0 {
-            for scope in self.scopes.iter().rev() {
+            let scopes = if library_only {
+                &self.scopes[..self.library_scope_count]
+            } else {
+                &self.scopes
+            };
+            for scope in scopes.iter().rev() {
                 if scope(name, segment, arity, span)? {
                     return Ok(true);
                 }
@@ -1970,17 +1988,23 @@ impl OpLookup {
     ///
     /// - Complexity: O(k + s * a * d) for k scopes, s signatures, a operands
     ///   and descriptor depth d.
-    fn lookup_impl(
+    pub(crate) fn lookup_scoped(
         &self,
         name: &str,
         segment: &mut DynSegment,
         num_operands: usize,
-        start: proc_macro2::Span,
-        end: proc_macro2::Span,
+        span: crate::ExprSpan,
         member: bool,
+        library_only: bool,
     ) -> crate::Result<()> {
+        let crate::ExprSpan { start, end } = span;
         let source_span = SourceSpan::from_proc_macro2_range(start, end);
-        for scope in self.scopes.iter().rev().filter(|_| !member) {
+        let scopes = if library_only {
+            &self.scopes[..self.library_scope_count]
+        } else {
+            &self.scopes
+        };
+        for scope in scopes.iter().rev().filter(|_| !member) {
             match scope(name, segment, num_operands, source_span) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
@@ -1989,9 +2013,15 @@ impl OpLookup {
         }
 
         let registered = if member {
-            self.lookup_direct_operation(name, segment, num_operands, source_span)
+            self.lookup_direct_operation_scoped(
+                name,
+                segment,
+                num_operands,
+                source_span,
+                library_only,
+            )
         } else {
-            self.lookup_registered(name, segment, num_operands, source_span)
+            self.lookup_registered(name, segment, num_operands, source_span, library_only)
         };
         match registered {
             Ok(true) => return Ok(()),

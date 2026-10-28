@@ -1,0 +1,14 @@
+sheet multiply(a: f64, b: f64, product: f64) {
+    relationship {
+        product := a * b;
+        a := product / b;
+        b := product / a;
+    }
+}
+
+sheet inline {
+    source factor: f64 = 3.0;
+    cell value: f64 = 2.0;
+    cell result: f64 = 0.0;
+    relationship multiply(product: result, a: value, b: factor);
+}

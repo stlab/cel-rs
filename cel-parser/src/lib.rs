@@ -61,7 +61,7 @@
 //! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ parameter_list ] ")" ]) }.
 //! primary_expression = literal | identifier [ record_fields ] | tuple_or_group | array_expression
 //!                    | if_expression | closure_expression.
-//! record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } [ "," ] ] "}".
+//! record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } ] "}".
 //! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
 //! array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expression ].
 //! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
@@ -315,6 +315,8 @@
 //! ```
 
 pub mod ast;
+mod compile;
+pub use compile::compile_expr;
 mod error;
 mod fmt;
 pub mod lex_lexer;
@@ -556,6 +558,28 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
 /// width.
 pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
     push_literal_token(&mut DynSegmentContext::new_context(), lit.clone())
+}
+
+/// Converts one syntax literal into retained expression syntax without executing code.
+///
+/// Preserves the token's source span and concrete numeric width using the same validation
+/// as expression parsing.
+///
+/// # Errors
+/// Rejects unsupported literal kinds, invalid suffixes, and out-of-range values.
+/// - Complexity: O(n) literal bytes.
+///
+/// # Examples
+/// ```
+/// let token: syn::Lit = syn::parse_str("42i32")?;
+/// assert!(matches!(cel_parser::literal_expr(&token)?,
+///     cel_parser::Expr::Literal { value: cel_parser::Literal::I32(42), .. }));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn literal_expr(lit: &CelLiteral) -> Result<Expr> {
+    let mut context = AstContext::new_context();
+    push_literal_token(&mut context, lit.clone())?;
+    Ok(context.into_expr())
 }
 
 /// Resolves a closure annotation through the configured registry without erasing its shape.
@@ -1871,7 +1895,7 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } [ "," ] ] "}".`
+    /// `record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } ] "}".`
     ///
     /// - Precondition: the constructor identifier is consumed and the next token is `{`.
     /// - Postcondition: fields are emitted once in source order before the constructor.
@@ -1883,50 +1907,48 @@ impl<C: ParserContext> Parser<C> {
         self.advance();
         let ambient_start = self.context.current_stack_offset();
         let mut fields = Vec::new();
-        loop {
-            if matches!(
-                self.peek_token(),
-                Some(Token::CloseDelim {
-                    delimiter: Delimiter::Brace,
-                    ..
-                })
-            ) {
+        if !matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Brace,
+                ..
+            })
+        ) {
+            loop {
+                let Some(Token::Identifier(field)) = self.peek_token() else {
+                    return Err(self.error_at("expected record field name"));
+                };
+                let field_name = field.to_string();
+                let field_span = field.span();
                 self.advance();
-                break;
-            }
-            let Some(Token::Identifier(field)) = self.peek_token() else {
-                return Err(self.error_at("expected record field name"));
-            };
-            let field_name = field.to_string();
-            let field_span = field.span();
-            self.advance();
-            if !self.is_punctuation(":") {
-                return Err(self.error_at("expected `:` after record field name"));
-            }
-            if !self.is_ordinary_expression()? {
-                return Err(self.error_at("expected record field expression"));
-            }
-            fields.push((
-                field_name,
-                ExprSpan {
-                    start: field_span,
-                    end: field_span,
-                },
-            ));
-            if matches!(
-                self.peek_token(),
-                Some(Token::CloseDelim {
-                    delimiter: Delimiter::Brace,
-                    ..
-                })
-            ) {
-                self.advance();
-                break;
-            }
-            if !self.is_punctuation(",") {
-                return Err(self.error_at("expected `,` or `}` after record field"));
+                if !self.is_punctuation(":") {
+                    return Err(self.error_at("expected `:` after record field name"));
+                }
+                if !self.is_ordinary_expression()? {
+                    return Err(self.error_at("expected record field expression"));
+                }
+                fields.push((
+                    field_name,
+                    ExprSpan {
+                        start: field_span,
+                        end: field_span,
+                    },
+                ));
+                if !self.is_punctuation(",") {
+                    break;
+                }
             }
         }
+        if !matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Brace,
+                ..
+            })
+        ) {
+            return Err(self.error_at("expected `,` or `}` after record field"));
+        }
+        self.advance();
         self.context.make_record(
             &self.op_lookup,
             name,

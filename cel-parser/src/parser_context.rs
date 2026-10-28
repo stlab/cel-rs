@@ -606,6 +606,57 @@ impl DynSegmentContext {
     pub fn into_inner(self) -> DynSegment {
         self.0
     }
+
+    /// Emits ordinary or member dispatch through the selected borrowed scope environment.
+    ///
+    /// # Errors
+    /// Returns a spanned lookup or output annotation error.
+    /// - Complexity: O(k + s * a * d) for k scopes, s signatures, a operands and depth d.
+    pub(crate) fn apply_scoped_op(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        arity: usize,
+        span: ExprSpan,
+        member: bool,
+        library_only: bool,
+    ) -> crate::Result<()> {
+        lookup.lookup_scoped(name, &mut self.0, arity, span, member, library_only)?;
+        if !member
+            && let Some(ty) = self
+                .0
+                .peek_output_type_id()
+                .and_then(crate::op_table::builtin_value_type)
+        {
+            self.0.annotate_top(ty).map_err(|error| {
+                crate::ParseError::new_range(error.to_string(), span.start, span.end)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Collects array elements using an already resolved optional annotation.
+    ///
+    /// # Errors
+    /// Returns a spanned error if element shapes differ or storage cannot be represented.
+    /// - Complexity: O(n * d) for n elements of descriptor depth d.
+    pub(crate) fn make_resolved_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        element_type: Option<cel_runtime::ValueType>,
+        span: ExprSpan,
+    ) -> crate::Result<()> {
+        match element_type {
+            Some(element_type) => self
+                .0
+                .make_typed_array(n, ambient_start, element_type)
+                .map_err(|error| {
+                    crate::ParseError::new_range(error.to_string(), span.start, span.end)
+                }),
+            None => self.make_array(n, ambient_start, span.start, span.end),
+        }
+    }
 }
 
 impl std::ops::Deref for DynSegmentContext {
@@ -646,17 +697,14 @@ impl ParserContext for DynSegmentContext {
         start: Span,
         end: Span,
     ) -> crate::Result<()> {
-        op_lookup.lookup(name, &mut self.0, arity, start, end)?;
-        if let Some(ty) = self
-            .0
-            .peek_output_type_id()
-            .and_then(crate::op_table::builtin_value_type)
-        {
-            self.0
-                .annotate_top(ty)
-                .map_err(|error| crate::ParseError::new_range(error.to_string(), start, end))?;
-        }
-        Ok(())
+        self.apply_scoped_op(
+            op_lookup,
+            name,
+            arity,
+            ExprSpan { start, end },
+            false,
+            false,
+        )
     }
 
     /// Emits receiver-first direct dispatch with diagnostics anchored to the member name.
@@ -671,7 +719,7 @@ impl ParserContext for DynSegmentContext {
     ) -> crate::Result<()> {
         let arity = explicit_args.unwrap_or(0) + 1;
         debug_assert_eq!(self.0.peek_stack_infos(arity).len(), arity);
-        lookup.lookup_member(name, &mut self.0, arity, name_span.start, name_span.end)
+        self.apply_scoped_op(lookup, name, arity, name_span, true, false)
     }
 
     /// Validates and emits the registered constructor without rearranging field values.
@@ -768,13 +816,12 @@ impl ParserContext for DynSegmentContext {
         start: Span,
         end: Span,
     ) -> crate::Result<()> {
-        match annotation.resolve_element_type()? {
-            Some(element_type) => self
-                .0
-                .make_typed_array(n, ambient_start, element_type)
-                .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end)),
-            None => self.make_array(n, ambient_start, start, end),
-        }
+        self.make_resolved_array(
+            n,
+            ambient_start,
+            annotation.resolve_element_type()?,
+            ExprSpan { start, end },
+        )
     }
 
     fn peek_tuple_arity(&self) -> Option<usize> {

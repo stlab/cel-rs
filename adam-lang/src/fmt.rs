@@ -6,9 +6,10 @@
 //! Expression layout targets 100 columns including declaration prefixes and punctuation. Nested
 //! lists, records and closure bodies use four spaces; binary continuations lead with operators.
 //! Type annotations are re-emitted via `Span::source_text()` directly
-//! via `TypeExpr::span()`, and branch-match literals via `ConditionalBranch::literal_span` — see
-//! the design doc for why no `Literal` value is needed. Conditional branches omit the grammar's
-//! optional trailing `,`, matching `begin/assets/demo.adm2`'s existing style.
+//! via `TypeExpr::span()`; parameter annotations borrow their complete source range so applied
+//! named types retain arguments and comments. Branch-match literals use `ConditionalBranch::literal_span` — see
+//! the design doc for why no `Literal` value is needed. Conditional branches have no comma
+//! separator or terminator.
 //!
 //! Never called on a sheet with any recorded syntax errors — see `adam-lsp`'s
 //! `textDocument/formatting` handler, which refuses to format in that case.
@@ -196,6 +197,67 @@ fn source_text_or_empty(span: ast::ExprSpan) -> String {
     span.start.source_text().unwrap_or_default()
 }
 
+/// Borrows a source region, returning `None` for empty source or an unresolvable range.
+///
+/// - Precondition: non-synthetic positions refer to `source`.
+/// - Complexity: O(n) time and space in source length for the line-offset table.
+fn source_region(
+    source: &str,
+    start: proc_macro2::LineColumn,
+    end: proc_macro2::LineColumn,
+) -> Option<&str> {
+    use cel_parser::trivia::{line_column_to_byte, line_start_byte_offsets};
+    if source.is_empty() {
+        return None;
+    }
+    let lines = line_start_byte_offsets(source);
+    let start = line_column_to_byte(source, &lines, start);
+    let end = line_column_to_byte(source, &lines, end);
+    source.get(start..end)
+}
+
+/// Emits the complete accepted parameter type and its comments, not only its first token.
+///
+/// Synthetic type spans use their stored source text.
+///
+/// - Precondition: spans refer to `source`, or `source` is empty.
+/// - Complexity: O(n) time and space in source length plus type text length.
+fn write_parameter_type(out: &mut String, source: &str, ty: &ast::TypeExpr) {
+    let span = ty.span();
+    if let Some(text) = source_region(source, span.start.start(), span.end.end()) {
+        out.push_str(text);
+    } else {
+        out.push_str(&source_text_or_empty(span));
+    }
+}
+
+/// Emits the complete documented header prefix, retaining interspersed comments in source order.
+///
+/// Synthetic declarations use their stored documentation instead.
+///
+/// - Precondition: spans refer to `source`, or `source` is empty.
+/// - Complexity: O(n) time and space in source length plus emitted prefix length.
+fn write_header_documentation(
+    out: &mut String,
+    source: &str,
+    start: proc_macro2::Span,
+    keyword: ast::ExprSpan,
+    prefix: &str,
+    documentation: Option<&str>,
+    depth: usize,
+) {
+    if let Some(documentation) = documentation {
+        if let Some(region) = source_region(source, start.start(), keyword.start.start())
+            .filter(|region| !region.is_empty())
+        {
+            out.push_str(&indent(depth));
+            out.push_str(region.trim_end_matches([' ', '\t']));
+        } else {
+            write_doc_comment(out, prefix, Some(documentation), depth);
+        }
+    }
+}
+
 /// A single-point `ExprSpan` (start and end coincide), for a gap endpoint with no spanned AST
 /// node of its own — e.g. the terminating `;` following a `CellDecl`'s initializer, which has
 /// only `CellDecl.span.end` (the `;` token's own span) available, not a full node.
@@ -218,12 +280,14 @@ fn point_span(span: proc_macro2::Span) -> ast::ExprSpan {
 /// end of line) wraps — ending the gap with a newline plus `indent(depth + 1)` so whatever the
 /// caller appends next starts on a fresh line rather than being swallowed into the comment.
 ///
-/// - Postcondition: an *operator* gap (`expected` non-empty) always emits every `expected` token,
+/// - Postcondition: an *operator* gap (`expected` non-empty) emits every required `expected` token,
 ///   even when `source` is empty or the positions don't resolve (a hand-built declaration with
 ///   synthetic spans still gets its `=`/`:=`), and ends with a separating space so the caller's
 ///   next token (the initializer) is not glued on. A *comment-only* gap (`expected` empty) returns
 ///   `""` when it holds no comments, and never adds a trailing space, so the caller appends its own
 ///   terminator (`;`) or keyword directly.
+///   Comment-free module paths and parameter/argument lists use compact punctuation.
+///   Closing-list gaps preserve every comment on either side of the closing parenthesis.
 ///
 /// `depth` is the caller's own indent depth (the declaration's, not the gap's).
 fn emit_decl_gap(
@@ -234,7 +298,7 @@ fn emit_decl_gap(
     depth: usize,
 ) -> String {
     use cel_parser::trivia::{GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
-    // `scan_gap` re-synthesizes every `expected` token even on an empty or non-resolving gap, so a
+    // The scanner re-synthesizes required tokens even on an empty or non-resolving gap, so a
     // hand-built declaration (empty `source`) still renders its operator.
     let pieces = if source.is_empty() {
         scan_gap("", expected)
@@ -247,6 +311,23 @@ fn emit_decl_gap(
             None => scan_gap("", expected),
         }
     };
+    if pieces
+        .iter()
+        .all(|piece| matches!(piece, GapPiece::Punct(_)))
+    {
+        let compact = match expected {
+            ["("] => Some("("),
+            [","] => Some(", "),
+            [":"] => Some(": "),
+            ["::"] => Some("::"),
+            [")"] => Some(")"),
+            ["(", ")"] => Some("()"),
+            _ => None,
+        };
+        if let Some(compact) = compact {
+            return compact.to_owned();
+        }
+    }
     let mut out = String::new();
     for piece in pieces {
         match piece {
@@ -380,7 +461,7 @@ fn write_relationship(out: &mut String, source: &str, rel: &ast::RelationshipDec
 fn write_branch_relationships(
     out: &mut String,
     source: &str,
-    relationships: &[ast::RelationshipDecl],
+    relationships: &[ast::BranchItem],
     trailing_comment: Option<&ast::Comment>,
     blank_line_before_close: bool,
     line_trailing_comment: Option<&ast::Comment>,
@@ -388,7 +469,12 @@ fn write_branch_relationships(
 ) {
     out.push_str("{\n");
     for rel in relationships {
-        write_relationship(out, source, rel, depth + 1);
+        match rel {
+            ast::BranchItem::Relationship(rel) => write_relationship(out, source, rel, depth + 1),
+            ast::BranchItem::RelationshipUse(call) => {
+                write_relationship_use(out, source, call, depth + 1)
+            }
+        }
     }
     write_trailing_trivia(out, blank_line_before_close, trailing_comment, depth + 1);
     out.push_str(&indent(depth));
@@ -761,6 +847,7 @@ fn write_sheet_item(out: &mut String, source: &str, item: &ast::SheetItem, depth
     match item {
         ast::SheetItem::Cell(cell) => write_cell(out, source, cell, depth),
         ast::SheetItem::Relationship(rel) => write_relationship(out, source, rel, depth),
+        ast::SheetItem::RelationshipUse(call) => write_relationship_use(out, source, call, depth),
         ast::SheetItem::Conditional(cond) => write_conditional(out, source, cond, depth),
         ast::SheetItem::Out(out_decl) => write_out(out, source, out_decl, depth),
         ast::SheetItem::Source(decl) => write_source(out, source, decl, depth),
@@ -796,8 +883,70 @@ pub fn format_sheet(sheet: &ast::Sheet, source: &str) -> String {
     );
     let mut out = String::new();
     write_trivia(&mut out, false, sheet.leading_comment.as_ref(), 0);
-    write_doc_comment(&mut out, "//!", sheet.doc_comment.as_deref(), 0);
-    out.push_str(&format!("sheet {} {{\n", sheet.name));
+    write_header_documentation(
+        &mut out,
+        source,
+        sheet.span.start,
+        sheet.keyword_span,
+        "//!",
+        sheet.doc_comment.as_deref(),
+        0,
+    );
+    out.push_str("sheet");
+    out.push_str(&emit_decl_gap(
+        source,
+        sheet.keyword_span,
+        sheet.name_span,
+        &[],
+        0,
+    ));
+    out.push(' ');
+    out.push_str(&sheet.name);
+    let mut previous = sheet.name_span;
+    if let Some(parameters) = &sheet.parameters {
+        for (index, parameter) in parameters.iter().enumerate() {
+            out.push_str(&emit_decl_gap(
+                source,
+                previous,
+                parameter.name_span,
+                if index == 0 { &["("] } else { &[","] },
+                0,
+            ));
+            out.push_str(&parameter.name);
+            out.push_str(&emit_decl_gap(
+                source,
+                parameter.name_span,
+                parameter.type_name.span(),
+                &[":"],
+                0,
+            ));
+            write_parameter_type(&mut out, source, &parameter.type_name);
+            previous = parameter.type_name.span();
+        }
+        out.push_str(&emit_decl_gap(
+            source,
+            previous,
+            sheet.open_brace_span,
+            if parameters.is_empty() {
+                &["(", ")"]
+            } else {
+                &[")"]
+            },
+            0,
+        ));
+    } else {
+        out.push_str(&emit_decl_gap(
+            source,
+            previous,
+            sheet.open_brace_span,
+            &[],
+            0,
+        ));
+    }
+    if !out.ends_with(' ') {
+        out.push(' ');
+    }
+    out.push_str("{\n");
     for item in &sheet.items {
         write_sheet_item(&mut out, source, item, 1);
     }
@@ -839,15 +988,13 @@ impl std::fmt::Display for FormatSourceError {
 
 impl std::error::Error for FormatSourceError {}
 
-/// Parses and formats `source` as a complete adam-lang sheet, matching `adam-lsp`'s
-/// `textDocument/formatting` handler exactly.
+/// Parses and formats `source` as a complete adam-lang module.
 ///
 /// # Errors
 ///
-/// Returns [`FormatSourceError::Parse`] if `source` fails to parse at all
-/// ([`crate::AdamAstParser::parse_str`] returns `Err`), or [`FormatSourceError::Recovered`] if it
-/// parses with one or more recovered syntax errors (`Sheet.errors` non-empty) — refusing to
-/// format code it can't fully understand, matching `rustfmt`.
+/// Returns [`FormatSourceError::Recovered`] for recovered syntax errors. Tokenization failures,
+/// empty input, and input with no recognizable module declaration return
+/// [`FormatSourceError::Parse`]. Refuses to format code it cannot fully understand.
 ///
 /// # Examples
 ///
@@ -861,14 +1008,210 @@ impl std::error::Error for FormatSourceError {}
 /// assert!(format_source("not a sheet at all").is_err());
 /// ```
 pub fn format_source(source: &str) -> Result<String, FormatSourceError> {
-    let mut sheet = crate::AdamAstParser::new()
-        .parse_str(source)
+    let mut module = crate::AdamAstParser::new()
+        .parse_module_str(source)
         .map_err(FormatSourceError::Parse)?;
-    if !sheet.errors.is_empty() {
-        return Err(FormatSourceError::Recovered(sheet.errors));
+    if module.items.is_empty() {
+        return Err(FormatSourceError::Parse(cel_parser::ParseError::new(
+            "expected `use` or `sheet`",
+            proc_macro2::Span::call_site(),
+        )));
     }
-    crate::attach_trivia(source, &mut sheet);
-    Ok(format_sheet(&sheet, source))
+    if module
+        .items
+        .iter()
+        .all(|item| matches!(item, ast::ModuleItem::Error(_)))
+    {
+        return Err(FormatSourceError::Parse(module.errors.remove(0)));
+    }
+    crate::attach_module_trivia(source, &mut module);
+    format_module(&module, source)
+}
+
+/// Writes an unresolved path, preserving comments between its segments.
+///
+/// - Complexity: O(n) output space plus source-gap scans.
+fn write_path(out: &mut String, source: &str, path: &[(String, ast::ExprSpan)], depth: usize) {
+    for (index, (name, span)) in path.iter().enumerate() {
+        if index > 0 {
+            out.push_str(&emit_decl_gap(
+                source,
+                path[index - 1].1,
+                *span,
+                &["::"],
+                depth,
+            ));
+        }
+        out.push_str(name);
+    }
+}
+
+/// Writes a named component use through the existing declaration-gap and trivia writers.
+///
+/// - Complexity: O(n) output space plus source-gap scans.
+fn write_relationship_use(
+    out: &mut String,
+    source: &str,
+    call: &ast::RelationshipUse,
+    depth: usize,
+) {
+    for comment in &call.opening_comments {
+        write_trivia(out, false, Some(comment), depth);
+    }
+    write_trivia(
+        out,
+        call.blank_line_before,
+        call.leading_comment.as_ref(),
+        depth,
+    );
+    write_header_documentation(
+        out,
+        source,
+        call.span.start,
+        call.keyword_span,
+        "///",
+        call.doc_comment.as_deref(),
+        depth,
+    );
+    out.push_str(&indent(depth));
+    out.push_str("relationship");
+    out.push_str(&emit_decl_gap(
+        source,
+        call.keyword_span,
+        call.path[0].1,
+        &[],
+        depth,
+    ));
+    out.push(' ');
+    write_path(out, source, &call.path, depth);
+    let mut previous = call.path.last().expect("parsed paths are nonempty").1;
+    for (index, argument) in call.arguments.iter().enumerate() {
+        out.push_str(&emit_decl_gap(
+            source,
+            previous,
+            argument.name_span,
+            if index == 0 { &["("] } else { &[","] },
+            depth,
+        ));
+        out.push_str(&argument.name);
+        out.push_str(&emit_decl_gap(
+            source,
+            argument.name_span,
+            argument.cell_span,
+            &[":"],
+            depth,
+        ));
+        out.push_str(&argument.cell);
+        previous = argument.cell_span;
+    }
+    out.push_str(&emit_decl_gap(
+        source,
+        previous,
+        point_span(call.span.end),
+        if call.arguments.is_empty() {
+            &["(", ")"]
+        } else {
+            &[")"]
+        },
+        depth,
+    ));
+    write_line_end(out, ";", call.trailing_line_comment.as_ref(), depth);
+}
+
+/// Formats every module item in order, preserving attached file-boundary comments.
+///
+/// - Precondition: spans and attached trivia refer to `source`, or use synthetic spans with `""`.
+/// - Complexity: O(n) output space plus nested formatters' source-gap scans.
+///
+/// # Errors
+///
+/// Returns `Recovered` for any recorded syntax error or recovery placeholder.
+///
+/// # Examples
+///
+/// ```
+/// let source = "sheet helper() {} sheet root {}";
+/// let mut module = adam_lang::AdamAstParser::new().parse_module_str(source).unwrap();
+/// adam_lang::attach_module_trivia(source, &mut module);
+/// let formatted = adam_lang::format_module(&module, source).unwrap();
+/// assert_eq!(adam_lang::format_source(&formatted).unwrap(), formatted);
+/// ```
+pub fn format_module(module: &ast::Module, source: &str) -> Result<String, FormatSourceError> {
+    if !module.errors.is_empty() {
+        return Err(FormatSourceError::Recovered(module.errors.clone()));
+    }
+    let mut out = String::new();
+    for (index, item) in module.items.iter().enumerate() {
+        if let Some(comments) = module.comments.get(index) {
+            for comment in comments {
+                write_trivia(&mut out, false, Some(comment), 0);
+            }
+        }
+        match item {
+            ast::ModuleItem::Sheet(sheet)
+                if sheet
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, ast::SheetItem::Error { .. })) =>
+            {
+                return Err(FormatSourceError::Recovered(vec![
+                    cel_parser::ParseError::new("recovered sheet item", sheet.span.start),
+                ]));
+            }
+            ast::ModuleItem::Sheet(sheet) if sheet.errors.is_empty() => {
+                out.push_str(&format_sheet(sheet, source))
+            }
+            ast::ModuleItem::Use(import) => {
+                write_header_documentation(
+                    &mut out,
+                    source,
+                    import.span.start,
+                    import.keyword_span,
+                    "//!",
+                    import.doc_comment.as_deref(),
+                    0,
+                );
+                out.push_str("use");
+                out.push_str(&emit_decl_gap(
+                    source,
+                    import.keyword_span,
+                    import.path[0].1,
+                    &[],
+                    0,
+                ));
+                out.push(' ');
+                write_path(&mut out, source, &import.path, 0);
+                let mut previous = import.path.last().expect("parsed paths are nonempty").1;
+                if let Some((alias, span)) = &import.alias {
+                    out.push_str(&emit_decl_gap(source, previous, *span, &["as"], 0));
+                    out.push_str(alias);
+                    previous = *span;
+                }
+                out.push_str(&emit_decl_gap(
+                    source,
+                    previous,
+                    point_span(import.span.end),
+                    &[],
+                    0,
+                ));
+                out.push_str(";\n");
+            }
+            ast::ModuleItem::Sheet(sheet) => {
+                return Err(FormatSourceError::Recovered(sheet.errors.clone()));
+            }
+            ast::ModuleItem::Error(span) => {
+                return Err(FormatSourceError::Recovered(vec![
+                    cel_parser::ParseError::new("recovered module item", span.start),
+                ]));
+            }
+        }
+    }
+    if let Some(comments) = module.comments.get(module.items.len()) {
+        for comment in comments {
+            write_trivia(&mut out, false, Some(comment), 0);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1020,11 +1363,11 @@ mod tests {
         assert_eq!(format(source), expected);
     }
 
+    /// Refuses to format parenthesized binding targets without the required first comma.
     #[test]
-    fn drops_redundant_grouping_parens_from_a_non_destructuring_binding() {
+    fn rejects_a_parenthesized_binding_target_without_a_comma() {
         let source = "sheet s {\n    relationship {\n        (x) := a;\n    }\n}";
-        let expected = "sheet s {\n    relationship {\n        x := a;\n    }\n}\n";
-        assert_eq!(format(source), expected);
+        assert!(format_source(source).is_err());
     }
 
     #[test]
@@ -1036,21 +1379,21 @@ mod tests {
 
     #[test]
     fn formats_a_conditional_with_branches_and_a_default_and_no_trailing_commas() {
-        let source = "sheet s {\n    conditional p {\n        0i32 => { relationship { b := a; } },\n        _ => { relationship { a := b; } },\n    }\n}";
+        let source = "sheet s {\n    conditional p {\n        0i32 => { relationship { b := a; } }\n        _ => { relationship { a := b; } }\n    }\n}";
         let expected = "sheet s {\n    conditional p {\n        0i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        _ => {\n            relationship {\n                a := b;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_conditional_branch_with_a_negated_literal_key() {
-        let source = "sheet s {\n    conditional p {\n        -1i32 => { relationship { b := a; } },\n        _ => { relationship { a := b; } },\n    }\n}";
+        let source = "sheet s {\n    conditional p {\n        -1i32 => { relationship { b := a; } }\n        _ => { relationship { a := b; } }\n    }\n}";
         let expected = "sheet s {\n    conditional p {\n        -1i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        _ => {\n            relationship {\n                a := b;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_conditional_with_an_expression_match_subject() {
-        let source = "sheet s {\n    conditional a && b {\n        _ => { relationship { d := c; } },\n    }\n}";
+        let source = "sheet s {\n    conditional a && b {\n        _ => { relationship { d := c; } }\n    }\n}";
         let expected = "sheet s {\n    conditional a && b {\n        _ => {\n            relationship {\n                d := c;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }

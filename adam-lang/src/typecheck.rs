@@ -29,6 +29,8 @@ use crate::type_registry::TypeShape;
 /// descriptors. Constructors and members use `lookup`'s schemas/signatures, not value names;
 /// unknown constructors and incompatible known fields/operands produce diagnostics.
 ///
+/// Reports parameterized definitions and named relationship uses as requiring module lowering.
+///
 /// - Complexity: proportional to checking every expression with
 ///   [`check_expr_with_type_resolver`], plus O(n) sheet traversal and registry snapshot costs.
 ///
@@ -74,6 +76,12 @@ pub fn check_sheet(
     lookup: &cel_parser::OpLookup,
 ) -> Vec<ParseError> {
     let mut diagnostics = Vec::new();
+    if sheet.parameters.is_some() {
+        diagnostics.push(ParseError::new(
+            "parameterized definitions require module lowering",
+            sheet.name_span.start,
+        ));
+    }
     let declared = declared_cell_types(sheet, registry, lookup);
     let shapes = &declared.shapes;
     let resolve = |name: &str| -> Ty { declared.values.get(name).cloned().unwrap_or(Ty::Any) };
@@ -145,6 +153,12 @@ pub fn check_sheet(
                     );
                 }
             }
+            SheetItem::RelationshipUse(call) => {
+                diagnostics.push(ParseError::new(
+                    "relationship uses require module lowering",
+                    call.span.start,
+                ));
+            }
             SheetItem::Conditional(cond) => {
                 diagnostics.extend(
                     check_expr_with_type_resolver(
@@ -157,6 +171,16 @@ pub fn check_sheet(
                 );
                 for branch in &cond.branches {
                     for rel in &branch.relationships {
+                        let rel = match rel {
+                            crate::ast::BranchItem::Relationship(rel) => rel,
+                            crate::ast::BranchItem::RelationshipUse(call) => {
+                                diagnostics.push(ParseError::new(
+                                    "relationship uses require module lowering",
+                                    call.span.start,
+                                ));
+                                continue;
+                            }
+                        };
                         for binding in &rel.bindings {
                             check_binding(
                                 binding,
@@ -172,6 +196,16 @@ pub fn check_sheet(
                 }
                 if let Some(default) = &cond.default {
                     for rel in &default.relationships {
+                        let rel = match rel {
+                            crate::ast::BranchItem::Relationship(rel) => rel,
+                            crate::ast::BranchItem::RelationshipUse(call) => {
+                                diagnostics.push(ParseError::new(
+                                    "relationship uses require module lowering",
+                                    call.span.start,
+                                ));
+                                continue;
+                            }
+                        };
                         for binding in &rel.bindings {
                             check_binding(
                                 binding,

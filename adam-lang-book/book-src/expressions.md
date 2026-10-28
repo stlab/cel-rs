@@ -52,11 +52,11 @@ references in its body, not those labels or constructor names.
 
 ## Host records and members
 
-Write `Sample { value: 3.0, }` when the host registers a `Sample` schema.
+Write `Sample { value: 3.0 }` when the host registers a `Sample` schema.
 Supply every field exactly once; unknown constructors and unknown, duplicate,
 missing, or incorrectly typed fields are errors. Field expressions evaluate in
-written order. Empty schemas accept `{}`, and non-empty field lists accept a
-trailing comma. An `f64` field requires `3.0`, not `3`: integers do not
+written order. Empty schemas accept `{}`; non-empty field lists reject trailing
+commas. An `f64` field requires `3.0`, not `3`: integers do not
 implicitly convert to floats.
 
 `reading.value` and `reading.value()` both invoke the host's unary `value`

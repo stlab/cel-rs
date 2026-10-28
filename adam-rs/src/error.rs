@@ -20,6 +20,8 @@ pub enum ErrorSite {
     Relationship(RelationshipId),
     /// A single cell.
     Cell(CellId),
+    /// The live conditional whose match expression failed.
+    Conditional(crate::ConditionalId),
 }
 
 /// Errors returned by `Sheet` operations and propagation.
@@ -73,7 +75,8 @@ pub enum Error {
         /// The underlying error the method's function (or a requirement's/conditional's
         /// expression function) returned.
         error: anyhow::Error,
-        /// The method this failure originated from, if known. Empty when unknown.
+        /// The executing method, conditional, or governed requirement cell, if known.
+        /// Empty when no live execution identity is available.
         sites: Vec<ErrorSite>,
     },
 

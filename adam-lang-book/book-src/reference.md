@@ -8,9 +8,13 @@ here.
 ## Grammar
 
 ```text
-sheet              = "sheet" identifier "{" { sheet_item } "}".
+module             = { use_decl | sheet }.
+use_decl           = "use" qualified_name [ "as" identifier ] ";".
+sheet              = "sheet" identifier [ "(" [ parameter { "," parameter } ] ")" ]
+                       "{" { sheet_item } "}".
+parameter          = identifier ":" type_expr.
 sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
-                       | source_decl).
+                       | source_decl | relationship_use).
 
 cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
@@ -22,11 +26,15 @@ type_expr          = identifier [ "(" type_expr { "," type_expr } ")" ]
                     | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 
 relationship_decl  = "relationship" "{" { binding } "}".
+relationship_use   = "relationship" qualified_name "(" [ actual { "," actual } ] ")" ";".
+actual             = identifier ":" identifier.
+qualified_name     = identifier { "::" identifier }.
 binding            = binding_target ":=" expression ";".
-binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
+binding_target     = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".
 
 conditional_decl   = "conditional" expression "{" { conditional_branch } "}".
-conditional_branch = (expression | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+conditional_branch = (literal_pattern | "_") "=>" "{"
+                       { relationship_decl | relationship_use } "}".
 
 out_decl           = "out" identifier [ ":" type_expr ] ":=" expression
                        [ cell_filter ] [ require_block ] ";".
@@ -49,7 +57,8 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
 
 ## Sheets and namespaces
 
-- A sheet's own name has no runtime meaning; it is not otherwise referenceable.
+- Root names identify explicit host selections. Parameterized sheet names identify
+  components used by named `relationship` invocations.
 - `cell`, `source`, and `out` declarations share one namespace. Declaring the same name twice,
   in any combination of the three, is a "duplicate cell" error.
 - Record constructor/type names occupy a separate namespace from values.
@@ -61,6 +70,71 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
 - **No forward references.** An identifier is only recognized as a cell dependency if that
   cell was declared earlier in the same sheet's token order. Referencing an undeclared name is
   an "undeclared cell" error. See [names and declaration order](cells.md#names-and-declaration-order).
+
+## Components, modules and roots
+
+- `sheet app { ... }` defines a root; `sheet component(...) { ... }` defines a
+  reusable component, even with an empty parameter list. A root is not an importable
+  component. Imports refer to declared exports, not imported aliases.
+- `relationship component(formal: actual, ...);` binds each formal exactly once.
+  Binding order does not matter. Actuals must be distinct, previously declared
+  ordinary cells or fixed sources with exactly matching complete concrete types.
+  Expressions, literals and `out` cells cannot be actuals. Parameters have no
+  initializers, filters or requirements, and cannot become private outputs.
+- Components may own private cells, outputs and policies. Their local names do not
+  enter the root's public name maps. Each use allocates fresh private state and
+  relationships; repeated uses do not merge relationships.
+- Callers retain boundary filters, requirements, strength and source aspirations.
+  Fixed-source actuals remove every method that would write them, including nested
+  writes. This specialization uses cell kind, not the last round's `is_source`.
+  An empty specialized relationship fails construction, even in an inactive branch.
+- Conditional uses require a transitively relationship-only component. Private
+  cells, outputs or policies make a definition ineligible there. Unconditional uses
+  may contain those declarations. Final combined graphs must satisfy the ordinary
+  conditional guard-independence rules.
+- Hosts supply explicit `ModulePath` identities and source owners to `ModuleSet`.
+  The core performs no filesystem IO, path inference or package discovery.
+  `ModuleCompiler::compile` checks all definitions, including unused ones, without
+  executing host expressions. Install operation libraries and register custom types
+  before creating the immutable compiler or parser.
+- `CompiledModules::roots` enumerates root names;
+  `instantiate_root(&module, name)` selects one explicitly. Component-only modules
+  need no root. `AdamParser::parse_str` is the convenience entry for a source with
+  exactly one root and no externally supplied imports.
+- Construction runs defaults, initializers and factories, but never propagates.
+  Compiled templates and live methods retain their immutable environments after
+  earlier owners drop. Native factories must create fresh execution state and obey
+  the pure-method contract. A failed native instantiation leaves its destination
+  safely discardable, not necessarily unchanged.
+- Compile/construction diagnostics own their actual source identities and labels;
+  runtime errors use `ParsedSheet::locate_error`. Source-free native diagnostics
+  retain native context without manufactured locations. Checked division, inversion
+  and conversion failures still require handling. Requirement violations instead
+  set validity flags, which callers inspect after propagation.
+- Components have concrete types, not generic type parameters. They do not infer
+  equations, inject caller policies or turn private outputs into bindable cells.
+
+The [relationships chapter](relationships.md#reuse-a-component) executes inline and
+imported examples. For VS Code, map every module, including the importing root:
+
+```json
+{
+  "adam-lang.modules": {
+    "relationships": "adam-lang/examples/relationships.adm2",
+    "composed": "adam-lang/examples/composed.adm2",
+    "image_constraints": "cel-euclid/examples/image_constraints.adm2",
+    "resize_straighten": "cel-euclid/examples/resize_straighten.adm2"
+  }
+}
+```
+
+Paths are relative to the first workspace folder. The extension sends owned
+`path`/`uri`/`text` snapshots to the language server; the core does not read files.
+UI hosts render owning module errors with
+`adam_web_ui::format_module_diagnostic(&diagnostic, &Renderer::plain())`.
+The separate `format_parse_error` adapter takes the original text and display name
+for an anonymous source-only parse; do not substitute root text for imported
+definition locations.
 
 ## Cells and source cells
 
@@ -124,8 +198,8 @@ and custom calls without metadata remain best-effort, with all children checked.
 Record fields are required exactly once and match their types exactly: no
 implicit integer-to-float conversion. Unknown constructors and
 unknown/duplicate/missing/mistyped fields are errors. Field evaluation follows
-written order. Empty schemas accept `{}`; non-empty fields permit a trailing
-comma (call arguments do not). Records must be parenthesized in `if` conditions
+written order. Empty schemas accept `{}`; record fields and call arguments reject
+trailing commas. Records must be parenthesized in `if` conditions
 and `conditional` subjects unless inside a parenthesized, call, tuple, or array
 subexpression. Members are never assignment targets; binding targets remain
 whole cell names or tuple patterns. See the
@@ -160,8 +234,8 @@ type in the current design.
   _cycle_ if every valid assignment forms a closed dependency loop with no source anywhere in
   it. See [when no assignment exists](relationships.md#when-no-assignment-exists).
 - A binding's left-hand side destructures a tuple result element-wise when parenthesized with
-  more than one name, or exactly one name plus a trailing comma; a bare name or a single
-  parenthesized name with no comma binds the whole result directly. See
+  more than one name, or exactly one name plus its required comma. A bare name binds
+  the whole result directly; a single parenthesized name without a comma is invalid. See
   [destructuring bindings](relationships-continued.md#destructuring-bindings).
 - A `source` cell can never be a binding's output: a `relationship` (or `conditional` branch)
   naming one as an output is a parse-time error. See [source cells](source.md).

@@ -1,0 +1,17 @@
+// Finite floating endpoints; caller filters and requirements own admissibility.
+sheet ordered(low: f64, high: f64) {
+    relationship {
+        low := if low < high { low } else { high };
+        high := if high > low { high } else { low };
+    }
+}
+
+// Each selected division requires a nonzero divisor and representable result.
+// Binding a source factor removes only the direction that writes that factor.
+sheet multiply(a: f64, b: f64, product: f64) {
+    relationship {
+        product := a * b;
+        a := product / b;
+        b := product / a;
+    }
+}

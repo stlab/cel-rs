@@ -67,7 +67,7 @@ pub fn build_sheet(source: &str, file_name: &str, renderer: &Renderer) -> BuildO
     let mut parsed = match parser.parse_str(source) {
         Ok(p) => p,
         Err(e) => {
-            let msg = e.format_rustc_style(source, file_name, 1, renderer);
+            let msg = crate::labels::format_parse_error(&e, source, file_name, renderer);
             return BuildOutcome {
                 sheet_labels: None,
                 error: Some(msg),

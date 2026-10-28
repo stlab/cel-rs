@@ -1528,7 +1528,7 @@ pub struct ConditionalDecl {
 Find:
 
 ```rust
-/// `conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].`
+/// `conditional_branch = literal "=>" "{" { relationship_decl } "}".`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
     /// The branch's unresolved match literal.
@@ -1545,7 +1545,7 @@ pub struct ConditionalBranch {
 Replace with:
 
 ```rust
-/// `conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].`
+/// `conditional_branch = literal "=>" "{" { relationship_decl } "}".`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
     /// The branch's unresolved match literal.
@@ -2480,7 +2480,7 @@ Create `adam-lang/src/fmt.rs` with only its module doc, imports, and test module
 //! [`crate::trivia::attach_trivia`] recovered them, and method bodies/cell initializers delegated
 //! to [`cel_parser::format_expr`] (bodies) or re-emitted via `Span::source_text()` directly
 //! (initializers/branch-match literals — see the design doc for why no `Literal` value is
-//! needed). Conditional branches omit the grammar's optional trailing `,`, matching
+//! needed). Conditional branches have no comma separator or terminator, matching
 //! `begin/assets/demo.adm2`'s existing style.
 //!
 //! Never called on a sheet with any recorded syntax errors — see `adam-lsp`'s
@@ -2860,7 +2860,7 @@ initializers and conditional-branch match literals via
 Span::source_text() directly (no Literal value needed, since
 adam-lang's Literal is just an alias for syn::Lit); reproduces
 leading_comment/blank_line_before exactly as attach_trivia recovered
-them; omits the grammar's optional trailing comma after a conditional
+them; emits no comma after a conditional
 branch, matching begin/assets/demo.adm2's existing style.
 EOF
 )"

@@ -1,9 +1,10 @@
 ---
-description: Prefer no heap allocations; use references, generics, and slices where possible
-globs: *.rs
-alwaysApply: true
+applyTo: "**/*.rs"
 ---
-This rule encourages avoiding heap allocations and temporary copies, especially in hot paths and library code.
+
+# Avoid unnecessary heap allocations
+
+Avoid heap allocations and temporary copies when borrowing suffices, especially in hot paths and library code.
 
 ## General Principle
 

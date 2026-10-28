@@ -46,8 +46,8 @@ output_list = "(" or_expression "," or_expression { "," or_expression } ")"
             | or_expression.
 
 conditional_decl   = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".
-conditional_branch = literal "=>" "{" { method_decl } "}" [ "," ].
-default_branch     = "_"     "=>" "{" { method_decl } "}" [ "," ].
+conditional_branch = literal "=>" "{" { method_decl } "}".
+default_branch     = "_"     "=>" "{" { method_decl } "}".
 ```
 
 ### Grammar notes

@@ -18,6 +18,6 @@ pub use graph::{
 };
 pub use inspector::SheetInspector;
 pub use labels::{
-    CellMeta, Labels, Renderer, WriteStrFn, format_adam_error, format_rounded,
-    labels_from_cell_names,
+    CellMeta, Labels, Renderer, WriteStrFn, format_adam_error, format_module_diagnostic,
+    format_parse_error, format_rounded, labels_from_cell_names,
 };

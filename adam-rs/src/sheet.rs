@@ -285,6 +285,22 @@ impl Sheet {
         id
     }
 
+    /// Returns the fixed concrete type of a live cell, or `None` for an invalid ID.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::any::TypeId;
+    /// use adam_rs::{CellId, Sheet};
+    /// let mut sheet = Sheet::new();
+    /// let cell = sheet.add_cell(7i32);
+    /// assert_eq!(sheet.cell_type_id(cell), Some(TypeId::of::<i32>()));
+    /// assert_eq!(sheet.cell_type_id(CellId::default()), None);
+    /// ```
+    pub fn cell_type_id(&self, id: CellId) -> Option<TypeId> {
+        self.cells.get(id).map(|cell| cell.type_id)
+    }
+
     /// Returns `id`'s fixed cell kind.
     ///
     /// Returns `None` if `id` is not a live cell in this sheet.
@@ -724,6 +740,23 @@ impl Sheet {
         writer: Method,
         requirements: Vec<Requirement>,
     ) -> Result<CellId, Error> {
+        let out_cell = writer
+            .outputs
+            .first()
+            .copied()
+            .ok_or(Error::InvalidOutput)?;
+        self.add_out_writer(writer)?;
+        for requirement in requirements {
+            self.add_requirement(out_cell, requirement)?;
+        }
+        Ok(out_cell)
+    }
+
+    /// Registers the sole output writer and returns its native relationship identity.
+    ///
+    /// Reports the same writer validation errors as [`Self::add_out`].
+    /// - Complexity: O(r × e + i) for prior relationships r, edges e and writer inputs i.
+    pub(crate) fn add_out_writer(&mut self, writer: Method) -> Result<RelationshipId, Error> {
         if writer.outputs.len() != 1 {
             return Err(Error::InvalidOutput);
         }
@@ -734,14 +767,9 @@ impl Sheet {
             return Err(Error::InvalidCellKind { sites: vec![] });
         }
 
-        self.add_relationship(vec![writer])?;
+        let relationship = self.add_relationship(vec![writer])?;
         self.cells[out_cell].kind = CellKind::Out;
-
-        for requirement in requirements {
-            self.add_requirement(out_cell, requirement)?;
-        }
-
-        Ok(out_cell)
+        Ok(relationship)
     }
 
     /// Attaches `filter` to `cell`.
@@ -1301,8 +1329,12 @@ impl Sheet {
     /// # Errors
     ///
     /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
-    ///   returned an error.
-    fn evaluate_match_source(&self, cond: &ConditionalData) -> Result<MatchValue<'_>, Error> {
+    ///   returned an error; its site identifies the executing conditional.
+    fn evaluate_match_source(
+        &self,
+        id: ConditionalId,
+        cond: &ConditionalData,
+    ) -> Result<MatchValue<'_>, Error> {
         match &cond.source {
             MatchSource::Cell(id) => Ok(MatchValue::Ref(self.cells[*id].effective())),
             MatchSource::Expr(expr) => {
@@ -1313,7 +1345,7 @@ impl Sheet {
                     .collect();
                 let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
                     error,
-                    sites: vec![],
+                    sites: vec![ErrorSite::Conditional(id)],
                 })?;
                 Ok(MatchValue::Owned(value))
             }
@@ -1329,9 +1361,10 @@ impl Sheet {
     /// # Errors
     ///
     /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
-    ///   returned an error.
+    ///   returned an error; its site identifies the executing conditional.
     fn evaluate_match_source_staged<'a>(
         &'a self,
+        id: ConditionalId,
         cond: &ConditionalData,
         stage: &'a PropagationStage,
     ) -> Result<MatchValue<'a>, Error> {
@@ -1345,7 +1378,7 @@ impl Sheet {
                     .collect();
                 let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
                     error,
-                    sites: vec![],
+                    sites: vec![ErrorSite::Conditional(id)],
                 })?;
                 Ok(MatchValue::Owned(value))
             }
@@ -1382,8 +1415,8 @@ impl Sheet {
             .filter(|id| !self.conditional_relationships.contains(id))
             .collect();
 
-        for (_, cond) in &self.conditionals {
-            let value = self.evaluate_match_source_staged(cond, stage)?;
+        for (id, cond) in &self.conditionals {
+            let value = self.evaluate_match_source_staged(id, cond, stage)?;
             let value_ref = value.as_dyn();
             let eq_fn = self.match_eq_fn(cond);
 
@@ -2216,14 +2249,15 @@ impl Sheet {
     /// # Errors
     ///
     /// - `Error::MethodFailed` — `id` is a live, expression-sourced conditional whose
-    ///   function returned an error.
+    ///   function returned an error. The original cause and `ErrorSite::Conditional(id)`
+    ///   identify the failing execution.
     ///
     /// - Complexity: O(B·K) where B = branches, K = keys per branch.
     pub fn conditional_active_branch(&self, id: ConditionalId) -> Result<Option<usize>, Error> {
         let Some(cond) = self.conditionals.get(id) else {
             return Ok(None);
         };
-        let value = self.evaluate_match_source(cond)?;
+        let value = self.evaluate_match_source(id, cond)?;
         let value_ref = value.as_dyn();
         let eq_fn = self.match_eq_fn(cond);
         Ok(cond

@@ -3,7 +3,9 @@
 //! directly, per the design doc's testing strategy (handler-level unit tests over full protocol
 //! round-trips where possible).
 
-use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
+use adam_lang::{
+    AdamAstParser, ModuleDiagnostic, ModulePath, ModuleSet, TypeRegistry, check_module, check_sheet,
+};
 use cel_parser::{CELError, SourceSpan};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
@@ -17,8 +19,10 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 ///
 /// The environment explicitly includes the standard library and optional Euclid geometry,
 /// matching the executing web/book hosts. Unresolved call-result shapes remain best-effort.
+/// Diagnostic columns count UTF-16 code units in the supplied text.
 ///
-/// - Complexity: O(n + s²) in source length and installed library signatures, with no caching.
+/// - Complexity: O((e + 1)n + s²) in source length n, diagnostic count e and installed
+///   library signatures s, with no caching.
 ///
 /// # Examples
 ///
@@ -32,54 +36,119 @@ pub fn diagnostics_for_source(source: &str) -> Vec<Diagnostic> {
     let mut parser = AdamAstParser::new();
     let sheet = match parser.parse_str(source) {
         Ok(sheet) => sheet,
-        Err(e) => return vec![to_diagnostic(e.into())],
+        Err(e) => return vec![to_diagnostic(e.into(), source)],
     };
-    let mut types = TypeRegistry::new();
-    cel_euclid::register_adam_types(&mut types);
-    let mut lookup = cel_parser::OpLookup::new();
-    cel_std::install(&mut lookup);
-    cel_euclid::install(&mut lookup);
+    let (types, lookup) = configured_environment();
     let type_errors = check_sheet(&sheet, &types, &lookup);
     sheet
         .errors
         .into_iter()
         .chain(type_errors)
-        .map(|e| to_diagnostic(e.into()))
+        .map(|e| to_diagnostic(e.into(), source))
         .collect()
 }
 
-/// Converts a [`CELError`] into an LSP [`Diagnostic`] at error severity.
-fn to_diagnostic(error: CELError) -> Diagnostic {
+/// Checks a registered module collection without executing defaults, methods or match keys.
+///
+/// Uses the same standard and Euclid libraries as [`diagnostics_for_source`].
+/// Includes all registered definitions and retains the actual source owners.
+/// An unknown requested module returns a diagnostic, never a source-only fallback.
+/// - Complexity: the configured libraries' setup plus [`check_module`]'s analysis cost.
+///
+/// # Examples
+///
+/// ```
+/// let path = "app".parse().unwrap();
+/// let mut modules = adam_lang::ModuleSet::new();
+/// modules.insert_source(path, "file:///app.adm2", "sheet app {}").unwrap();
+/// assert!(adam_lsp::diagnostics::diagnostics_for_module(
+///     &"app".parse().unwrap(), &modules
+/// ).is_empty());
+/// ```
+pub fn diagnostics_for_module(module: &ModulePath, modules: &ModuleSet) -> Vec<ModuleDiagnostic> {
+    let (types, lookup) = configured_environment();
+    check_module(module, modules, &types, &lookup)
+}
+
+/// Creates the common source-only and module-aware nonexecuting type environment.
+///
+/// - Complexity: O(s²) for s installed operation signatures.
+fn configured_environment() -> (TypeRegistry, cel_parser::OpLookup) {
+    let mut types = TypeRegistry::new();
+    cel_euclid::register_adam_types(&mut types);
+    let mut lookup = cel_parser::OpLookup::new();
+    cel_std::install(&mut lookup);
+    cel_euclid::install(&mut lookup);
+    (types, lookup)
+}
+
+/// Converts a [`CELError`] against its original text into an LSP diagnostic.
+///
+/// - Complexity: O(n) for the source prefix ending at the error.
+fn to_diagnostic(error: CELError, source: &str) -> Diagnostic {
     Diagnostic {
-        range: to_range(error.span()),
+        range: source_range(source, error.span()),
         severity: Some(DiagnosticSeverity::ERROR),
         message: error.message().to_string(),
         ..Default::default()
     }
 }
 
-/// Converts a [`SourceSpan`] (1-based lines, character-offset columns) into an LSP [`Range`]
-/// (0-based lines, UTF-16-code-unit columns).
+/// Converts character columns in the original text to UTF-16 LSP positions.
 ///
-/// - Precondition: no character on `span`'s line(s) before `span` lies outside the Basic
-///   Multilingual Plane — adam-lang source is overwhelmingly ASCII, so a character-offset ≈
-///   UTF-16-code-unit-offset approximation is accepted here rather than computed exactly.
-fn to_range(span: SourceSpan) -> Range {
-    Range {
-        start: Position {
-            line: (span.start.line - 1) as u32,
-            character: span.start.column as u32,
-        },
-        end: Position {
-            line: (span.end.line - 1) as u32,
-            character: span.end.column as u32,
-        },
-    }
+/// - Precondition: `span` refers to `source`.
+/// - Complexity: O(n) for the source prefix ending at the span.
+pub(crate) fn source_range(source: &str, span: SourceSpan) -> Range {
+    let position = |line: usize, column: usize| {
+        let character = source
+            .lines()
+            .nth(line.saturating_sub(1))
+            .unwrap_or("")
+            .chars()
+            .take(column)
+            .map(char::len_utf16)
+            .sum::<usize>();
+        Position::new(line.saturating_sub(1) as u32, character as u32)
+    };
+    Range::new(
+        position(span.start.line, span.start.column),
+        position(span.end.line, span.end.column),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Converts parsed type and lexical error columns to exact UTF-16 offsets.
+    #[test]
+    fn source_diagnostics_preserve_unicode_locations() {
+        for (source, token, length) in [
+            (
+                "// first line\n/* 😀 é */ sheet s { cell café: i32 = 1.0; }",
+                "1.0",
+                3,
+            ),
+            // Lexical failures identify a point rather than a complete token.
+            (
+                "// first line\n/* 😀 é */ sheet s { cell café: i32 = `; }",
+                "`",
+                0,
+            ),
+        ] {
+            let diagnostics = diagnostics_for_source(source);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            let offset = source.find(token).unwrap();
+            let column = source[..offset]
+                .rsplit('\n')
+                .next()
+                .unwrap()
+                .encode_utf16()
+                .count() as u32;
+            assert_eq!(diagnostics[0].range.start, Position::new(1, column));
+            assert_eq!(diagnostics[0].range.end, Position::new(1, column + length));
+        }
+    }
 
     /// The LSP uses the same standard and Euclid metadata as executing hosts.
     #[test]

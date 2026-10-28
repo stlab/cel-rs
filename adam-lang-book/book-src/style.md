@@ -20,6 +20,7 @@ format a sheet with any recorded syntax error rather than guess at intent:
 [`format_sheet`](../adam_lang/fn.format_sheet.html)'s own precondition is that `sheet.errors`
 is empty.
 
-A `conditional` branch's trailing `,` (the grammar allows one after each branch's closing `}`)
-is always omitted by the formatter, even though the parser still accepts it on input, so
-canonical Adam source never has one.
+CEL and Adam use strict LL(1) grammars with one token of lookahead. Commas separate
+list items; they do not terminate lists. Only singleton tuple values, types and
+destructuring bindings require a terminal comma to distinguish them from grouping.
+Conditional branches have no comma separator or terminator.

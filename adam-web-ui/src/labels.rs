@@ -309,22 +309,21 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
 
 /// Formats an [`Error`] as a rustc-style diagnostic when possible.
 ///
-/// `Error::MethodFailed` wraps an `anyhow::Error` raised by a compiled method
-/// body; when that error carries a `SpanContext` (attached automatically by
-/// cel-parser's `span-diagnostics` feature for built-in arithmetic ops) this
-/// renders a full caret diagnostic against `source` using `renderer` — pass
-/// [`Renderer::styled`] for a real terminal (ANSI colors) or [`Renderer::plain`]
-/// for a context that can't display them (a browser `<pre>` element, a log file) —
-/// with `file_name` (e.g. `"begin/examples/toy_example.adm2"`) shown in the
-/// diagnostic header. Otherwise, `e`'s sites are resolved against `parsed` via
-/// `adam_lang::ParsedSheet::locate_error`: zero resolved sites falls back to `e`'s
-/// `Display` message; exactly one renders a single-caret diagnostic; two or more render
-/// a multi-span backtrace (e.g. every relationship binding in a cycle), primary site
-/// first.
+/// Resolves native sites through `parsed`, groups labels by owning source identity
+/// and renders definition files followed by invocation context. Inner CEL spans use
+/// their definition text, never the caller's text. Source-free labels remain visible.
+/// `file_name` overrides only the anonymous `AdamParser` input's display name.
+/// For legacy anonymous errors with no native site, `source` supplies the CEL text.
 ///
-/// - Complexity: O(n) in the length of `source`, plus O(s) in the number of `e`'s sites —
-///   `ParsedSheet::locate_error` and, on the multi-span path, `cel_parser::format_multi_span`
-///   both re-scan `source` to render the annotated snippet.
+/// - Complexity: Provenance resolution plus O(n + l) source bytes and labels rendered.
+///
+/// # Examples
+/// ```
+/// let parsed = adam_lang::ParsedSheet::new();
+/// let text = adam_web_ui::format_adam_error(&adam_rs::Error::InvalidId,
+///     &parsed, "", "input.adm2", &adam_web_ui::Renderer::plain());
+/// assert_eq!(text, "invalid cell or relationship id");
+/// ```
 pub fn format_adam_error(
     e: &Error,
     parsed: &adam_lang::ParsedSheet,
@@ -332,39 +331,376 @@ pub fn format_adam_error(
     file_name: &str,
     renderer: &Renderer,
 ) -> String {
-    // CEL-internal sub-expression span wins when present.
-    if let Error::MethodFailed { error, .. } = e
+    let located = parsed.locate_error(e);
+    if located.is_empty()
+        && e.sites().is_empty()
+        && parsed.anonymous_source().is_some()
+        && let Error::MethodFailed { error, .. } = e
         && error.downcast_ref::<SpanContext>().is_some()
     {
         return error.format_rustc_style(source, file_name, 1, renderer);
     }
-    let located = parsed.locate_error(e);
-    match located.as_slice() {
-        [] => e.to_string(),
-        [(span, _label)] => SpanContext::new(*span).format_rustc_style(
-            &e.to_string(),
-            source,
+    format_source_labels(
+        &runtime_message(e),
+        &located,
+        parsed.anonymous_source().map(|source| (source, file_name)),
+        renderer,
+    )
+}
+
+/// Returns the operation's message without replacing or consuming its typed error.
+fn runtime_message(error: &Error) -> String {
+    if let Error::MethodFailed { error, .. } = error
+        && error.downcast_ref::<SpanContext>().is_some()
+    {
+        return error
+            .source()
+            .map_or_else(|| error.to_string(), ToString::to_string);
+    }
+    error.to_string()
+}
+
+/// Formats a module diagnostic against its retained source owners.
+///
+/// Native labels remain visible without invented locations.
+/// - Complexity: O(n + l) source and label bytes, excluding snippet rendering.
+///
+/// # Examples
+/// ```
+/// let error = adam_lang::ModuleDiagnostic {
+///     message: "missing root".into(), labels: vec![], cause: None,
+/// };
+/// assert_eq!(adam_web_ui::format_module_diagnostic(&error,
+///     &adam_web_ui::Renderer::plain()), "missing root");
+/// ```
+pub fn format_module_diagnostic(
+    error: &adam_lang::ModuleDiagnostic,
+    renderer: &Renderer,
+) -> String {
+    format_source_labels(&diagnostic_message(error), &error.labels, None, renderer)
+}
+
+/// Formats the convenience parser's owning diagnostic, retaining the caller's file name.
+///
+/// Legacy lexical failures without owning labels use the parser's original formatter.
+/// This adapter borrows the error and preserves every concrete source cause.
+/// - Complexity: O(h + n + l) cause depth h, source bytes n and label bytes l.
+///
+/// # Examples
+/// ```
+/// let error = adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(),
+///     cel_parser::OpLookup::new()).parse_str("sheet {}").unwrap_err();
+/// let text = adam_web_ui::format_parse_error(&error, "sheet {}", "file.adm2",
+///     &adam_web_ui::Renderer::plain());
+/// assert!(!text.is_empty());
+/// ```
+pub fn format_parse_error(
+    error: &cel_parser::ParseError,
+    source: &str,
+    file_name: &str,
+    renderer: &Renderer,
+) -> String {
+    let diagnostic =
+        std::iter::successors(std::error::Error::source(error), |error| error.source())
+            .find_map(|cause| cause.downcast_ref::<adam_lang::ModuleDiagnostic>());
+    if let Some(diagnostic) = diagnostic
+        && diagnostic
+            .labels
+            .iter()
+            .any(|label| label.location.is_some())
+    {
+        let owner = diagnostic
+            .labels
+            .iter()
+            .find_map(|label| label.location.as_ref().map(|location| &location.source));
+        return format_source_labels(
+            &diagnostic_message(diagnostic),
+            &diagnostic.labels,
+            owner.map(|owner| (owner, file_name)),
+            renderer,
+        );
+    }
+    error.format_rustc_style(source, file_name, 1, renderer)
+}
+
+/// Includes the concrete innermost cause when a span context hides its message.
+///
+/// - Complexity: O(h + m) cause depth h and formatted message bytes m.
+fn diagnostic_message(error: &adam_lang::ModuleDiagnostic) -> String {
+    let mut message = error.message.clone();
+    if let Some(cause) =
+        std::iter::successors(std::error::Error::source(error), |error| error.source()).last()
+    {
+        let detail = cause.to_string();
+        if !message.contains(&detail) {
+            message.push_str(": ");
+            message.push_str(&detail);
+        }
+    }
+    message
+}
+
+/// Renders owning labels in first-source order, retaining span-free context.
+///
+/// Only `display_source`'s exact owner receives the supplied display name.
+/// Empty labels return the message unchanged.
+/// - Complexity: Expected O(n + l) time and O(n + l) space for source bytes n
+///   and label bytes l, excluding the existing snippet renderer.
+fn format_source_labels(
+    message: &str,
+    labels: &[adam_lang::SourceLabel],
+    display_source: Option<(&adam_lang::SourceId, &str)>,
+    renderer: &Renderer,
+) -> String {
+    let mut groups: IndexMap<&adam_lang::SourceId, Vec<SpanLabel>> = IndexMap::new();
+    for label in labels {
+        if let Some(location) = &label.location {
+            groups.entry(&location.source).or_default().push(SpanLabel {
+                span: location.span,
+                label: label.label.clone(),
+            });
+        }
+    }
+    let mut result = String::new();
+    for (source, spans) in groups {
+        let file_name = display_source
+            .filter(|(owner, _)| *owner == source)
+            .map_or_else(|| source.file_name(), |(_, name)| name);
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&cel_parser::format_multi_span(
+            message,
+            &spans,
+            source.text(),
             file_name,
             1,
             renderer,
-        ),
-        many => {
-            let labels: Vec<SpanLabel> = many
-                .iter()
-                .map(|(span, label)| SpanLabel {
-                    span: *span,
-                    label: label.clone(),
-                })
-                .collect();
-            cel_parser::format_multi_span(&e.to_string(), &labels, source, file_name, 1, renderer)
-        }
+        ));
     }
+    if result.is_empty() {
+        result.push_str(message);
+    }
+    for label in labels.iter().filter(|label| label.location.is_none()) {
+        result.push_str("\n= context: ");
+        result.push_str(&label.label);
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use adam_rs::Sheet as AdamSheet;
+
+    /// Renders each source owner separately and keeps span-free context visible.
+    #[test]
+    fn labels_render_owned_files_and_native_context() {
+        let mut sources = adam_lang::SourceMap::new();
+        let definition = sources.insert("definition.adm2", "a / b");
+        let invocation = sources.insert("caller.adm2", "relationship divide(a: a, b: b);");
+        let labels = vec![
+            adam_lang::SourceLabel {
+                location: Some(adam_lang::SourceLocation {
+                    source: definition,
+                    span: cel_parser::SourceSpan::new(1, 2, 1, 3),
+                }),
+                label: "division failed".into(),
+            },
+            adam_lang::SourceLabel {
+                location: Some(adam_lang::SourceLocation {
+                    source: invocation,
+                    span: cel_parser::SourceSpan::new(1, 0, 1, 31),
+                }),
+                label: "component use".into(),
+            },
+            adam_lang::SourceLabel {
+                location: None,
+                label: "native definition".into(),
+            },
+        ];
+        let rendered = format_source_labels("division by zero", &labels, None, &Renderer::plain());
+        for expected in [
+            "definition.adm2:1:3",
+            "caller.adm2:1:1",
+            "a / b",
+            "component use",
+            "native definition",
+        ] {
+            assert!(rendered.contains(expected), "{rendered}");
+        }
+        assert!(!rendered.contains('\u{1b}'));
+    }
+
+    /// Preserves an anonymous root's display name, exact division subspan and original cause.
+    #[test]
+    fn labels_render_construction_cel_error_with_original_cause() {
+        let source = "sheet app { cell a: i32 = 1 + 4 / 0; }";
+        let error =
+            adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
+                .parse_str(source)
+                .unwrap_err();
+        let rendered = format_parse_error(&error, source, "root.adm2", &Renderer::plain());
+        assert!(rendered.contains("division by zero"), "{rendered}");
+        assert!(rendered.contains("root.adm2:1:31"), "{rendered}");
+        assert!(!rendered.contains("<input>"), "{rendered}");
+        let cause = std::error::Error::source(&error).unwrap();
+        assert!(cause.is::<adam_lang::ModuleDiagnostic>());
+    }
+
+    /// Keeps independent identical sources separate and overrides only the requested owner.
+    #[test]
+    fn labels_group_by_identity_and_keep_unlocated_and_empty_messages() {
+        let mut sources = adam_lang::SourceMap::new();
+        let a = sources.insert("same.adm2", "x");
+        let b = sources.insert("same.adm2", "x");
+        let labels: Vec<_> = [&a, &b]
+            .into_iter()
+            .map(|source| adam_lang::SourceLabel {
+                location: Some(adam_lang::SourceLocation {
+                    source: source.clone(),
+                    span: cel_parser::SourceSpan::new(1, 0, 1, 1),
+                }),
+                label: "definition".into(),
+            })
+            .collect();
+        let rendered = format_source_labels(
+            "boom",
+            &labels,
+            Some((&a, "caller.adm2")),
+            &Renderer::plain(),
+        );
+        assert!(rendered.contains("caller.adm2"), "{rendered}");
+        assert!(rendered.contains("same.adm2"), "{rendered}");
+        assert_eq!(
+            format_source_labels("boom", &[], None, &Renderer::plain()),
+            "boom"
+        );
+        let diagnostic = adam_lang::ModuleDiagnostic {
+            message: "boom".into(),
+            labels: vec![adam_lang::SourceLabel {
+                location: None,
+                label: "native".into(),
+            }],
+            cause: None,
+        };
+        assert_eq!(
+            format_module_diagnostic(&diagnostic, &Renderer::plain()),
+            "boom\n= context: native"
+        );
+    }
+
+    /// Uses imported definition text and the failing second invocation, never caller text.
+    #[test]
+    fn labels_render_imported_runtime_definition_and_actual_use() {
+        let mut modules = adam_lang::ModuleSet::new();
+        modules
+            .insert_source(
+                "library".parse().unwrap(),
+                "library.adm2",
+                "sheet divide(a: i32, b: i32) {\nrelationship { b := 1 + 4 / a; }\n}",
+            )
+            .unwrap();
+        modules
+            .insert_source(
+                "app".parse().unwrap(),
+                "app.adm2",
+                "use library::divide;
+sheet app {
+source good: i32 = 2; source bad: i32 = 0; cell first: i32; cell second: i32;
+relationship divide(a: good, b: first);
+relationship divide(a: bad, b: second);
+}",
+            )
+            .unwrap();
+        let compiled = adam_lang::ModuleCompiler::new(
+            adam_lang::TypeRegistry::new(),
+            cel_parser::OpLookup::new(),
+        )
+        .compile(modules)
+        .unwrap();
+        let mut parsed = compiled
+            .instantiate_root(&"app".parse().unwrap(), "app")
+            .unwrap();
+        drop(compiled);
+        let error = parsed.propagate().unwrap_err();
+        let rendered = format_adam_error(
+            &error,
+            &parsed,
+            "WRONG CALLER TEXT",
+            "wrong.adm2",
+            &Renderer::plain(),
+        );
+        for expected in [
+            "division by zero",
+            "library.adm2:2:25",
+            "app.adm2:5:1",
+            "b := 1 + 4 / a",
+            "b: second",
+        ] {
+            assert!(rendered.contains(expected), "{rendered}");
+        }
+        assert!(!rendered.contains("wrong.adm2"), "{rendered}");
+        assert!(!rendered.contains("WRONG CALLER TEXT"), "{rendered}");
+    }
+
+    /// Renders a post-edit conditional failure using its retained imported source and use site.
+    #[test]
+    fn labels_render_imported_conditional_runtime_after_edit() {
+        let mut modules = adam_lang::ModuleSet::new();
+        modules
+            .insert_source(
+                "library".parse().unwrap(),
+                "library.adm2",
+                "sheet choose(divisor: i32) {\nconditional 1 / divisor { 0 => {} _ => {} }\n}",
+            )
+            .unwrap();
+        modules
+            .insert_source(
+                "app".parse().unwrap(),
+                "app.adm2",
+                "use library::choose;
+sheet app {
+cell first: i32 = 1; cell second: i32 = 1;
+relationship choose(divisor: first);
+relationship choose(divisor: second);
+}",
+            )
+            .unwrap();
+        let compiled = adam_lang::ModuleCompiler::new(
+            adam_lang::TypeRegistry::new(),
+            cel_parser::OpLookup::new(),
+        )
+        .compile(modules)
+        .unwrap();
+        let mut parsed = compiled
+            .instantiate_root(&"app".parse().unwrap(), "app")
+            .unwrap();
+        drop(compiled);
+        parsed.propagate().unwrap();
+        let second = parsed.cell_names["second"].0;
+        parsed.write(second, 0i32).unwrap();
+        let error = parsed.propagate().unwrap_err();
+        let rendered = format_adam_error(
+            &error,
+            &parsed,
+            "WRONG TEXT",
+            "wrong.adm2",
+            &Renderer::plain(),
+        );
+        for expected in [
+            "division by zero",
+            "library.adm2:2:13",
+            "app.adm2:5:1",
+            "conditional 1 / divisor",
+            "divisor: second",
+        ] {
+            assert!(rendered.contains(expected), "{rendered}");
+        }
+        for excluded in ["wrong.adm2", "WRONG TEXT", "divisor: first", "app.adm2:4:1"] {
+            assert!(!rendered.contains(excluded), "{rendered}");
+        }
+    }
 
     /// Parses `src` into a `ParsedSheet` via the standard adam-lang pipeline, for tests that
     /// need a real (rather than hand-built) span table to resolve `Error` sites against.

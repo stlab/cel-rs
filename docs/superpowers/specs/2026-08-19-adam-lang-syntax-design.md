@@ -26,7 +26,7 @@ cell_type_init     = (":" type_expr ["=" or_expression]) | ("=" or_expression).
 
 relationship_decl  = "relationship" "{" { binding } "}".
 binding            = binding_target ":=" or_expression ";".
-binding_target     = identifier | "(" identifier {"," identifier} ["," ] ")".
+binding_target     = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".
 
 out_decl           = "out" identifier [":" type_expr] ":=" or_expression
                        [ "require" "{" { requirement } "}" ] ";".
@@ -61,8 +61,8 @@ b, a - b` becomes `(sum, diff) := expr;`, matching Rust's tuple-pattern syntax: 
 parenthesized, comma-separated cell-name list on the LHS requests destructuring, and
 the RHS's inferred shape must be a tuple type of matching arity/element types — this
 reuses the existing `CompiledOutputs::Tuple` shape-matching, not new validation. A
-bare identifier (`x := expr;`) or a single parenthesized identifier with no comma
-(`(x) := expr;`, mere grouping) instead binds `expr`'s whole result directly to `x`.
+bare identifier (`x := expr;`) binds `expr`'s whole result directly to `x`.
+Parenthesized binding targets require the first comma; `(x) := expr;` is invalid.
 Parentheses are mandatory for a real destructure — including the one-output case,
 `(x,) := expr;` (trailing comma required, exactly as in a Rust 1-tuple pattern) —
 because a bare `x := expr;` is otherwise ambiguous between "destructure this

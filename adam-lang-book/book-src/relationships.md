@@ -5,7 +5,7 @@
 ```text
 relationship_decl = "relationship" "{" { binding } "}".
 binding            = binding_target ":=" expression ";".
-binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
+binding_target     = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".
 ```
 
 Each `binding` inside a `relationship` block is a candidate _method_: an expression whose
@@ -126,6 +126,85 @@ strongest first, to leave each cell a source:
 
 Whether a cell came out of the last resolution as a source, left alone rather than derived, is
 useful for a host UI deciding whether a field should be editable.
+
+## Reuse a component
+
+A *parameterized sheet* names a reusable component. Its concrete formal parameters
+alias caller-owned cells. A sheet without parentheses defines a root; `sheet empty() {}`
+defines a zero-parameter component, not a root.
+
+This inline definition uses the same three floating multiplication methods as the
+triangle above. Binding `factor` to a fixed source removes the method that would
+write it, leaving the two directions between `value` and `result`.
+
+```adam
+{{#include examples/relationships/inline_component.adm2}}
+```
+
+Each selected division needs a nonzero divisor; callers requiring finite arithmetic
+also require finite operands and representable results. Components do not infer
+inverse equations or choose directions from current numeric values.
+Floating operations retain IEEE 754 behavior, including infinities and NaNs;
+they do not report the checked errors that integer division reports.
+
+The shipped `adam-lang/examples/relationships.adm2` also defines finite ordered
+bounds. `composed.adm2` imports both definitions, aliases `multiply` as `mul`, and
+uses the same three-way floating component twice with distinct named actuals.
+Those files contain several roots and a component-only module, so hosts register
+both modules and select a root explicitly:
+
+```rust
+{{#include ../tests/relationships.rs:imported_components}}
+```
+
+The test above executes the real files. Their arithmetic and comparisons need
+only builtin operations. Hosts using the image examples register Euclid types and
+install `cel-std` and `cel-euclid` on the lookup **before** creating the immutable
+compiler or parser. An empty lookup does not supply those optional functions.
+
+For source-free Rust construction, run `cargo run -p adam-lang --example templates`.
+Its native path builds `TemplateBuilder`/`MethodRecipe` factories and instantiates
+them into an ordinary `adam_rs::Sheet`; it never parses source. The checked integer
+example uses Rust's truncating division, so exact inverse multiplication requires
+a divisible product. The parsed examples use `f64`.
+
+`cel-euclid/examples/image_constraints.adm2` extracts the active resampling axis,
+an aspect relationship and the crop fit from the existing examples.
+`resize_straighten.adm2` binds two axis instances and opts into
+`aspect(width: width_inches, height: height_inches, ratio: width_per_height)`.
+The caller supplies the positive finite `width_per_height` source, initially
+`1600.0 / 1200.0`. Equating the original width/height percentages gives
+`width = height * ratio`; the reverse direction divides width by that nonzero
+ratio. Changing only width to 4 inches derives height as 3 inches; changing only
+height back to 4 inches restores width to `1600.0 / 300.0` inches.
+Dimensions and selected products/quotients must stay positive, finite and
+representable. This relation constrains physical dimensions; the pixel axes still
+round independently, so integer pixel counts need not have an exact ratio.
+Ordinary derived dimensions update their raw source slots;
+edited source dimensions, filtered pixel requests and the self-referencing crop
+retain their caller aspirations under the ordinary sheet rules.
+
+The root feeds an ordinary
+relationship-produced image rectangle into the crop component. The caller owns
+sources, filters, requirements and the crop aspiration. Private anchor/coverage
+outputs remain diagnostics, never actual arguments.
+This caller chooses filters that conform pixel requests to the original
+300000-pixel limit while preserving their source aspirations; the original
+`begin` example instead reports that limit through requirements alone. The
+reusable axis installs neither policy, so other callers retain their own choice.
+
+The axis retains ties-even pixel rounding and checked casts. The caller selects
+the reusable aspect relation separately; neither component implements the original
+example's resample toggle or other UI machinery. The fit retains its
+8-epsilon inward guard, 32-epsilon cancellation check and 64-epsilon overlay and
+coverage budgets. The caller rotates about the image point under the requested
+crop center. Singular transforms fail checked inversion. Insufficient precision
+invalidates an explicit requirement, rather than producing a promised valid fit.
+Read requirement validity after propagation; a successful propagation alone does
+not certify coverage. Resize, rotation and reversal preserve `source(crop)`.
+
+See the [component reference](reference.md#components-modules-and-roots) for binding,
+conditional eligibility, ownership and error rules.
 
 ## When no assignment exists
 
