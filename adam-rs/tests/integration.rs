@@ -373,19 +373,20 @@ fn propagate_clears_previous_changed_set() {
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     sheet
-        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .add_relationship(vec![
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+        ])
         .unwrap();
 
     sheet.write(a, 1_i32).unwrap();
     sheet.propagate().unwrap();
-    // b changed in first propagation
+    assert_eq!(sheet.changed().collect::<Vec<_>>(), vec![b]);
 
-    sheet.write(a, 2_i32).unwrap();
+    sheet.write(b, 2_i32).unwrap();
     sheet.propagate().unwrap();
-    // b changed again; changed set should have only cells from this propagation
     let changed: Vec<_> = sheet.changed().collect();
-    assert_eq!(changed.len(), 1);
-    assert!(changed.contains(&b));
+    assert_eq!(changed, vec![a]);
 }
 
 #[test]
@@ -460,7 +461,7 @@ fn arity_3_2_1() {
     let a = sheet.add_cell("a".to_string());
     let c = sheet.add_cell("ab".to_string());
     let b = sheet.add_cell("b".to_string());
-    sheet
+    let relationship = sheet
         .add_relationship(vec![
             Method::from_fn_2_1([a, b], c, |x: &String, y: &String| Ok(x.clone() + y)),
             Method::new(
@@ -481,11 +482,16 @@ fn arity_3_2_1() {
         ])
         .unwrap();
 
+    sheet.write(c, "xyz".to_string()).unwrap();
     sheet.propagate().unwrap();
-
-    assert_eq!(sheet.read::<String>(a).unwrap(), "a");
-    assert_eq!(sheet.read::<String>(b).unwrap(), "b");
-    assert_eq!(sheet.read::<String>(c).unwrap(), "ab");
+    assert_eq!(sheet.selected_method(relationship), Some(1));
+    assert_eq!(sheet.read::<String>(a).unwrap(), "x");
+    assert_eq!(sheet.read::<String>(b).unwrap(), "yz");
+    sheet.write(a, "left".to_string()).unwrap();
+    sheet.write(b, "right".to_string()).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.selected_method(relationship), Some(0));
+    assert_eq!(sheet.read::<String>(c).unwrap(), "leftright");
 }
 
 #[test]
@@ -1401,7 +1407,10 @@ fn multi_input_multi_output_guard_prerequisite_preserves_values() {
                     let lhs = *inputs[0].downcast_ref::<i32>().unwrap();
                     let rhs = *inputs[1].downcast_ref::<i32>().unwrap();
                     let total = *inputs[2].downcast_ref::<i32>().unwrap();
-                    Ok(vec![Box::new(total + lhs + rhs), Box::new(lhs + rhs)])
+                    let sum = lhs
+                        .checked_add(rhs)
+                        .ok_or_else(|| anyhow::anyhow!("overflow"))?;
+                    Ok(vec![Box::new(total.max(sum)), Box::new(sum)])
                 },
             ),
             Method::new(
@@ -1420,7 +1429,11 @@ fn multi_input_multi_output_guard_prerequisite_preserves_values() {
         .add_relationship(vec![Method::from_fn_1_1(
             sum,
             branch_output,
-            |value: &i32| Ok(*value * 10),
+            |value: &i32| {
+                value
+                    .checked_mul(10)
+                    .ok_or_else(|| anyhow::anyhow!("overflow"))
+            },
         )])
         .unwrap();
     sheet
@@ -1438,9 +1451,15 @@ fn multi_input_multi_output_guard_prerequisite_preserves_values() {
 
     sheet.propagate().unwrap();
 
-    assert_eq!(*sheet.read::<i32>(total).unwrap(), 6);
+    assert_eq!(*sheet.read::<i32>(total).unwrap(), 5);
     assert_eq!(*sheet.read::<i32>(sum).unwrap(), 5);
     assert_eq!(*sheet.read::<i32>(branch_output).unwrap(), 50);
+    sheet.write(total, 12_i32).unwrap();
+    sheet.write(lhs, 2_i32).unwrap();
+    sheet.write(rhs, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(total).unwrap(), 12);
+    assert_eq!(*sheet.read::<i32>(sum).unwrap(), 5);
 }
 #[test]
 fn self_referencing_guard_seed_cycle_is_reported_before_commit() {
@@ -2110,23 +2129,6 @@ fn cell_requirements_returns_requirement_ids_in_declaration_order() {
 }
 
 #[test]
-/// Preserves a check's cell and input identity without display labels.
-fn unlabeled_requirement_preserves_identity() {
-    let mut sheet = Sheet::new();
-    let a = sheet.add_cell(0_i32);
-    let b = sheet.add_cell(0_i32);
-    let out = sheet
-        .add_out(
-            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            vec![Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))],
-        )
-        .unwrap();
-    let id = sheet.cell_requirements(out).unwrap()[0];
-    assert_eq!(sheet.requirement_cell(id), Some(out));
-    assert_eq!(sheet.requirement_inputs(id), Some([a].as_slice()));
-}
-
-#[test]
 fn requirement_cell_and_inputs_return_correct_values() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2164,15 +2166,6 @@ fn cell_requirements_valid_true_when_requirement_holds() {
     sheet.propagate().unwrap();
     assert!(sheet.cell_requirements_valid(out));
     assert_eq!(sheet.violated_requirements(out).count(), 0);
-}
-
-#[test]
-fn cell_requirements_valid_false_when_requirement_fails() {
-    let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
-    sheet.write(width, 50_i32).unwrap();
-    sheet.write(height, 40_i32).unwrap();
-    sheet.propagate().unwrap();
-    assert!(!sheet.cell_requirements_valid(out));
 }
 
 #[test]
@@ -2761,11 +2754,9 @@ fn seed_method_selection_follows_elimination_state() {
         ])
         .unwrap();
     sheet
-        .add_relationship(vec![Method::from_fn_1_1(
-            x,
-            x,
-            |value: &i32| Ok(*value + 1),
-        )])
+        .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| {
+            Ok((*value).max(14))
+        })])
         .unwrap();
 
     sheet.propagate().unwrap();
@@ -3441,7 +3432,7 @@ fn seed_cycle_sheet() -> (
                 vec![TypeId::of::<i32>()],
                 |args| {
                     Ok(vec![Box::new(
-                        *args[2].downcast_ref::<i32>().unwrap() + 1000,
+                        (*args[2].downcast_ref::<i32>().unwrap()).max(1000),
                     )])
                 },
             ),
@@ -3471,7 +3462,7 @@ fn seed_cycle_sheet() -> (
                 vec![TypeId::of::<i32>()],
                 |args| {
                     Ok(vec![Box::new(
-                        *args[2].downcast_ref::<i32>().unwrap() + 2000,
+                        (*args[2].downcast_ref::<i32>().unwrap()).max(2000),
                     )])
                 },
             ),

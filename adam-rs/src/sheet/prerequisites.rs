@@ -91,3 +91,89 @@ impl Sheet {
             .collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Filter, MatchExpr, Method};
+
+    /// Omits all selected steps when there are no guards.
+    #[test]
+    fn empty_guard_cone_omits_unrelated_steps() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &i32| Ok(*v))])
+            .unwrap();
+        assert!(
+            sheet
+                .guard_prerequisite_steps(&[PlanStep::Method(rel, 0)])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(sheet.guard_prerequisite_steps(&[]).unwrap().is_empty());
+    }
+
+    /// Includes transitive filter arguments and a multi-output producer once, in plan order.
+    #[test]
+    fn prerequisite_cone_retains_order_and_deduplicates_producers() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(7_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        let filtered = sheet.add_cell(20_i32);
+        let unrelated = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::new(
+                vec![a],
+                vec![b, c],
+                vec![std::any::TypeId::of::<i32>()],
+                vec![std::any::TypeId::of::<i32>(); 2],
+                |values| {
+                    let value = *values[0].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(value), Box::new(value)])
+                },
+            )])
+            .unwrap();
+        sheet
+            .add_filter(
+                filtered,
+                Filter::from_fn_2([b, c], |v: &i32, lo: &i32, hi: &i32| {
+                    Ok((*v).clamp(*lo, *hi))
+                }),
+            )
+            .unwrap();
+        let unused = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, unrelated, |v: &i32| Ok(*v))])
+            .unwrap();
+        sheet
+            .add_conditional::<i32>(
+                MatchExpr::from_fn_2([filtered, c], |v: &i32, _: &i32| Ok(*v)),
+                vec![],
+                vec![],
+            )
+            .unwrap();
+        let order = [
+            PlanStep::Method(unused, 0),
+            PlanStep::Method(rel, 0),
+            PlanStep::FilterReclamp(filtered),
+        ];
+        assert_eq!(sheet.guard_prerequisite_steps(&order).unwrap(), order[1..]);
+    }
+
+    /// Does not recursively require a self-referencing producer's own output.
+    #[test]
+    fn self_input_does_not_add_a_prerequisite_cycle() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(7_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, a, |v: &i32| Ok((*v).max(0)))])
+            .unwrap();
+        sheet
+            .add_conditional::<i32>(MatchExpr::cell(a), vec![], vec![])
+            .unwrap();
+        let order = [PlanStep::Method(rel, 0)];
+        assert_eq!(sheet.guard_prerequisite_steps(&order).unwrap(), order);
+    }
+}

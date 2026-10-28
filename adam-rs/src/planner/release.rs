@@ -3,8 +3,8 @@
 //! [`resolve`] greedily releases cells in descending strength order, checking at each
 //! step whether a matching + acyclic assignment still exists with that cell (and every
 //! previously released cell) forbidden from being claimed. Self-referencing methods need
-//! no special handling here: a self-referencing output places no exclusive claim
-//! ([`super::matching::pure_outputs`]) and draws no self-dependency edge
+//! no special handling here: a self-referencing output is exclusively claimed but
+//! draws no self-dependency edge
 //! ([`super::digraph::build_digraph`]), so the same strength-lexicographic release finds
 //! the right *assignment*; the correct *values* then come from [`super::seed::evaluate_seeds`]
 //! at execution time, not from a value-aware planning choice (see
@@ -98,14 +98,12 @@ pub(crate) fn resolve(
     cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
 
     for &cell in &cells_sorted {
-        let mut candidate_released = released.clone();
-        candidate_released.insert(cell);
+        released.insert(cell);
 
-        if let Some(candidate) =
-            Assignment::solve_acyclic(relationships, active, &candidate_released)
-        {
-            released = candidate_released;
+        if let Some(candidate) = Assignment::solve_acyclic(relationships, active, &released) {
             current = candidate;
+        } else {
+            released.remove(&cell);
         }
     }
 

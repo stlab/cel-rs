@@ -1,6 +1,7 @@
 //! Value cells in the property model bipartite graph.
 //!
 //! Cells are accessed exclusively through [`crate::sheet::Sheet`].
+//! See the [graph example](crate::sheet) for registration, kinds and borrowed values.
 
 use std::any::{Any, TypeId};
 
@@ -12,10 +13,16 @@ use crate::requirement::RequirementId;
 
 new_key_type! {
     /// A stable handle to a cell in a [`crate::sheet::Sheet`].
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub struct CellId;
 }
 
 /// A cell's fixed role in the planner's per-round source/derived assignment.
+///
+/// # Examples
+/// See the [graph example](crate::sheet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellKind {
     /// May be a source or derived, chosen per round by the planner. Default kind.
@@ -27,6 +34,9 @@ pub enum CellKind {
 }
 
 /// Internal storage for a single value cell.
+///
+/// Both stored values have `type_id`; derived storage overrides source storage.
+/// The owning sheet maintains adjacency and policy identities for this cell.
 pub(crate) struct CellData {
     /// The value from the most recent `write()`/`add_cell`. Also written directly by
     /// `Sheet::propagate` for outputs that aren't shadowed (the common case: an ordinary
@@ -37,8 +47,8 @@ pub(crate) struct CellData {
     pub(crate) source: Box<dyn Any>,
     /// The value most recently produced by a method this round, if this cell was
     /// shadowed (a self-referencing output, or a pure output of a conditionally
-    /// registered relationship). Reset to `None` for every cell at the start of
-    /// every `Sheet::propagate` call, before planning begins.
+    /// registered relationship). Successful staging replaces old overrides at commit;
+    /// a precommit failure preserves the previously published values.
     pub(crate) derived: Option<Box<dyn Any>>,
     /// The `TypeId` of the value, fixed at cell creation.
     pub(crate) type_id: TypeId,
@@ -84,7 +94,7 @@ mod tests {
 
     #[test]
     fn cell_data_initial_state() {
-        let data = CellData {
+        let mut data = CellData {
             source: Box::new(42_i32),
             derived: None,
             type_id: TypeId::of::<i32>(),
@@ -109,6 +119,14 @@ mod tests {
         let y: i32 = 99;
         assert!((data.eq_fn)(&x, &x));
         assert!(!(data.eq_fn)(&x, &y));
+        data.derived = Some(Box::new(99_i32));
+        assert_eq!(data.effective().downcast_ref::<i32>(), Some(&99));
+        assert_eq!(data.source.downcast_ref::<i32>(), Some(&42));
+        assert!(!data.has_explicit_strength());
+        data.strength = 1u64 << 63;
+        assert!(data.has_explicit_strength());
+        data.strength = (1u64 << 63) - 1;
+        assert!(!data.has_explicit_strength());
     }
 
     #[test]

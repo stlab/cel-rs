@@ -32,8 +32,10 @@ fn storage<T: Clone>(count: usize, value: T) -> Result<Vec<T>, TemplateError> {
 
 /// Maps declared positional edges to live IDs.
 ///
+/// - Precondition: each slot belongs to the mapped recipe and indexes `cells`.
 /// - Complexity: O(e) time and space for e edges.
 fn edges(slots: &[CellSlot], cells: &[CellId]) -> Result<Vec<CellId>, TemplateError> {
+    debug_assert!(slots.iter().all(|slot| slot.index < cells.len()));
     let mut result = Vec::new();
     result
         .try_reserve(slots.len())
@@ -55,12 +57,19 @@ pub(super) fn signature_matches(sheet: &Sheet, ids: &[CellId], types: &[TypeId])
 
 /// Expands group ranges into distinct live relationship IDs in authored group order.
 ///
+/// - Precondition: each slot belongs to the mapped recipe and indexes `groups`;
+///   every selected group range indexes `all`.
 /// - Complexity: O(g + r) time and O(r) space for g groups and r members.
 pub(super) fn group_members(
     slots: &[RelationshipSlot],
     groups: &[Range<usize>],
     all: &[RelationshipId],
 ) -> Result<Vec<RelationshipId>, TemplateError> {
+    debug_assert!(slots.iter().all(|slot| {
+        groups
+            .get(slot.index)
+            .is_some_and(|group| group.start <= group.end && group.end <= all.len())
+    }));
     let count = slots
         .iter()
         .try_fold(0usize, |n, slot| n.checked_add(groups[slot.index].len()))
@@ -84,6 +93,11 @@ struct SourceFrame<'a> {
 }
 
 /// Holds local live mappings while replaying one occurrence in declaration order.
+///
+/// `next` separates entered items from pending items. Every entered cell has a live
+/// handle; unentered private cells retain the sentinel until construction. Completed
+/// group ranges refer to the instance's flattened relationship storage, including
+/// each inclusion's contiguous transitive members.
 struct LiveFrame<'a> {
     recipe: &'a SheetTemplate,
     cells: Vec<CellId>,
@@ -719,6 +733,83 @@ mod tests {
     use super::SOURCE_PREFLIGHT_VISITS;
     use crate::TemplateBuilder;
     use std::rc::Rc;
+
+    /// Validates complete positional signatures, including empty, foreign and mismatched inputs.
+    #[test]
+    fn signatures_check_arity_liveness_and_concrete_types() {
+        use super::{CellId, Sheet, TypeId, signature_matches};
+        let mut sheet = Sheet::new();
+        let number = sheet.add_cell(3_i32);
+        let flag = sheet.add_cell(true);
+        assert!(signature_matches(&sheet, &[], &[]));
+        assert!(signature_matches(
+            &sheet,
+            &[number, flag],
+            &[TypeId::of::<i32>(), TypeId::of::<bool>()]
+        ));
+        assert!(!signature_matches(&sheet, &[number], &[]));
+        assert!(!signature_matches(&sheet, &[], &[TypeId::of::<i32>()]));
+        assert!(!signature_matches(
+            &sheet,
+            &[number],
+            &[TypeId::of::<bool>()]
+        ));
+        assert!(!signature_matches(
+            &sheet,
+            &[CellId::default()],
+            &[TypeId::of::<i32>()]
+        ));
+    }
+
+    /// Maps live edges and complete inclusion ranges in the caller's requested order.
+    #[test]
+    fn local_storage_and_positional_mapping_preserve_order() {
+        use super::{
+            CellId, LiveFrame, Method, MethodRecipe, Sheet, TemplateError, edges, group_members,
+            storage,
+        };
+        assert_eq!(storage(0, 7_u8).unwrap(), []);
+        assert_eq!(storage(2, 7_u8).unwrap(), [7, 7]);
+        assert!(matches!(
+            storage(usize::MAX, 0_u8),
+            Err(TemplateError::Capacity)
+        ));
+        let mut builder = TemplateBuilder::new();
+        let a = builder.parameter::<i32>("a").unwrap();
+        let b = builder.parameter::<i32>("b").unwrap();
+        let group = builder
+            .relationship(vec![
+                MethodRecipe::new(
+                    std::slice::from_ref(&a),
+                    std::slice::from_ref(&b),
+                    |i, o| Ok(Method::from_fn_1_1(i[0], o[0], |v: &i32| Ok(*v))),
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+        let template = builder.finish().unwrap();
+        let frame = LiveFrame::new(&template, None, 0).unwrap();
+        assert_eq!(frame.cells, [CellId::default(); 2]);
+        assert_eq!(frame.groups.as_slice(), std::slice::from_ref(&(0..0)));
+        assert_eq!(frame.next, 0);
+        let mut sheet = Sheet::new();
+        let live_a = sheet.add_cell(3_i32);
+        let live_b = sheet.add_cell(0_i32);
+        let instance = template
+            .instantiate(&mut sheet, &[("a", live_a), ("b", live_b)])
+            .unwrap();
+        assert_eq!(edges(&[b, a], &[live_a, live_b]).unwrap(), [live_b, live_a]);
+        assert_eq!(
+            group_members(
+                &[group],
+                std::slice::from_ref(&(0..1)),
+                instance.relationships()
+            )
+            .unwrap(),
+            instance.relationships()
+        );
+        assert!(group_members(&[], &[], &[]).unwrap().is_empty());
+    }
 
     /// Checks work by distinct immutable specializations rather than expanded occurrences.
     #[test]

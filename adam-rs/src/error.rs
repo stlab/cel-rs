@@ -1,4 +1,17 @@
 //! The `Error` type returned by all fallible operations in this crate.
+//!
+//! ```
+//! use adam_rs::{CellId, Error, ErrorSite, Sheet};
+//! let mut sheet = Sheet::new();
+//! let value = sheet.add_cell(1_i32);
+//! assert!(matches!(sheet.read::<i32>(CellId::default()), Err(Error::InvalidId)));
+//! let source = sheet.add_source(0_i32);
+//! let error = sheet.add_relationship(vec![
+//!     adam_rs::Method::from_fn_1_1(value, source, |v: &i32| Ok(*v))
+//! ]).unwrap_err();
+//! assert!(matches!(error, Error::InvalidCellKind { .. }));
+//! assert!(error.sites().contains(&ErrorSite::Cell(source)));
+//! ```
 
 use crate::cell::CellId;
 use crate::relationship::RelationshipId;
@@ -8,6 +21,9 @@ use std::any::TypeId;
 /// source location. An `Error`'s `sites()` is an ordered list of these: the primary
 /// culprit first, followed by related context (e.g. the other method(s) and cell(s)
 /// involved in a structural conflict, or the remaining members of a cycle).
+///
+/// # Examples
+/// See the [error example](crate::error).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorSite {
@@ -25,6 +41,9 @@ pub enum ErrorSite {
 }
 
 /// Errors returned by `Sheet` operations and propagation.
+///
+/// # Examples
+/// See the [error example](crate::error).
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -172,6 +191,9 @@ pub enum Error {
 }
 
 impl std::fmt::Display for Error {
+    /// Describes the failed runtime contract and any underlying method failure.
+    ///
+    /// - Complexity: O(L) for L formatted characters, plus underlying error formatting.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::TypeMismatch {
@@ -226,6 +248,9 @@ impl Error {
     /// `sites[0]` is the primary culprit; further entries are ordered related context
     /// (for a cycle, the remaining members in loop order). Empty for variants that never
     /// track a site, or when none applies to this occurrence.
+    ///
+    /// # Examples
+    /// See the [error example](crate::error).
     pub fn sites(&self) -> &[ErrorSite] {
         match self {
             Error::TypeMismatch { sites, .. }

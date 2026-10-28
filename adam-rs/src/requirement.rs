@@ -4,6 +4,23 @@
 //! `Sheet::propagate` describes whether a cell's preconditions currently hold. A
 //! requirement's inputs may be any cells in the sheet, not only the cell it's attached to.
 //! See [`crate::sheet::Sheet::add_requirement`].
+//!
+//! ```
+//! use adam_rs::{Requirement, Sheet};
+//! use std::any::TypeId;
+//! let mut sheet = Sheet::new();
+//! let value = sheet.add_cell("ok!".to_string());
+//! let suffix = sheet.add_cell('!');
+//! sheet.add_requirement(value, Requirement::new(vec![value],
+//!     vec![TypeId::of::<String>()], |v| Ok(!v[0].downcast_ref::<String>().unwrap().is_empty())))?;
+//! sheet.add_requirement(value, Requirement::from_fn_1(value, |v: &String| Ok(!v.is_empty())))?;
+//! sheet.add_requirement(value, Requirement::from_fn_2([value, suffix],
+//!     |v: &String, suffix: &char| Ok(v.ends_with(*suffix))))?;
+//! sheet.propagate()?;
+//! assert!(sheet.cell_requirements_valid(value));
+//! assert_eq!(sheet.cell_requirements(value).unwrap().len(), 3);
+//! # Ok::<(), adam_rs::Error>(())
+//! ```
 
 use std::any::{Any, TypeId};
 
@@ -13,6 +30,9 @@ use crate::cell::CellId;
 
 new_key_type! {
     /// A stable handle to a requirement in a [`crate::sheet::Sheet`].
+    ///
+    /// # Examples
+    /// See the [predicate example](crate::requirement).
     pub struct RequirementId;
 }
 
@@ -25,6 +45,9 @@ type RequirementFn = Box<dyn Fn(&[&dyn Any]) -> Result<bool, anyhow::Error>>;
 /// immutable captured constants, with no externally observable side effects.
 /// Equal inputs produce equivalent results or errors. There is no guarantee that
 /// the predicate executes, or when or how often it executes.
+///
+/// # Examples
+/// See the [predicate example](crate::requirement).
 pub struct Requirement {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,
@@ -36,6 +59,9 @@ impl Requirement {
     ///
     /// - Precondition: `inputs.len() == input_types.len()`.
     /// - Precondition: `f` satisfies [`Requirement`]'s purity contract.
+    ///
+    /// # Examples
+    /// See the [predicate example](crate::requirement).
     pub fn new<F>(inputs: Vec<CellId>, input_types: Vec<TypeId>, f: F) -> Self
     where
         F: Fn(&[&dyn Any]) -> Result<bool, anyhow::Error> + 'static,
@@ -54,6 +80,9 @@ impl Requirement {
     /// its cell registration when passed to [`crate::sheet::Sheet::add_requirement`].
     ///
     /// - Precondition: `f` satisfies [`Requirement`]'s purity contract.
+    ///
+    /// # Examples
+    /// See the [predicate example](crate::requirement).
     pub fn from_fn_1<A, F>(input: CellId, f: F) -> Self
     where
         A: Any + 'static,
@@ -78,6 +107,9 @@ impl Requirement {
     /// [`crate::sheet::Sheet::add_requirement`].
     ///
     /// - Precondition: `f` satisfies [`Requirement`]'s purity contract.
+    ///
+    /// # Examples
+    /// See the [predicate example](crate::requirement).
     pub fn from_fn_2<A, B, F>(inputs: [CellId; 2], f: F) -> Self
     where
         A: Any + 'static,
@@ -110,6 +142,33 @@ pub(crate) struct RequirementData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Preserves heterogeneous binding order, false results and typed predicate failures.
+    #[test]
+    fn typed_adapters_preserve_order_and_errors() {
+        let mut sheet = crate::Sheet::new();
+        let a = sheet.add_cell(String::new());
+        let b = sheet.add_cell('!');
+        let predicate = Requirement::from_fn_2([a, b], |a: &String, b: &char| Ok(a.ends_with(*b)));
+        assert!((predicate.function)(&[&"yes!".to_string(), &'!']).unwrap());
+        assert!(!(predicate.function)(&[&"no?".to_string(), &'!']).unwrap());
+        let one = Requirement::from_fn_1(a, |_: &String| Err(std::io::Error::other("one").into()));
+        let two = Requirement::from_fn_2([a, b], |_: &String, _: &char| {
+            Err(std::io::Error::other("two").into())
+        });
+        assert!(
+            (one.function)(&[&String::new()])
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
+        assert!(
+            (two.function)(&[&String::new(), &'!'])
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
+    }
 
     #[test]
     fn requirement_id_is_copy() {

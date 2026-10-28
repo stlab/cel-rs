@@ -27,6 +27,8 @@ enum PlanPhase {
 /// Owns immutable structural artifacts for one selected phase and active set.
 ///
 /// Values and seed evaluation state never survive a propagation through this object.
+/// The active set, certificate, provenance, seed recipes, signatures and prerequisites
+/// describe the same unchanged graph and selected assignment.
 pub(super) struct PreparedPlan {
     pub(super) plan: Plan,
     pub(super) active: HashSet<RelationshipId>,

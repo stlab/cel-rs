@@ -13,12 +13,11 @@ use crate::{
 };
 
 /// Returns the cells `method` writes but does not read: the cells that must not
-/// already be determined for the method to be eligible, and that become claimed by
-/// whichever relationship selects it.
+/// already be determined for the method to be eligible in pure-output elimination.
 ///
 /// Self-referencing cells (present in both `inputs` and `outputs`) are excluded: they
-/// are read at their pre-execution value, so a self-referencing method places no
-/// exclusive claim on them.
+/// are read at their pre-execution value. Matching still exclusively claims every
+/// output, including self-referencing outputs.
 ///
 /// - Complexity: O(K²) where K = cells per method (`inputs.contains` scans linearly).
 pub(crate) fn pure_outputs(method: &Method) -> HashSet<CellId> {
@@ -39,6 +38,9 @@ enum Change {
 
 /// One method chosen per active relationship, and which relationship currently claims
 /// each output cell (self-referencing outputs included).
+///
+/// Every chosen method's outputs occur in `claimed`, owned by that relationship;
+/// every claim corresponds to an output of its owner's chosen method.
 #[derive(Default, Debug)]
 pub(crate) struct Assignment {
     pub(crate) chosen: HashMap<RelationshipId, usize>,
@@ -371,12 +373,7 @@ mod tests {
             .unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         let assignment = Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
-        let unique: HashSet<_> = assignment.claimed.values().collect();
-        assert_eq!(
-            unique.len(),
-            assignment.claimed.len(),
-            "no two relationships may claim the same cell"
-        );
+        assert_chosen_claims_consistent(&assignment, &sheet.relationships);
     }
 
     #[test]
@@ -474,8 +471,7 @@ mod tests {
         let active: HashSet<_> = [r1, r2, r3].into_iter().collect();
         let assignment = Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
         assert_eq!(assignment.chosen.len(), 3);
-        let unique: HashSet<_> = assignment.claimed.values().collect();
-        assert_eq!(unique.len(), assignment.claimed.len());
+        assert_chosen_claims_consistent(&assignment, &sheet.relationships);
     }
 
     /// Asserts that `assignment` is internally consistent: for every relationship's
@@ -489,6 +485,12 @@ mod tests {
         assignment: &Assignment,
         relationships: &SlotMap<RelationshipId, RelationshipData>,
     ) {
+        let expected_count: usize = assignment
+            .chosen
+            .iter()
+            .map(|(&rel, &idx)| relationships[rel].methods[idx].outputs.len())
+            .sum();
+        assert_eq!(assignment.claimed.len(), expected_count);
         for (&rel, &idx) in &assignment.chosen {
             for &cell in &relationships[rel].methods[idx].outputs {
                 assert_eq!(

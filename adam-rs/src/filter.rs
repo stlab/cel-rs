@@ -5,6 +5,31 @@
 //! value (see [`crate::sheet::Sheet::add_filter`]), and is separately re-evaluated as
 //! a non-gating diagnostic against a value a relationship's method derives for that
 //! cell (also in [`crate::sheet::Sheet::propagate`]).
+//!
+//! ```
+//! use adam_rs::{Filter, Sheet};
+//! use std::any::TypeId;
+//! let mut sheet = Sheet::new();
+//! let bound = sheet.add_source(10_i32);
+//! let low = sheet.add_source(0_i32);
+//! let raw = sheet.add_cell(5_i32);
+//! let zero = sheet.add_cell(-5_i32);
+//! let one = sheet.add_cell(20_i32);
+//! let two = sheet.add_cell(30_i32);
+//! sheet.add_filter(raw, Filter::new(TypeId::of::<i32>(), vec![], vec![],
+//!     |v, _| Ok(Box::new(*v.downcast_ref::<i32>().unwrap()))))?;
+//! sheet.add_filter(zero, Filter::from_fn_0(|v: &i32| Ok((*v).max(0))))?;
+//! sheet.add_filter(one, Filter::from_fn_1(bound, |v: &i32, hi: &i32| Ok((*v).min(*hi))))?;
+//! sheet.add_filter(two, Filter::from_fn_2([low, bound],
+//!     |v: &i32, lo: &i32, hi: &i32| Ok((*v).clamp(*lo, *hi))))?;
+//! sheet.propagate()?;
+//! assert_eq!(*sheet.read::<i32>(raw)?, 5);
+//! assert_eq!(*sheet.read::<i32>(zero)?, 0);
+//! assert_eq!(*sheet.read::<i32>(one)?, 10);
+//! assert_eq!(*sheet.read::<i32>(two)?, 10);
+//! assert_eq!(*sheet.source::<i32>(two)?, 30);
+//! # Ok::<(), adam_rs::Error>(())
+//! ```
 
 use std::any::{Any, TypeId};
 
@@ -22,6 +47,9 @@ type FilterFn = Box<dyn Fn(&dyn Any, &[&dyn Any]) -> Result<Box<dyn Any>, anyhow
 /// kind identically at write/propagate time — `FilterKind` is purely informational, queried by
 /// consumers like `begin`'s UI that want to render a specialized editor without inspecting the
 /// filter's function.
+///
+/// # Examples
+/// See the live range filter in the [graph example](crate::sheet).
 pub enum FilterKind {
     /// The filter's expression wasn't a recognized structural form.
     Opaque,
@@ -55,9 +83,17 @@ pub enum FilterKind {
 /// Equal inputs produce equivalent outputs or errors. There is no guarantee that
 /// a callback executes, or when or how often it executes. This includes range-bound
 /// evaluators; the conforming callback must also be idempotent.
+/// Holding dynamic arguments fixed, conforming the returned value again produces
+/// an equivalent value.
+///
+/// # Examples
+/// See the [filter example](crate::filter).
 pub struct Filter(pub(crate) FilterData);
 
 /// Internal storage for a single filter.
+///
+/// Argument identities and declared types have equal lengths. The conforming
+/// callback returns `value_type`; the sheet validates those identities at attachment.
 pub(crate) struct FilterData {
     /// The `TypeId` of the value this filter operates on, validated against its cell's
     /// registered type by `add_filter`.
@@ -77,8 +113,13 @@ impl Filter {
     /// type-erased function.
     ///
     /// - Precondition: `args.len() == arg_types.len()`.
-    /// - Precondition: `f` returns a value whose runtime type matches `value_type`.
     /// - Precondition: `f` satisfies [`Filter`]'s purity and idempotence contract.
+    ///
+    /// Propagation records a soft [`FilterViolation::Failed`] when a successful
+    /// callback result has a different runtime type from `value_type`.
+    ///
+    /// # Examples
+    /// See the [filter example](crate::filter).
     #[must_use]
     pub fn new<F>(value_type: TypeId, args: Vec<CellId>, arg_types: Vec<TypeId>, f: F) -> Self
     where
@@ -100,6 +141,9 @@ impl Filter {
     /// its cell registration when passed to [`crate::sheet::Sheet::add_filter`].
     ///
     /// - Precondition: `f` satisfies [`Filter`]'s purity and idempotence contract.
+    ///
+    /// # Examples
+    /// See the [filter example](crate::filter).
     #[must_use]
     pub fn from_fn_0<T, F>(f: F) -> Self
     where
@@ -120,6 +164,9 @@ impl Filter {
     /// against its cell registration when passed to [`crate::sheet::Sheet::add_filter`].
     ///
     /// - Precondition: `f` satisfies [`Filter`]'s purity and idempotence contract.
+    ///
+    /// # Examples
+    /// See the [filter example](crate::filter).
     #[must_use]
     pub fn from_fn_1<A, T, F>(arg: CellId, f: F) -> Self
     where
@@ -150,6 +197,9 @@ impl Filter {
     /// [`crate::sheet::Sheet::add_filter`].
     ///
     /// - Precondition: `f` satisfies [`Filter`]'s purity and idempotence contract.
+    ///
+    /// # Examples
+    /// See the [filter example](crate::filter).
     #[must_use]
     pub fn from_fn_2<A, B, T, F>(args: [CellId; 2], f: F) -> Self
     where
@@ -189,6 +239,9 @@ impl Filter {
     ///   matching `value_type`.
     /// - Precondition: `clamp` and `bounds` satisfy [`Filter`]'s purity contract;
     ///   `clamp` is also idempotent.
+    ///
+    /// # Examples
+    /// See the live range filter in the [graph example](crate::sheet).
     #[must_use]
     pub fn range<F, B>(
         value_type: TypeId,
@@ -218,6 +271,20 @@ impl Filter {
 /// derived, rather than a value written externally.
 ///
 /// See [`crate::sheet::Sheet::filter_violation`].
+///
+/// # Examples
+/// ```
+/// use adam_rs::{Filter, FilterViolation, Method, Sheet};
+/// let mut sheet = Sheet::new();
+/// let input = sheet.add_source(20_i32);
+/// let output = sheet.add_cell(0_i32);
+/// sheet.add_filter(output, Filter::from_fn_0(|v: &i32| Ok((*v).min(10))))?;
+/// sheet.add_relationship(vec![Method::from_fn_1_1(input, output, |v: &i32| Ok(*v))])?;
+/// sheet.propagate()?;
+/// assert!(matches!(sheet.filter_violation(output), Some(FilterViolation::NotConformed)));
+/// assert_eq!(*sheet.read::<i32>(output)?, 20);
+/// # Ok::<(), adam_rs::Error>(())
+/// ```
 #[derive(Debug)]
 pub enum FilterViolation {
     /// The filter succeeded but its output differs from the cell's current value. Only
@@ -245,12 +312,14 @@ mod tests {
 
     #[test]
     fn from_fn_0_stores_correct_value_type_and_computes_value() {
-        let filter = Filter::from_fn_0(|x: &i32| Ok(*x * 2));
+        let filter = Filter::from_fn_0(|x: &i32| Ok((*x).max(10)));
         assert_eq!(filter.0.value_type, TypeId::of::<i32>());
         assert!(filter.0.args.is_empty());
         let x: i32 = 5;
         let result = (filter.0.function)(&x, &[]).unwrap();
         assert_eq!(*result.downcast_ref::<i32>().unwrap(), 10);
+        let repeated = (filter.0.function)(result.as_ref(), &[]).unwrap();
+        assert_eq!(repeated.downcast_ref::<i32>(), result.downcast_ref::<i32>());
     }
 
     #[test]
@@ -294,10 +363,12 @@ mod tests {
 
     #[test]
     fn from_fn_0_reports_the_error_a_failing_function_returns() {
-        let filter = Filter::from_fn_0(|_x: &i32| Err(anyhow::anyhow!("cannot conform")));
+        let filter =
+            Filter::from_fn_0(|_x: &i32| Err(std::io::Error::other("cannot conform").into()));
         let x: i32 = 1;
         let err = (filter.0.function)(&x, &[]).unwrap_err();
         assert_eq!(err.to_string(), "cannot conform");
+        assert!(err.downcast_ref::<std::io::Error>().is_some());
     }
 
     #[test]
@@ -307,6 +378,47 @@ mod tests {
             Ok(Box::new(*v) as Box<dyn std::any::Any>)
         });
         assert_eq!(filter.0.value_type, TypeId::of::<i32>());
+    }
+
+    /// Preserves heterogeneous argument order and typed failures in dynamic adapters.
+    #[test]
+    fn typed_dynamic_adapters_preserve_order_and_errors() {
+        let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
+        let a = map.insert(());
+        let b = map.insert(());
+        let filter = Filter::from_fn_2([a, b], |v: &String, prefix: &String, suffix: &char| {
+            if v.starts_with(prefix) && v.ends_with(*suffix) {
+                Ok(v.clone())
+            } else {
+                Ok(format!("{prefix}{v}{suffix}"))
+            }
+        });
+        let result =
+            (filter.0.function)(&"value".to_string(), &[&"pre:".to_string(), &'!']).unwrap();
+        assert_eq!(result.downcast_ref::<String>().unwrap(), "pre:value!");
+        let repeated = (filter.0.function)(result.as_ref(), &[&"pre:".to_string(), &'!']).unwrap();
+        assert_eq!(
+            repeated.downcast_ref::<String>(),
+            result.downcast_ref::<String>()
+        );
+        let one = Filter::from_fn_1(a, |_: &i32, _: &bool| {
+            Err(std::io::Error::other("one").into())
+        });
+        let two = Filter::from_fn_2([a, b], |_: &i32, _: &bool, _: &char| {
+            Err(std::io::Error::other("two").into())
+        });
+        assert!(
+            (one.0.function)(&1_i32, &[&true])
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
+        assert!(
+            (two.0.function)(&1_i32, &[&true, &'!'])
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
     }
 
     #[test]

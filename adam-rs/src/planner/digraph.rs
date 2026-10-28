@@ -35,7 +35,8 @@ pub(crate) enum Node {
 /// value that same round, so any other relationship reading it as a plain input
 /// genuinely depends on this one executing first).
 ///
-/// - Complexity: O(R · K) where R = assigned relationships, K = cells per chosen method.
+/// - Complexity: O(R · K²) time and O(R · K) space where R = assigned relationships,
+///   K = cells per chosen method; output membership scans linearly for each input.
 pub(crate) fn build_digraph(
     assignment: &Assignment,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
@@ -102,7 +103,7 @@ pub(crate) fn add_filter_edges(
 /// Returns `true` if `assignment`'s induced digraph has no non-trivial strongly
 /// connected component (every relationship can be executed in some valid order).
 ///
-/// - Complexity: O(R · K) (dominated by [`build_digraph`]; SCC is O(V + E) on the
+/// - Complexity: O(R · K²) time (dominated by [`build_digraph`]; sorting is O(V + E) on the
 ///   resulting graph).
 pub(crate) fn is_acyclic(
     assignment: &Assignment,

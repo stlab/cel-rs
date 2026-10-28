@@ -70,6 +70,22 @@ pub(crate) use seed::{
 /// `docs/superpowers/specs/2026-09-27-adam-rs-planner-generalization-design.md` §3.3.
 pub(crate) type Seeds = HashMap<CellId, Rc<dyn Any>>;
 
+/// Returns whether some acyclic assignment leaves `cell` unclaimed under `active`.
+///
+/// Unlike forced pure outputs, this includes exclusive self-referencing claims.
+///
+/// - Precondition: every active relationship belongs to `relationships`.
+/// - Complexity: One acyclic-assignment search, exponential in active relationships
+///   in the worst case; see [`matching::Assignment::solve_acyclic`].
+pub(crate) fn can_be_source(
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+    cell: CellId,
+) -> bool {
+    debug_assert!(active.iter().all(|id| relationships.contains_key(*id)));
+    matching::Assignment::solve_acyclic(relationships, active, &HashSet::from([cell])).is_some()
+}
+
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
 /// source cell's filter against its (now-settled) current argument values.
 ///
@@ -109,6 +125,9 @@ pub(crate) struct Plan {
 /// value-blind: a self-referencing chain reaches the correct values not by choosing a
 /// value-aware assignment, but by [`evaluate_seeds`] reconstructing each self-referencing
 /// input's value at execution time.
+///
+/// - Precondition: `Sheet::validate` has established static filter/guard independence
+///   for this graph, and all active relationships belong to `relationships`.
 ///
 /// # Errors
 ///
@@ -315,6 +334,36 @@ mod tests {
     use crate::planner::PlanStep;
     use crate::{Error, Filter, Method, Sheet};
     use std::collections::HashSet;
+
+    /// Distinguishes releasable outputs from mandatory exclusive self-referencing claims.
+    #[test]
+    fn source_eligibility_includes_all_output_claims() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(2_i32);
+        assert!(super::can_be_source(
+            &sheet.relationships,
+            &HashSet::new(),
+            a
+        ));
+        let relation = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+                Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+            ])
+            .unwrap();
+        let active = HashSet::from([relation]);
+        assert!(super::can_be_source(&sheet.relationships, &active, a));
+        assert!(super::can_be_source(&sheet.relationships, &active, b));
+        let self_ref = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, a, |v: &i32| Ok((*v).max(0)))])
+            .unwrap();
+        assert!(!super::can_be_source(
+            &sheet.relationships,
+            &HashSet::from([self_ref]),
+            a
+        ));
+    }
 
     // Propagation-behavior tests live in the integration tests.
 
@@ -740,14 +789,21 @@ mod tests {
             Error::Cycle { sites } => sites.clone(),
             other => panic!("{other:?}"),
         };
-        let rels: std::collections::HashSet<_> = sites
-            .iter()
-            .filter_map(|s| match s {
-                ErrorSite::Relationship(r) => Some(*r),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(rels, [r1, r2].into_iter().collect());
-        assert!(sites.iter().any(|s| matches!(s, ErrorSite::Cell(_))));
+        let expected = [
+            ErrorSite::Cell(x),
+            ErrorSite::Relationship(r2),
+            ErrorSite::Cell(y),
+            ErrorSite::Relationship(r1),
+        ];
+        assert_eq!(sites.len(), expected.len());
+        assert!(
+            (0..expected.len()).any(|rotation| {
+                sites
+                    .iter()
+                    .enumerate()
+                    .all(|(i, site)| *site == expected[(i + rotation) % expected.len()])
+            }),
+            "{sites:?}"
+        );
     }
 }
