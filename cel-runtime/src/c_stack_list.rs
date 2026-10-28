@@ -91,12 +91,25 @@ pub struct CStackList<H, T: CStackListHeadLimit>(pub T, pub H);
 /// ```
 pub trait CStackListHeadLimit: sealed::Layout {
     /// The offset to the _end_ of the head element.
+    ///
+    /// # Examples
+    /// See the [`CStackListHeadLimit`] example.
     const HEAD_LIMIT: usize;
 }
 
 /// Indicates whether the head element is padded to satisfy alignment.
+///
+/// # Examples
+/// ```
+/// use cel_runtime::{CStackList, CStackListHeadPadded, CNil};
+/// type ByteStack = CStackList<u8, CNil<()>>;
+/// assert!(!ByteStack::HEAD_PADDED);
+/// ```
 pub trait CStackListHeadPadded: CStackListHeadLimit {
     /// Whether the head element is padded to the next alignment boundary.
+    ///
+    /// # Examples
+    /// See the [`CStackListHeadPadded`] example.
     const HEAD_PADDED: bool;
 }
 
@@ -619,6 +632,7 @@ mod tests {
         assert!(one == one.clone());
     }
 
+    /// Preserves heterogeneous native-tuple field order, including the empty tuple.
     #[test]
     fn into_c_stack_list() {
         let list = (1, 2.5, 3, 4, "world", "Hello").into_c_stack_list();
@@ -638,6 +652,7 @@ mod tests {
         assert_eq!(().into_c_stack_list(), CNil(()));
     }
 
+    /// Borrows each heterogeneous field at its type-checked source index.
     #[test]
     fn index() {
         let list = (1, 2.5, "Hello").into_c_stack_list();
@@ -656,35 +671,44 @@ mod tests {
         assert_eq!(format!("{:?}", ().into_c_stack_list()), "()");
     }
 
+    /// Indexes a borrowed suffix relative to its new logical beginning.
     #[test]
     fn index_range_from() {
         let list = (1, 2.5, "Hello").into_c_stack_list();
         assert_eq!(list[U1::new()..][U1::new()], "Hello");
     }
 
+    /// Borrows an exclusive prefix without changing the retained fields.
     #[test]
     fn index_range_to() {
         let list = (1, 2.5, "Hello").into_c_stack_list();
         assert_eq!(list[..U2::new()][U1::new()], 2.5);
     }
 
+    /// Resolves each logical field's Rust type from its type-level index.
     #[test]
     fn index_type() {
         use std::any::type_name;
 
+        /// Describes the heterogeneous canonical source list.
         type List = <(i32, f64, &'static str) as IntoList>::Output<CNil<()>>;
+        /// Selects the first field's concrete type.
         type Zero = Item<List, U0>;
+        /// Selects the second field's concrete type.
         type One = Item<List, U1>;
+        /// Selects the third field's concrete type.
         type Two = Item<List, U2>;
         assert_eq!(type_name::<Zero>(), "i32");
         assert_eq!(type_name::<One>(), "f64");
         assert_eq!(type_name::<Two>(), "&str");
     }
 
+    /// Preserves the documented tail-first C representation of owned fields.
     #[test]
     fn cstack_list() {
         let list = CStackList(CNil(()), 32i32).push("Hello").push(42.5);
         // Test that we can cast to a C struct and read values
+        /// Mirrors the three fields' public tail-first C layout.
         #[repr(C)]
         struct TestStruct(i32, &'static str, f64);
 

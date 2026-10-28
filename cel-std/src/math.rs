@@ -186,6 +186,7 @@ mod tests {
         let mut lookup = OpLookup::new();
         install(&mut lookup);
         let span = Span::call_site();
+        /// Checks extrema and clamp dispatch for each listed numeric representation.
         macro_rules! check {
             ([$($t:ty),+ $(,)?]) => { $(
                 let mut min = DynSegment::new::<()>();
@@ -216,6 +217,7 @@ mod tests {
         Ok(())
     }
 
+    /// Selects the smaller signed operand through installed callable dispatch.
     #[test]
     fn min_returns_the_smaller_of_two_signed_operands() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -233,6 +235,7 @@ mod tests {
         Ok(())
     }
 
+    /// Selects the smaller unsigned operand through installed callable dispatch.
     #[test]
     fn min_returns_the_smaller_of_two_unsigned_operands() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -250,6 +253,7 @@ mod tests {
         Ok(())
     }
 
+    /// Selects the numeric floating-point minimum when the other operand is NaN.
     #[test]
     fn min_avoids_nan_when_exactly_one_float_operand_is_nan() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -267,6 +271,7 @@ mod tests {
         Ok(())
     }
 
+    /// Selects the larger signed operand through installed callable dispatch.
     #[test]
     fn max_returns_the_larger_of_two_signed_operands() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -284,6 +289,7 @@ mod tests {
         Ok(())
     }
 
+    /// Selects the larger unsigned operand through installed callable dispatch.
     #[test]
     fn max_returns_the_larger_of_two_unsigned_operands() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -301,6 +307,7 @@ mod tests {
         Ok(())
     }
 
+    /// Selects the larger floating-point operand through installed callable dispatch.
     #[test]
     fn max_returns_the_larger_of_two_float_operands() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -318,6 +325,7 @@ mod tests {
         Ok(())
     }
 
+    /// Retains a signed value already inside its inclusive clamp bounds.
     #[test]
     fn clamp_bounds_a_value_inside_its_range_unchanged() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -342,6 +350,7 @@ mod tests {
         Ok(())
     }
 
+    /// Raises a signed value below its clamp range to the lower bound.
     #[test]
     fn clamp_bounds_a_value_below_its_range_up_to_lo() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -366,6 +375,7 @@ mod tests {
         Ok(())
     }
 
+    /// Lowers a signed value above its clamp range to the upper bound.
     #[test]
     fn clamp_bounds_a_value_above_its_range_down_to_hi() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -390,6 +400,7 @@ mod tests {
         Ok(())
     }
 
+    /// Rejects reversed clamp bounds through the runtime error channel.
     #[test]
     fn clamp_errs_when_lo_is_greater_than_hi() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -416,6 +427,7 @@ mod tests {
         Ok(())
     }
 
+    /// Rejects a NaN clamp bound through the runtime error channel.
     #[test]
     fn clamp_errs_when_a_bound_is_nan() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -442,6 +454,7 @@ mod tests {
         Ok(())
     }
 
+    /// Applies inclusive clamp bounds to an unsigned operand.
     #[test]
     fn clamp_bounds_an_unsigned_integer_correctly() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -466,6 +479,7 @@ mod tests {
         Ok(())
     }
 
+    /// Retains a floating-point value already inside its clamp bounds.
     #[test]
     fn clamp_bounds_a_float_value_inside_its_range_unchanged() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -490,6 +504,7 @@ mod tests {
         Ok(())
     }
 
+    /// Returns the positive magnitude of a representable negative signed operand.
     #[test]
     fn abs_returns_the_absolute_value_of_a_negative_signed_integer() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -506,6 +521,7 @@ mod tests {
         Ok(())
     }
 
+    /// Reports an unrepresentable signed magnitude as a runtime error.
     #[test]
     fn abs_errs_on_signed_integer_overflow() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -524,6 +540,7 @@ mod tests {
         Ok(())
     }
 
+    /// Returns the positive magnitude of a negative floating-point operand.
     #[test]
     fn abs_returns_the_absolute_value_of_a_negative_float() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -540,6 +557,7 @@ mod tests {
         Ok(())
     }
 
+    /// Returns the negative unit sign for a negative signed operand.
     #[test]
     fn signum_of_a_negative_signed_integer_is_minus_one() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -562,6 +580,7 @@ mod tests {
         Ok(())
     }
 
+    /// Preserves NaN through floating-point sign calculation.
     #[test]
     fn signum_of_a_nan_float_is_nan() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -584,6 +603,7 @@ mod tests {
         Ok(())
     }
 
+    /// Returns NaN for the square root of a negative floating-point operand.
     #[test]
     fn sqrt_of_a_negative_float_is_nan() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -606,6 +626,7 @@ mod tests {
         Ok(())
     }
 
+    /// Returns the positive square root of a positive floating-point operand.
     #[test]
     fn sqrt_of_a_positive_float_returns_the_positive_root() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -628,6 +649,7 @@ mod tests {
         Ok(())
     }
 
+    /// Rounds a floating-point operand toward negative infinity.
     #[test]
     fn floor_rounds_a_float_toward_negative_infinity() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -650,6 +672,7 @@ mod tests {
         Ok(())
     }
 
+    /// Rounds a floating-point operand toward positive infinity.
     #[test]
     fn ceil_rounds_a_float_toward_positive_infinity() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -672,6 +695,7 @@ mod tests {
         Ok(())
     }
 
+    /// Removes the fractional part of a floating-point operand toward zero.
     #[test]
     fn trunc_rounds_a_float_toward_zero() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -694,6 +718,7 @@ mod tests {
         Ok(())
     }
 
+    /// Rejects the unavailable legacy rounding name during expression compilation.
     #[test]
     fn round_is_not_a_standard_library_function() {
         let mut lookup = OpLookup::new();
@@ -706,6 +731,7 @@ mod tests {
         );
     }
 
+    /// Rounds a halfway value toward the nearest even integer.
     #[test]
     fn round_ties_even_rounds_halfway_values_to_the_nearest_even_integer() -> Result<()> {
         let mut lookup = OpLookup::new();
@@ -718,6 +744,7 @@ mod tests {
         Ok(())
     }
 
+    /// Returns the signed fractional part through parsed callable dispatch.
     #[test]
     fn fract_returns_the_fractional_part_of_a_float() -> Result<()> {
         let mut lookup = OpLookup::new();

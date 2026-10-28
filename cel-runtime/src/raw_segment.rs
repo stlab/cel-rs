@@ -784,6 +784,7 @@ mod tests {
         assert_eq!(*destroyed.borrow(), [0, 1, 2]);
     }
 
+    /// Returns the value produced by a nullary instruction.
     #[test]
     fn nullary_operation() {
         let mut segment = RawSegment::new();
@@ -793,6 +794,7 @@ mod tests {
         }
     }
 
+    /// Replaces a pushed scalar with its unary-operation result.
     #[test]
     fn unary_operation() {
         let mut segment = RawSegment::new();
@@ -803,6 +805,7 @@ mod tests {
         }
     }
 
+    /// Consumes two pushed scalars and returns the binary-operation result.
     #[test]
     fn binary_operation() {
         let mut segment = RawSegment::new();
@@ -814,6 +817,7 @@ mod tests {
         }
     }
 
+    /// Consumes three pushed scalars and returns the ternary-operation result.
     #[test]
     fn ternary_operation() {
         let mut segment = RawSegment::new();
@@ -826,6 +830,7 @@ mod tests {
         }
     }
 
+    /// Threads intermediate results through composed nullary, unary and binary instructions.
     #[test]
     fn complex_chain() {
         let mut segment = RawSegment::new();

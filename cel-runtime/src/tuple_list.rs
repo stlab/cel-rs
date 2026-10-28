@@ -198,6 +198,7 @@ mod tests {
             assert!(iter.by_ref().eq(ids.iter().copied()));
             assert_eq!(iter.next(), None);
         }
+        /// Describes the same source fields in the other canonical list family.
         type Canonical = <(u32, f64, &'static str) as crate::IntoCStackList>::Output;
         let mut canonical = TypeIdIterator::<Canonical>::default();
         assert!(canonical.by_ref().eq(ids));
@@ -206,11 +207,13 @@ mod tests {
         assert_eq!(TypeIdIterator::<crate::CNil<()>>::new().next(), None);
     }
 
+    /// Constructs the empty tuple-list identity.
     #[test]
     fn empty_list() {
         let () = <()>::empty();
     }
 
+    /// Moves empty and heterogeneous native tuples into logical source order.
     #[test]
     fn into_list() {
         let () = ().into_tuple_list();
@@ -221,12 +224,14 @@ mod tests {
         );
     }
 
+    /// Prepends a value while preserving every existing field.
     #[test]
     fn push() {
         assert_eq!(().push_first(1), (1, ()));
         assert_eq!((1, 2, 3).into_tuple_list().push(4), (4, (1, (2, (3, ())))));
     }
 
+    /// Concatenates two lists without reversing either sequence.
     #[test]
     fn append() {
         assert_eq!(
@@ -237,11 +242,13 @@ mod tests {
         );
     }
 
+    /// Reverses logical source order while retaining every value.
     #[test]
     fn reverse() {
         assert_eq!((1, 2, 3).into_tuple_list().reverse(), (3, (2, (1, ()))));
     }
 
+    /// Accounts for empty, singleton, and multiple-field logical lists.
     #[test]
     fn list_length() {
         assert_eq!(<()>::LENGTH, 0);
@@ -249,6 +256,7 @@ mod tests {
         assert_eq!(<(i32, (f64, ()))>::LENGTH, 2);
     }
 
+    /// Borrows each heterogeneous field at its type-checked source index.
     #[test]
     fn list_index() {
         let list = (1, 2.5, "Hello").into_tuple_list();
@@ -257,6 +265,7 @@ mod tests {
         assert_eq!(*list.index(U2::new()), "Hello");
     }
 
+    /// Borrows each suffix, including the empty suffix at the terminal index.
     #[test]
     fn list_range_from_index() {
         let list = (1, 2.5, "Hello").into_tuple_list();

@@ -21,6 +21,20 @@ use std::result::Result::Ok;
 pub trait StackResult: List + CStackListHeadLimit {
     /// Moves the final result out, or returns the empty-stack marker.
     ///
+    /// - Complexity: O(s + p) time for s head bytes and p head-padding bytes;
+    ///   O(s) result storage.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{CStackList, CNil, RawStack, StackResult};
+    /// type ResultStack = CStackList<String, CNil<()>>;
+    /// let mut stack = RawStack::with_base_alignment(align_of::<String>());
+    /// stack.push(String::from("moved"));
+    /// let result = unsafe { ResultStack::take_result(&mut stack) };
+    /// assert_eq!(result, "moved");
+    /// assert_eq!(stack.len(), 0);
+    /// ```
+    ///
     /// # Safety
     /// The raw stack's live values must match this type-level stack exactly.
     unsafe fn take_result(stack: &mut RawStack) -> Self::Head;
@@ -462,6 +476,7 @@ mod tests {
         Ok(())
     }
 
+    /// Returns the empty-stack marker from an instruction-free nullary segment.
     #[test]
     fn unit_result() {
         let segment = Segment::new();
@@ -484,17 +499,21 @@ mod tests {
         assert!(two.call((1, String::from("two"))).is_ok());
     }
 
+    /// Releases the live intermediate owner when a later nullary operation fails.
     #[test]
     fn drop_on_error() {
+        /// Counts independent live owners through a shared destruction log.
         struct DropCounter(Arc<AtomicUsize>);
 
         impl Drop for DropCounter {
+            /// Records this owner's destruction once.
             fn drop(&mut self) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
 
         impl Clone for DropCounter {
+            /// Creates another independently dropped owner sharing the observation counter.
             fn clone(&self) -> Self {
                 DropCounter(self.0.clone())
             }
@@ -514,6 +533,7 @@ mod tests {
         assert_eq!(drop_count.load(Ordering::SeqCst), 1); // The DropCounter from op0 was dropped
     }
 
+    /// Propagates a unary parsing error without invoking the dependent operation.
     #[test]
     fn op1r_error_does_not_panic() {
         let parse_and_double = Segment::<(&str,)>::new()
@@ -524,17 +544,21 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Destroys the remaining owned intermediate once after a unary operation fails.
     #[test]
     fn op1r_drops_remaining_stack_exactly_once_on_error() {
+        /// Counts independent live owners through a shared destruction log.
         struct DropCounter(Arc<AtomicUsize>);
 
         impl Drop for DropCounter {
+            /// Records this owner's destruction once.
             fn drop(&mut self) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
 
         impl Clone for DropCounter {
+            /// Creates another independently dropped owner sharing the observation counter.
             fn clone(&self) -> Self {
                 DropCounter(self.0.clone())
             }
@@ -555,6 +579,7 @@ mod tests {
         assert_eq!(drop_count.load(Ordering::SeqCst), 1); // The DropCounter was dropped exactly once
     }
 
+    /// Preserves heterogeneous source-argument order through a binary operation.
     #[test]
     fn binary_operation_args_of_different_types() {
         let result = Segment::new()
@@ -578,6 +603,7 @@ mod tests {
         assert_eq!(result.unwrap(), "104");
     }
 
+    /// Passes a borrowed input through length calculation and formatted output.
     #[test]
     fn chain_operations() {
         let result = Segment::<(&str,)>::new()
