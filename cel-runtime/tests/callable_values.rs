@@ -50,9 +50,27 @@ fn array(_: &CNil<()>) -> anyhow::Result<Array<i32>> {
 
 type ArrayArgs = <Cons<ArrayOf<Leaf<i32>>, Nil> as ValueRepr>::Value;
 
+/// Adds values in source order without consuming their storage.
+///
+/// # Errors
+/// Returns an error if any partial sum exceeds the signed integer range.
+///
+/// - Complexity: O(n) time and O(1) space for n values.
+fn checked_sum(values: &[i32]) -> anyhow::Result<i32> {
+    values.iter().try_fold(0i32, |sum, value| {
+        sum.checked_add(*value)
+            .ok_or_else(|| anyhow::anyhow!("sum overflow"))
+    })
+}
+
 /// Reads a canonical tuple containing an array without consuming it.
+///
+/// # Errors
+/// Returns an error if any partial sum exceeds the signed integer range.
+///
+/// - Complexity: O(n) time and O(1) space for n elements.
 fn sum(args: &ArrayArgs) -> anyhow::Result<i32> {
-    Ok(args.1.as_slice().iter().sum())
+    checked_sum(args.1.as_slice())
 }
 
 /// Array arguments and results use the same borrowed/owned API for both bodies.
@@ -73,7 +91,7 @@ fn native_and_interpreted_array_arguments_and_results() {
     let mut body = DynSegment::new::<()>();
     body.push_argument(0, ValueType::array(ValueType::cloneable_leaf::<i32>()))
         .unwrap();
-    body.op1_slice::<Leaf<i32>, Leaf<i32>, _>(|xs| xs.iter().sum())
+    body.op1r_slice::<Leaf<i32>, Leaf<i32>, _>(checked_sum)
         .unwrap();
     let interpreted = Callable::from_prepared(
         body.prepare::<Cons<ArrayOf<Leaf<i32>>, Nil>, Leaf<i32>>()
@@ -83,6 +101,14 @@ fn native_and_interpreted_array_arguments_and_results() {
     for f in [Callable::from_fn(sum), interpreted] {
         assert_eq!(f.call(&input).unwrap(), 10);
         assert_eq!(input.1.as_slice(), [3, 7]);
+        let empty = (Array::from_vec(Vec::<i32>::new()),).into_c_stack_list();
+        assert_eq!(f.call(&empty).unwrap(), 0);
+        for values in [[i32::MAX, 1], [i32::MIN, -1]] {
+            let overflow = (Array::from_vec(values.to_vec()),).into_c_stack_list();
+            assert!(f.call(&overflow).is_err());
+            assert_eq!(overflow.1.as_slice(), values);
+            assert_eq!(f.call(&input).unwrap(), 10);
+        }
     }
 }
 
