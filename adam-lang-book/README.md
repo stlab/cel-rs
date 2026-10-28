@@ -18,27 +18,24 @@ Run Task…) to do everything below in one step. The commands are broken out as 
 `book: install preprocessor` / `book: build wasm` / `book: prepare assets` / `book: build` /
 `book: serve` tasks too, in `.vscode/tasks.json`, if you only need to re-run one of them.
 
-From the shell:
+From the repository root:
 
 ```bash
 # One-time, or after changing adam-lang-book-preprocessor:
-cargo install --path ../adam-lang-book-preprocessor --force
+cargo install --path adam-lang-book-preprocessor --force
 
 # After changing adam-web-ui, adam-lang-book-live, or their dependencies:
-cd ../adam-lang-book-live
+cd adam-lang-book-live
 wasm-pack build --target web --release
-cd ../adam-lang-book
+cd ..
 
 # Stages the compiled wasm/js bundle, the Spectrum Web Components bundle
 # (begin/assets/swc.js), begin/assets/inspector.css, and a generated
 # manifest of every example's source into book-src/theme/:
 cargo run -p xtask -- prepare-live-book-assets
 
-mdbook build .
+mdbook build adam-lang-book
 ```
-
-(Run these from the repository root, or adjust the relative paths above if running from
-inside `adam-lang-book/`.)
 
 `book.toml` registers `mdbook-live-examples` as a preprocessor (`command =
 "mdbook-live-examples"`), so `mdbook build`/`mdbook serve` fail outright if that binary isn't
@@ -73,6 +70,21 @@ versus a build artifact.
 
 `book-dist/` (mdBook's own output directory) is gitignored at the repo root and is never
 committed.
+
+## Testing the bootstrap
+
+From the repository root, run:
+
+```bash
+node --test adam-lang-book/tests/bootstrap.test.cjs
+```
+
+The tests execute the authored classic script with Node's built-in runner and VM.
+They cover mount planning, independent graph lists, dependency selection, manifest
+HTTP failures, script load failures, and visible page errors without installing packages.
+When a dependency or manifest fails, every affected live mount displays an accessible
+error instead of remaining silently empty. Real rendered interactions still require
+the staged WebAssembly and browser verification.
 
 ## CI
 

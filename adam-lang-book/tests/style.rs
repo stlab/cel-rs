@@ -1,6 +1,7 @@
 //! Examples backing `book-src/style.md` (Chapter 9). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
+/// Formats the displayed declarations with canonical spacing and indentation.
 #[test]
 fn canonical_formatting() {
     let source = include_str!("../book-src/examples/style/canonical_formatting.adm2");

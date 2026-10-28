@@ -36,6 +36,7 @@ use crate::{
 pub struct ModulePath(Vec<String>);
 
 impl FromStr for ModulePath {
+    /// Reports an invalid externally supplied module path.
     type Err = ModuleDiagnostic;
 
     /// Validates and retains every identifier segment.

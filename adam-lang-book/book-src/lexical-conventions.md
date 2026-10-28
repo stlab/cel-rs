@@ -29,8 +29,10 @@ otherwise inert — they carry no meaning when the sheet resolves:
 
 ## Keywords and reserved identifiers
 
-**Keywords**: `sheet`, `cell`, `source`, `relationship`, `conditional`, `out`, `require`,
-`filter`. None of these can be used as a cell or sheet name. `_` is not a keyword but is
+Adam recognizes `sheet`, `use`, `as`, `cell`, `source`, `relationship`, `conditional`,
+`out`, `require`, and `filter` in their grammar positions. They are contextual:
+cell names may use these words. Sheet definitions and module names reject `_`,
+`sheet`, `use`, `as`, empty names, and raw identifiers. `_` is also
 reserved in two specific positions: a `conditional`'s default branch
 (`_ => { ... }`, the [default branch and reverting to source](conditionals.md#the-default-branch-and-reverting-to-source) section),
 and inside a `filter` expression (the candidate value,

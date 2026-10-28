@@ -82,13 +82,13 @@ never both at once.
 `_ => { ... }` matches whatever value none of the named branches list and (because it's
 defined that way) must be the last branch textually; a named branch written after `_` is a
 syntax error. Leaving off `_` entirely is legal: if the match value doesn't equal any branch's
-literal, none of the conditional's relationships are active that round, and every cell that
-would otherwise be one of their outputs stays free, reverting to its own last
-externally-written value (or its declared default), not to whatever the branch last computed
-for it. This is the same shadow-state mechanism the [previous section](#shadow-state-forced-and-self-referencing-cells) just showed for a forced cell,
-triggered here by *no* branch matching at all rather than by switching branches: a relationship
-that stops being active can never have written a cell's source, so the cell has nothing to
-revert to except that untouched source.
+literal, none of the conditional's relationships are active that round, and their outputs
+become freely writable. Forced and self-referencing cells preserve a separate source
+value, so releasing those cells restores their last external write or declared default.
+Ordinary cells in reversible relationships need not retain a separate shadow; releasing
+the relationship does not promise to undo their last derived value.
+The [previous section](#shadow-state-forced-and-self-referencing-cells) demonstrates
+the shadow-state mechanism for forced and self-referencing cells.
 
 ```adam
 {{#include examples/conditionals/default_branch_and_spring_back.adm2}}

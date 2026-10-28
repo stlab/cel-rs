@@ -115,6 +115,9 @@ pub struct ParsedSheet {
 }
 
 impl std::fmt::Debug for ParsedSheet {
+    /// Formats public name and root-span metadata without evaluating the sheet.
+    ///
+    /// - Complexity: O(b) time and formatter output space for b rendered bytes.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParsedSheet")
             .field("cell_names", &self.cell_names)
@@ -538,14 +541,17 @@ impl ParsedSheet {
 }
 
 impl std::ops::Deref for ParsedSheet {
+    /// Exposes the underlying runtime constraint sheet.
     type Target = Sheet;
 
+    /// Borrows the underlying runtime sheet.
     fn deref(&self) -> &Sheet {
         &self.sheet
     }
 }
 
 impl std::ops::DerefMut for ParsedSheet {
+    /// Exclusively borrows the underlying runtime sheet.
     fn deref_mut(&mut self) -> &mut Sheet {
         &mut self.sheet
     }
@@ -711,16 +717,20 @@ mod tests {
     use cel_runtime::{ArrayOf, Leaf};
     use std::any::Any;
 
+    /// Creates an executable parser with built-in types and operations.
     fn parser() -> AdamParser {
         AdamParser::new(TypeRegistry::new(), OpLookup::new())
     }
 
+    /// Identifies a registered test leaf distinct from built-in integers.
     #[derive(Clone, Debug, PartialEq)]
     struct Custom(i32);
 
+    /// Identifies the custom array-counting callable in test lookup.
     #[derive(Clone)]
     struct CountFn;
 
+    /// Resolves custom test leaves and array-counting calls.
     fn custom_lookup() -> OpLookup {
         let mut lookup = OpLookup::new();
         lookup.push_scope(|name, segment, arity, _span| match name {
@@ -758,11 +768,13 @@ mod tests {
         lookup
     }
 
+    /// Accepts an empty executable sheet.
     #[test]
     fn parse_empty_sheet() {
         let _sheet = parser().parse_str("sheet empty {}").unwrap();
     }
 
+    /// Accepts a cell with a matching annotation and initializer.
     #[test]
     fn parse_cell_with_annotation_and_initializer() {
         let _sheet = parser()
@@ -770,16 +782,19 @@ mod tests {
             .unwrap();
     }
 
+    /// Accepts a defaultable cell without an explicit initializer.
     #[test]
     fn parse_cell_annotation_only_uses_default() {
         let _sheet = parser().parse_str("sheet s { cell area: f64; }").unwrap();
     }
 
+    /// Accepts an initialized cell without an annotation.
     #[test]
     fn parse_cell_initializer_infers_type() {
         let _sheet = parser().parse_str("sheet s { cell mode = 0i32; }").unwrap();
     }
 
+    /// Reports an unknown cell annotation by name.
     #[test]
     fn parse_cell_unknown_type_is_error() {
         let result = parser().parse_str("sheet s { cell x: unknown_type; }");
@@ -792,8 +807,10 @@ mod tests {
         );
     }
 
+    /// Rejects an uninitialized leaf that has no registered default.
     #[test]
     fn parse_cell_missing_default_is_error() {
+        /// Supplies a test leaf without default construction.
         #[derive(PartialEq, Clone, Debug)]
         struct NoDef(i32);
         let mut reg = TypeRegistry::new();
@@ -803,6 +820,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Evaluates typed arrays containing registered custom leaves.
     #[test]
     fn parse_cell_initializer_supports_registry_typed_arrays() {
         let mut reg = TypeRegistry::new();
@@ -829,6 +847,7 @@ mod tests {
         assert_eq!(*parsed.read::<i32>(nested_id).unwrap(), 1);
     }
 
+    /// Rejects an array annotation naming an unknown custom leaf.
     #[test]
     fn parse_cell_initializer_rejects_unknown_registry_typed_arrays() {
         let mut parser = AdamParser::new(TypeRegistry::new(), custom_lookup());
@@ -843,12 +862,14 @@ mod tests {
         );
     }
 
+    /// Retains persistent compound array values through cell initialization.
     #[test]
     fn parse_cell_initializer_preserves_persistent_array_cells() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let parsed = parser
             .parse_str("sheet s { cell values = []: [(i32, f64)]; }")
             .unwrap();
+        /// Describes persistent arrays of the fixture's nested tuple elements.
         type Pairs = cel_runtime::ArrayOf<
             cel_runtime::Cons<
                 cel_runtime::Leaf<i32>,
@@ -863,6 +884,7 @@ mod tests {
         );
     }
 
+    /// Records a source declaration as a source-kind runtime cell.
     #[test]
     fn parse_source_decl_registers_a_source_kind_cell() {
         let sheet = parser()
@@ -872,12 +894,14 @@ mod tests {
         assert_eq!(sheet.cell_kind(width), Some(adam_rs::CellKind::Source));
     }
 
+    /// Rejects a source declaration lacking both annotation and initializer.
     #[test]
     fn parse_source_decl_requires_colon_or_equals() {
         let result = parser().parse_str("sheet s { source width; }");
         assert!(result.is_err());
     }
 
+    /// Registers requirements attached to an ordinary cell.
     #[test]
     fn parse_cell_decl_with_a_require_block_attaches_requirements() {
         let sheet = parser()
@@ -887,6 +911,7 @@ mod tests {
         assert_eq!(sheet.cell_requirements(x).unwrap().len(), 1);
     }
 
+    /// Registers requirements attached to a source cell.
     #[test]
     fn parse_source_decl_with_a_require_block_attaches_requirements() {
         let sheet = parser()
@@ -896,6 +921,7 @@ mod tests {
         assert_eq!(sheet.cell_requirements(x).unwrap().len(), 1);
     }
 
+    /// Registers a source cell's filter.
     #[test]
     fn parse_source_decl_with_a_filter_clause_attaches_a_filter() {
         let sheet = parser()
@@ -905,6 +931,7 @@ mod tests {
         assert!(sheet.filter_kind(x).is_some());
     }
 
+    /// Registers an output cell's filter.
     #[test]
     fn parse_out_decl_with_a_filter_clause_attaches_a_filter() {
         let sheet = parser()
@@ -914,6 +941,7 @@ mod tests {
         assert!(sheet.filter_kind(area).is_some());
     }
 
+    /// Clamps writes through a filter without named dependencies.
     #[test]
     fn cell_filter_with_no_named_dependency_clamps_on_write() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -928,6 +956,7 @@ mod tests {
         assert_eq!(*parsed.sheet.read::<i32>(cell_id).unwrap(), 100);
     }
 
+    /// Evaluates a filter against the current value of its named dependency.
     #[test]
     fn cell_filter_referencing_a_cell_tracks_its_current_value() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -952,6 +981,7 @@ mod tests {
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
     }
 
+    /// Deduplicates repeated filter dependencies without changing the result.
     #[test]
     fn cell_filter_referencing_the_same_value_twice_is_idempotent() {
         // Snap-to-grid: `_ - (_ % step)` — `_` referenced twice must denote the same value both
@@ -966,6 +996,7 @@ mod tests {
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 20);
     }
 
+    /// Attaches related source labels to a filter-dependency cycle.
     #[test]
     fn filter_dependency_cycle_reported_with_secondary_labels() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -984,6 +1015,7 @@ mod tests {
         assert!(!err.secondary().is_empty());
     }
 
+    /// Rejects a non-range filter that never references its candidate value.
     #[test]
     fn cell_filter_without_underscore_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -991,6 +1023,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    /// Rejects a filter whose result does not match the governed cell type.
     #[test]
     fn cell_filter_body_type_mismatch_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -998,6 +1031,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    /// Rejects an unknown identifier in a filter.
     #[test]
     fn cell_filter_undeclared_identifier_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1005,6 +1039,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    /// Clamps writes to an inclusive range.
     #[test]
     fn cell_filter_with_a_range_inclusive_body_clamps_on_write() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1022,6 +1057,7 @@ mod tests {
     }
 
     /// Rejects invalid public erased inputs on every call without poisoning later bounds.
+    /// Rejects malformed scalar range arguments at the public boundary.
     #[test]
     fn public_range_bounds_rejects_invalid_scalar_inputs() {
         let parsed = AdamParser::new(TypeRegistry::new(), OpLookup::new())
@@ -1048,6 +1084,7 @@ mod tests {
     }
 
     /// Checks complete compound shapes, carrier identity, arity, and recovery.
+    /// Rejects malformed compound range arguments at the public boundary.
     #[test]
     fn public_range_bounds_rejects_invalid_compound_inputs() {
         use cel_runtime::{Cons, IntoCStackList, Leaf, Nil, OwnedValue};
@@ -1063,7 +1100,9 @@ mod tests {
         else {
             panic!("expected range filter");
         };
+        /// Describes the valid floating-point tuple used as range bounds.
         type Limits = Cons<Leaf<f64>, Cons<Leaf<f64>, Nil>>;
+        /// Describes an incompatible tuple carrier supplied to the checked range boundary.
         type WrongLimits = Cons<Leaf<f64>, Cons<Leaf<u64>, Nil>>;
         let valid = CellValue(OwnedValue::new::<Limits>((0.0, 10.0).into_c_stack_list()));
         // Identical field sizes and valid f64 bits keep this regression safe pre-fix.
@@ -1082,6 +1121,7 @@ mod tests {
         }
     }
 
+    /// Accepts range filters without a candidate-value placeholder.
     #[test]
     fn cell_filter_range_does_not_require_underscore() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1089,6 +1129,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Updates effective range bounds when their cell dependencies change.
     #[test]
     fn cell_filter_range_bounds_track_cell_dependencies_live() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1107,6 +1148,7 @@ mod tests {
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
     }
 
+    /// Applies inclusive range filtering to floating-point cells.
     #[test]
     fn cell_filter_range_with_float_cell_type_works() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1119,6 +1161,7 @@ mod tests {
         assert_eq!(*parsed.sheet.read::<f64>(a_id).unwrap(), 100.0);
     }
 
+    /// Rejects a range whose element type differs from the governed cell.
     #[test]
     fn cell_filter_range_with_mismatched_element_type_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1132,6 +1175,7 @@ mod tests {
         );
     }
 
+    /// Reports range element mismatch even when a bound references the candidate.
     #[test]
     fn cell_filter_range_with_mismatched_element_type_and_underscore_is_still_a_range_error() {
         // Confirms the "range bounds must be" check fires unconditionally on a recognized
@@ -1149,6 +1193,7 @@ mod tests {
         );
     }
 
+    /// Leaves range bounds unavailable when their expression evaluation fails.
     #[test]
     fn cell_filter_range_returns_none_instead_of_panicking_when_a_bound_expression_fails_to_evaluate()
      {
@@ -1179,6 +1224,7 @@ mod tests {
         assert_eq!(parsed.sheet.filter_range::<i32>(a_id), None);
     }
 
+    /// Keeps non-range filter expressions opaque.
     #[test]
     fn cell_filter_general_expression_still_compiles_to_opaque_kind() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1192,6 +1238,7 @@ mod tests {
         ));
     }
 
+    /// Tracks changing bounds supplied by a tuple-valued cell.
     #[test]
     fn filter_tracks_a_tuple_typed_range_cell_dynamically() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1220,6 +1267,7 @@ mod tests {
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
     }
 
+    /// Accepts filtering a tuple-valued cell.
     #[test]
     fn cell_filter_on_a_tuple_typed_cell_is_supported() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1229,6 +1277,7 @@ mod tests {
         assert!(sheet.filter_kind(sheet.cell_names["a"].0).is_some());
     }
 
+    /// Attaches a parsed filter clause to its cell.
     #[test]
     fn parse_filter_clause_attaches_a_filter() {
         let sheet = parser()
@@ -1238,12 +1287,14 @@ mod tests {
         assert!(sheet.filter_kind(x).is_some());
     }
 
+    /// Rejects labels on filter clauses.
     #[test]
     fn parse_filter_clause_with_a_label_is_now_a_parse_error() {
         let result = parser().parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }");
         assert!(result.is_err());
     }
 
+    /// Accepts multiple declarations in one sheet.
     #[test]
     fn parse_multiple_cells() {
         let _sheet = parser()
@@ -1260,6 +1311,7 @@ mod tests {
             .unwrap();
     }
 
+    /// Evaluates a single-binding relationship.
     #[test]
     fn parse_relationship_with_a_single_binding() {
         let mut sheet = parser()
@@ -1280,6 +1332,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(b_id).unwrap(), 2);
     }
 
+    /// Infers relationship dependencies from referenced cell identifiers.
     #[test]
     fn parse_relationship_deduces_inputs_from_referenced_identifiers() {
         let mut sheet = parser()
@@ -1302,6 +1355,7 @@ mod tests {
     }
 
     /// Verifies member labels never become dependencies or resolve same-named cells.
+    /// Excludes member labels from relationship dependencies.
     #[test]
     fn member_labels_are_not_cell_dependencies() {
         let mut lookup = OpLookup::new();
@@ -1334,6 +1388,7 @@ mod tests {
     }
 
     /// Tracks only value expressions in a record-member binding.
+    /// Excludes record labels and member names from cell dependency resolution.
     #[test]
     fn field_labels_and_member_names_are_not_cell_dependencies() {
         use cel_parser::{OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
@@ -1397,6 +1452,7 @@ mod tests {
         assert_eq!(*sheet.read::<f64>(result).unwrap(), 7.0);
     }
 
+    /// Executes the planner-selected direction of a reversible relationship.
     #[test]
     fn parse_relationship_with_multiple_bindings_lets_the_planner_pick_a_direction() {
         // `c` is declared first (and so has the weakest cell strength — `adam_rs`'s
@@ -1426,6 +1482,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(c_id).unwrap(), 6);
     }
 
+    /// Attributes inconsistent method cell sets to their relationship block.
     #[test]
     fn mismatched_method_cells_error_spans_the_relationship_block_not_the_sheet() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1438,6 +1495,7 @@ mod tests {
         assert_eq!(err.span().start().line, 7);
     }
 
+    /// Retains method source spans after successful parsing.
     #[test]
     fn successful_relationship_parse_populates_method_spans() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1449,6 +1507,7 @@ mod tests {
         assert_eq!(span.start.line, 6);
     }
 
+    /// Retains source spans for runtime relationships and cells.
     #[test]
     fn parse_populates_relationship_and_cell_spans() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1463,6 +1522,7 @@ mod tests {
         }
     }
 
+    /// Resolves a cycle diagnostic to ordered participating source spans.
     #[test]
     fn locate_error_resolves_a_cycle_to_multiple_ordered_spans() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1483,6 +1543,7 @@ mod tests {
         );
     }
 
+    /// Labels both bindings that produce the same output set.
     #[test]
     fn duplicate_output_set_error_underlines_both_bindings() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -1501,6 +1562,7 @@ mod tests {
         );
     }
 
+    /// Rejects an undeclared relationship output.
     #[test]
     fn parse_binding_undeclared_output_is_an_error() {
         let result = parser().parse_str(
@@ -1516,6 +1578,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Executes destructuring against the declared output tuple shapes.
     #[test]
     fn parse_binding_multi_output_tuple_matches_existing_tuple_shape_rules() {
         let mut sheet = parser()
@@ -1539,6 +1602,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 8);
     }
 
+    /// Rejects destructuring with the wrong number of tuple elements.
     #[test]
     fn parse_binding_multi_output_arity_mismatch_is_an_error() {
         let result = parser().parse_str(
@@ -1556,6 +1620,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Rejects multi-output targets without tuple parentheses.
     #[test]
     fn parse_binding_multi_output_without_parens_is_a_parse_error() {
         let result = parser().parse_str(
@@ -1573,6 +1638,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Extracts the sole value of a singleton tuple binding.
     #[test]
     fn parse_binding_single_element_tuple_destructure_extracts_the_element() {
         let mut sheet = parser()
@@ -1594,6 +1660,7 @@ mod tests {
     }
 
     /// Rejects a parenthesized binding name instead of treating it as a direct bind.
+    /// Rejects a parenthesized binding target lacking the singleton comma.
     #[test]
     fn parse_binding_single_parenthesized_identifier_without_comma_is_an_error() {
         let result = parser().parse_str(
@@ -1610,6 +1677,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Evaluates an explicitly typed output without requirements.
     #[test]
     fn parse_out_with_direct_initializer_and_no_require_block() {
         let mut sheet = parser()
@@ -1628,6 +1696,7 @@ mod tests {
         assert_eq!(*sheet.sheet.read::<i32>(cell_id).unwrap(), 12);
     }
 
+    /// Evaluates an output with an inferred type.
     #[test]
     fn parse_out_with_no_type_annotation_infers_from_initializer() {
         let sheet = parser()
@@ -1647,6 +1716,7 @@ mod tests {
         );
     }
 
+    /// Registers explicitly named output requirements.
     #[test]
     fn parse_out_with_a_require_block_registers_named_requirements() {
         let mut sheet = parser()
@@ -1675,6 +1745,7 @@ mod tests {
         );
     }
 
+    /// Reports a violated output requirement.
     #[test]
     fn parse_out_require_block_requirement_can_violate() {
         let mut sheet = parser()
@@ -1695,6 +1766,7 @@ mod tests {
         assert_eq!(sheet.sheet.violated_requirements(output_id).count(), 1);
     }
 
+    /// Rejects a requirement whose expression is not Boolean.
     #[test]
     fn parse_requirement_non_bool_body_is_an_error() {
         let result = parser().parse_str(
@@ -1710,6 +1782,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Accepts an outer documentation comment on a cell.
     #[test]
     fn parses_a_sheet_with_an_outer_doc_comment_on_a_cell() {
         let parsed = parser()
@@ -1718,6 +1791,7 @@ mod tests {
         assert_eq!(parsed.cell_names.len(), 1);
     }
 
+    /// Accepts sheet-level inner documentation.
     #[test]
     fn parses_a_sheet_with_an_inner_doc_comment() {
         let parsed = parser()
@@ -1726,6 +1800,7 @@ mod tests {
         assert_eq!(parsed.cell_names.len(), 1);
     }
 
+    /// Accepts documentation comments across supported declaration kinds.
     #[test]
     fn parses_a_sheet_with_doc_comments_on_every_declaration_kind() {
         let source = "//! module docs\nsheet s {\n    /// a cell\n    cell x: i32 = 1;\n\n    /// another cell\n    cell y: i32 = 2;\n\n    /// a relationship\n    relationship { y := x; }\n}";
@@ -1733,6 +1808,7 @@ mod tests {
         assert_eq!(parsed.cell_names.len(), 2);
     }
 
+    /// Rejects an undeclared relationship input.
     #[test]
     fn parse_binding_undeclared_input_is_error() {
         let result = parser().parse_str(
@@ -1749,6 +1825,7 @@ mod tests {
         assert!(msg.contains("bogus") || msg.contains("undefined"), "{msg}");
     }
 
+    /// Rejects a method result that conflicts with its output annotation.
     #[test]
     fn parse_method_output_type_mismatch_is_error() {
         let result = parser().parse_str(
@@ -1763,30 +1840,7 @@ mod tests {
         assert!(result.is_err(), "f64 body for i32 output must be an error");
     }
 
-    #[test]
-    fn parse_and_propagate_multi_output_tuple_sheet() {
-        let mut sheet = parser()
-            .parse_str(
-                r#"
-            sheet s {
-                cell a:    i32 = 3;
-                cell b:    i32 = 4;
-                cell sum:  i32;
-                cell diff: i32;
-                relationship { (sum, diff) := (a + b, a - b); }
-            }
-        "#,
-            )
-            .unwrap();
-
-        // sum = a + b = 7, diff = a - b = -1. This exercises the CompiledOutputs::Tuple
-        // runtime path end to end (RefCell wrapping + seg.call_dyn_tuple); see
-        // `existing_multi_output_scalar_methods_still_work_unchanged` for the value-level
-        // assertion of the same mechanism.
-        sheet.propagate().unwrap();
-        let _ = sheet; // sheet is live and propagated
-    }
-
+    /// Rejects a scalar multi-output method with the wrong tuple arity.
     #[test]
     fn parse_method_output_tuple_arity_mismatch_is_error() {
         let result = parser().parse_str(
@@ -1810,6 +1864,7 @@ mod tests {
         assert!(msg.contains("arity"), "{msg}");
     }
 
+    /// Names the registered leaf in a method result mismatch.
     #[test]
     fn parse_method_output_type_mismatch_names_the_registered_type() {
         let result = parser().parse_str(
@@ -1827,6 +1882,7 @@ mod tests {
         assert!(!msg.contains("::"), "no Rust type path may leak: {msg}");
     }
 
+    /// Names the registered leaf in a destructured result mismatch.
     #[test]
     fn parse_method_destructured_output_type_mismatch_names_the_registered_type() {
         let result = parser().parse_str(
@@ -1846,6 +1902,7 @@ mod tests {
         assert!(!msg.contains("::"), "no Rust type path may leak: {msg}");
     }
 
+    /// Rejects a tuple method result containing the wrong element type.
     #[test]
     fn parse_method_output_tuple_element_type_mismatch_is_error() {
         let result = parser().parse_str(
@@ -1868,6 +1925,7 @@ mod tests {
         assert!(msg.contains("type mismatch"), "{msg}");
     }
 
+    /// Rejects a tuple body assigned to a scalar output.
     #[test]
     fn parse_method_single_output_rejects_tuple_body() {
         let result = parser().parse_str(
@@ -1885,6 +1943,7 @@ mod tests {
         );
     }
 
+    /// Executes a method with one tuple-valued output.
     #[test]
     fn parse_method_single_tuple_typed_output() {
         let mut sheet = parser()
@@ -1911,6 +1970,7 @@ mod tests {
         assert_eq!((a, b), (3, 4));
     }
 
+    /// Executes a method combining tuple-valued and scalar outputs.
     #[test]
     fn parse_method_tuple_typed_output_among_several() {
         let mut sheet = parser()
@@ -1940,6 +2000,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(extra_id).unwrap(), 3);
     }
 
+    /// Reads tuple input elements through field indexing.
     #[test]
     fn parse_method_with_tuple_typed_input_supports_field_indexing() {
         let mut sheet = parser()
@@ -1958,6 +2019,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(sum_id).unwrap(), 30);
     }
 
+    /// Rejects a method result with a different tuple shape.
     #[test]
     fn parse_method_tuple_output_shape_mismatch_is_an_error() {
         let result = parser().parse_str(
@@ -1973,6 +2035,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Checks both results of a scalar multi-output method.
     #[test]
     fn existing_multi_output_scalar_methods_still_work_unchanged() {
         // Regression: today's N-scalar-outputs mechanism must still behave identically after the
@@ -1997,6 +2060,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(diff_id).unwrap(), -1);
     }
 
+    /// Executes a method producing the empty tuple.
     #[test]
     fn parse_method_single_empty_tuple_typed_output() {
         let mut sheet = parser()
@@ -2018,6 +2082,7 @@ mod tests {
         sheet.read_compound::<cel_runtime::Nil>(cell_id).unwrap();
     }
 
+    /// Executes a conditional declaration.
     #[test]
     fn parse_conditional_decl() {
         let _sheet = parser()
@@ -2045,6 +2110,7 @@ mod tests {
             .unwrap();
     }
 
+    /// Updates both relationships in an active branch after independent input edits.
     #[test]
     fn parse_conditional_branch_with_multiple_relationships() {
         let mut sheet = parser()
@@ -2069,8 +2135,23 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
+        let c = sheet.cell_names["c"].0;
+        let f = sheet.cell_names["f"].0;
+        assert_eq!(*sheet.read::<f64>(c).unwrap(), 6.0);
+        assert_eq!(*sheet.read::<f64>(f).unwrap(), 20.0);
+        let a = sheet.cell_names["a"].0;
+        sheet.write(a, 7.0f64).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(c).unwrap(), 21.0);
+        assert_eq!(*sheet.read::<f64>(f).unwrap(), 20.0);
+        let d = sheet.cell_names["d"].0;
+        sheet.write(d, 6.0f64).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(c).unwrap(), 21.0);
+        assert_eq!(*sheet.read::<f64>(f).unwrap(), 30.0);
     }
 
+    /// Rejects a conditional-arm binding outside a relationship block.
     #[test]
     fn conditional_branch_bare_binding_without_relationship_wrapper_is_error() {
         let result = parser().parse_str(
@@ -2087,6 +2168,7 @@ mod tests {
         );
     }
 
+    /// Rejects an unknown conditional subject cell.
     #[test]
     fn conditional_undeclared_match_cell_is_error() {
         let result = parser().parse_str(
@@ -2103,6 +2185,7 @@ mod tests {
         assert!(msg.contains("bogus") || msg.contains("undeclared"), "{msg}");
     }
 
+    /// Rejects a branch key with the wrong subject type.
     #[test]
     fn conditional_branch_literal_type_mismatch_is_error() {
         let result = parser().parse_str(
@@ -2120,6 +2203,7 @@ mod tests {
         );
     }
 
+    /// Selects the branch matching a negative literal key.
     #[test]
     fn conditional_branch_negative_literal_key_matches() {
         let mut sheet = parser()
@@ -2141,6 +2225,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
     }
 
+    /// Rejects a negated unsigned branch key.
     #[test]
     fn conditional_branch_negating_unsigned_literal_key_is_error() {
         let result = parser().parse_str(
@@ -2161,6 +2246,7 @@ mod tests {
         );
     }
 
+    /// Executes a default-only conditional on a tuple-valued subject.
     #[test]
     fn conditional_with_tuple_typed_match_cell_and_default_only_still_works() {
         // A tuple isn't a `literal_pattern`, so a tuple-typed match cell can no longer pair with
@@ -2184,6 +2270,7 @@ mod tests {
         assert_eq!(*sheet.read::<f64>(y_id).unwrap(), 2.0);
     }
 
+    /// Rejects a tuple literal as a conditional branch key.
     #[test]
     fn conditional_branch_tuple_literal_key_is_error() {
         let result = parser().parse_str(
@@ -2202,6 +2289,7 @@ mod tests {
         assert!(result.is_err(), "tuple branch key must be a parse error");
     }
 
+    /// Reacts to changes in either cell of a Boolean conditional subject.
     #[test]
     fn conditional_on_a_two_cell_boolean_expression_activates_and_reacts_to_writes() {
         let mut sheet = parser()
@@ -2233,6 +2321,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
     }
 
+    /// Evaluates a conditional subject with repeated references to one cell.
     #[test]
     fn conditional_expression_referencing_the_same_cell_twice_compiles_and_evaluates() {
         let mut sheet = parser()
@@ -2254,6 +2343,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
     }
 
+    /// Evaluates a bare cell identifier as a conditional subject.
     #[test]
     fn conditional_bare_identifier_match_subject_still_works() {
         let mut sheet = parser()
@@ -2325,6 +2415,7 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(output).unwrap(), 0);
     }
 
+    /// Rejects a bare identifier as a branch key.
     #[test]
     fn conditional_branch_bare_identifier_key_is_error() {
         // A bare identifier isn't a `literal_pattern` either, even when it resolves (as a
@@ -2347,6 +2438,7 @@ mod tests {
         );
     }
 
+    /// Rejects an unknown identifier inside a conditional subject expression.
     #[test]
     fn conditional_expression_referencing_an_undeclared_identifier_is_a_parse_error() {
         let result = parser().parse_str(
@@ -2354,7 +2446,7 @@ mod tests {
             sheet s {
                 cell a: bool = true;
                 conditional a && nope {
-                    true => { relationship { a := a; } },
+                    true => { relationship { a := a; } }
                 }
             }
         "#,
@@ -2362,6 +2454,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Rejects a cell literal that conflicts with its annotation.
     #[test]
     fn parse_cell_literal_type_mismatch_is_error() {
         // Float literal for an i32 cell should be a parse error.
@@ -2372,6 +2465,7 @@ mod tests {
         );
     }
 
+    /// Computes floating-point results in both directions after a strength-changing edit.
     #[test]
     fn parse_and_propagate_sheet() {
         let mut p = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -2379,9 +2473,9 @@ mod tests {
             .parse_str(
                 r#"
             sheet image_resize {
+                cell area:   f64;
                 cell width:  f64 = 4.0;
                 cell height: f64 = 3.0;
-                cell area:   f64;
                 relationship {
                     area := width * height;
                     width := area / height;
@@ -2392,14 +2486,16 @@ mod tests {
             )
             .unwrap();
 
-        // The relationship should compute area = width * height = 4.0 * 3.0 = 12.0.
-        // We can't read cells by name yet (no name→CellId API on Sheet), so we verify
-        // the sheet propagated without error, which exercises the full call_dyn path.
-        // A future test can assert specific cell values once a name-lookup API exists.
         sheet.propagate().unwrap();
-        let _ = sheet; // sheet is live and propagated
+        let area = sheet.cell_names["area"].0;
+        let width = sheet.cell_names["width"].0;
+        assert_eq!(*sheet.read::<f64>(area).unwrap(), 12.0);
+        sheet.write(area, 24.0f64).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(width).unwrap(), 8.0);
     }
 
+    /// Rejects duplicate cell declarations.
     #[test]
     fn parse_duplicate_cell_is_error() {
         let result = parser().parse_str("sheet s { cell x: i32; cell x: f64; }");
@@ -2415,6 +2511,7 @@ mod tests {
         }
     }
 
+    /// Preserves cell declaration order in returned name metadata.
     #[test]
     fn parse_str_returns_cell_names_in_declaration_order() {
         let parsed = parser()
@@ -2424,6 +2521,7 @@ mod tests {
         assert_eq!(names, vec!["z", "a", "m"]);
     }
 
+    /// Exposes runtime propagation through a parsed sheet.
     #[test]
     fn parsed_sheet_derefs_to_sheet_for_propagate() {
         let mut parsed = parser().parse_str("sheet s { cell x: i32 = 1; }").unwrap();
@@ -2431,6 +2529,7 @@ mod tests {
         parsed.propagate().unwrap();
     }
 
+    /// Propagates an explicitly typed output.
     #[test]
     fn parse_out_with_explicit_type_propagates_correctly() {
         let mut sheet = parser()
@@ -2449,6 +2548,7 @@ mod tests {
         assert_eq!(*sheet.read::<f64>(cell_id).unwrap(), 12.0);
     }
 
+    /// Formats a stored tuple output using its concrete value.
     #[test]
     fn parse_out_with_tuple_type_value_debug_formats_correctly() {
         let mut sheet = parser()
@@ -2467,6 +2567,7 @@ mod tests {
         assert_eq!(format!("{value:?}"), "(3, 3)");
     }
 
+    /// Infers an output's runtime type from its writer.
     #[test]
     fn parse_out_with_no_annotation_infers_type_from_writer_body() {
         let sheet = parser()
@@ -2483,6 +2584,7 @@ mod tests {
         assert_eq!(shape, TypeShape::Named(std::any::TypeId::of::<f64>()));
     }
 
+    /// Rejects an output writer that conflicts with its annotation.
     #[test]
     fn parse_out_type_mismatch_is_error() {
         let result = parser().parse_str(
@@ -2499,6 +2601,7 @@ mod tests {
         );
     }
 
+    /// Distinguishes valid and violated output requirements.
     #[test]
     fn parse_out_with_requirements_reports_output_valid_and_violated() {
         let mut sheet = parser()
@@ -2521,6 +2624,7 @@ mod tests {
         assert_eq!(sheet.violated_requirements(output_id).count(), 0);
     }
 
+    /// Reports output requirement violations after propagation.
     #[test]
     fn parse_out_requirement_violation_is_reported_after_propagate() {
         let mut sheet = parser()
@@ -2543,6 +2647,7 @@ mod tests {
         assert_eq!(sheet.violated_requirements(output_id).count(), 1);
     }
 
+    /// Records metadata only for explicitly labeled requirements.
     #[test]
     /// Resolves explicit labels by returned IDs while preserving unnamed checks and order.
     fn requirement_names_are_metadata_for_explicit_labels_only() {
@@ -2572,6 +2677,7 @@ mod tests {
         assert_eq!(parsed.requirement_names[&violated[2]], "first");
     }
 
+    /// Rejects repeated requirement labels within each declaration kind.
     #[test]
     /// Rejects repeated explicit labels locally for every declaration kind.
     fn duplicate_requirement_labels_are_rejected_per_declaration() {
@@ -2586,25 +2692,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parse_out_duplicate_requirement_names_is_error() {
-        let result = parser().parse_str(
-            r#"
-            sheet s {
-                cell width: f64 = 4.0;
-                out area: f64 := width require {
-                    @dup width <= 10.0;
-                    @dup width >= 0.0;
-                };
-            }
-        "#,
-        );
-        assert!(
-            result.is_err(),
-            "two requirements sharing a name must be an error"
-        );
-    }
-
+    /// Enforces an unlabeled output requirement.
     #[test]
     fn parse_out_with_an_unlabeled_requirement_is_enforced() {
         let mut sheet = parser()
@@ -2626,6 +2714,7 @@ mod tests {
         assert_eq!(sheet.violated_requirements(output_id).count(), 1);
     }
 
+    /// Enforces an unlabeled requirement whose body is a bare identifier.
     #[test]
     fn parse_out_with_a_bare_identifier_unlabeled_requirement_is_enforced() {
         let mut sheet = parser()
@@ -2645,6 +2734,7 @@ mod tests {
         assert_eq!(sheet.violated_requirements(output_id).count(), 1);
     }
 
+    /// Accepts an output cell referenced by another expression.
     #[test]
     fn parse_out_cell_referenced_elsewhere_succeeds() {
         // `out` cells are no longer terminal (see `adam_rs::CellKind`): referencing an `out`
@@ -2665,6 +2755,7 @@ mod tests {
         );
     }
 
+    /// Infers structural array outputs without registering the array carrier.
     #[test]
     fn parse_out_infers_structural_array_without_registration() {
         let result = parser().parse_str(
@@ -2688,6 +2779,7 @@ mod tests {
     }
 
     /// Empty tuple writers execute their initializer and propagate runtime errors.
+    /// Executes an output writer even when its result is the empty tuple.
     #[test]
     fn empty_tuple_output_executes_its_writer() {
         let mut lookup = OpLookup::new();
@@ -2705,6 +2797,7 @@ mod tests {
         assert!(error.to_string().contains("unit writer failed"), "{error}");
     }
 
+    /// Accepts an output cell as a conditional subject.
     #[test]
     fn parse_out_cell_referenced_in_conditional_succeeds() {
         // `out` cells are no longer terminal (see `adam_rs::CellKind`): referencing an `out`
@@ -2728,6 +2821,7 @@ mod tests {
         );
     }
 
+    /// Initializes a cell with an explicitly declared tuple shape.
     #[test]
     fn parse_cell_with_explicit_tuple_type_and_initializer() {
         let mut p = parser();
@@ -2752,6 +2846,7 @@ mod tests {
         assert_eq!((a, b), (1, 2.5));
     }
 
+    /// Constructs recursive defaults for tuple-typed cells.
     #[test]
     fn parse_cell_with_tuple_type_and_no_initializer_uses_recursive_default() {
         let parsed = parser()
@@ -2768,22 +2863,26 @@ mod tests {
         assert_eq!((a, b), (0, 0.0));
     }
 
+    /// Rejects an initializer with the wrong tuple arity.
     #[test]
     fn parse_cell_with_tuple_initializer_arity_mismatch_is_an_error() {
         let result = parser().parse_str("sheet s { cell a: (i32, f64, i32) = (1, 2.5); }");
         assert!(result.is_err());
     }
 
+    /// Stores and reads a nested tuple cell.
     #[test]
     fn parse_cell_with_nested_tuple_type_round_trips() {
         let parsed = parser()
             .parse_str("sheet s { cell a: (i32, (f64, String)) = (1, (2.5, \"x\")); }")
             .unwrap();
         let (cell_id, _) = parsed.cell_names["a"].clone();
+        /// Describes the fixture's nested tuple value.
         type Inner = cel_runtime::Cons<
             cel_runtime::Leaf<f64>,
             cel_runtime::Cons<cel_runtime::Leaf<String>, cel_runtime::Nil>,
         >;
+        /// Describes the integer paired with the inner tuple.
         type Outer =
             cel_runtime::Cons<cel_runtime::Leaf<i32>, cel_runtime::Cons<Inner, cel_runtime::Nil>>;
         let value = parsed.read_compound::<Outer>(cell_id).unwrap();
@@ -2792,6 +2891,7 @@ mod tests {
         assert_eq!((b, c), (2.5, "x".to_string()));
     }
 
+    /// Stores the complete result of an explicitly typed tuple output.
     #[test]
     fn parse_out_with_explicit_tuple_type_infers_and_stores_correctly() {
         let mut sheet = parser()
@@ -2816,6 +2916,7 @@ mod tests {
         assert_eq!((a, b), (3, 3));
     }
 
+    /// Reports an unsupported range initializer after syntax parsing succeeds.
     #[test]
     fn parse_cell_range_initializer_fails_cleanly_at_type_inference_not_grammar() {
         // `Range<i32>` isn't a registered adam-lang type — this must still fail today, but only
@@ -2829,6 +2930,7 @@ mod tests {
     }
 
     /// Verifies unregistered out results identify the declaration and its name token.
+    /// Retains output context and source span in a shape diagnostic.
     #[test]
     fn shape_error_out_preserves_context_and_span() {
         for expression in ["1i32..5i32", "(1i32, 1i32..5i32)"] {
@@ -2851,6 +2953,7 @@ mod tests {
     }
 
     /// Verifies unregistered match results identify the expression and its opening token.
+    /// Retains conditional-subject context and span in a shape diagnostic.
     #[test]
     fn shape_error_match_preserves_context_and_span() {
         for (expression, end_column) in [("1i32..5i32", 16), ("(1i32, 1i32..5i32)", 30)] {
@@ -2876,6 +2979,7 @@ mod tests {
     }
 
     /// Verifies unregistered binding results identify the output and its binding token.
+    /// Retains binding-output context and span in a shape diagnostic.
     #[test]
     fn shape_error_output_preserves_context_and_span() {
         for (shape, expression) in [("i32", "1i32..5i32"), ("(i32, i32)", "(1i32, 1i32..5i32)")] {
@@ -2897,6 +3001,7 @@ mod tests {
     }
 
     /// Verifies unregistered initializer results identify the cell and its name token.
+    /// Retains initializer context and source span in a shape diagnostic.
     #[test]
     fn shape_error_initializer_preserves_context_and_span() {
         for expression in ["1i32..5i32", "(1i32, 1i32..5i32)"] {
@@ -2919,6 +3024,7 @@ mod tests {
     }
 
     /// Preserves source declaration labels and name spans for initializer errors.
+    /// Retains source-cell context and span in a shape diagnostic.
     #[test]
     fn shape_error_source_preserves_context_and_span() {
         for (declaration, message) in [
@@ -2949,6 +3055,7 @@ mod tests {
     }
 
     /// Verifies registered type mismatches retain the ordinary out and output prefixes.
+    /// Retains declaration context for registered leaf mismatches.
     #[test]
     fn shape_error_registered_mismatches_preserve_context() {
         for (source, prefix) in [
@@ -2964,6 +3071,7 @@ mod tests {
         }
     }
 
+    /// Attributes a dependency-cycle validation error to the governed cell.
     #[test]
     fn dependency_cycle_validation_error_spans_the_governed_cell() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -2984,6 +3092,7 @@ mod tests {
     // `add_conditional_returns_invalid_conditional_for_duplicate_relationship_across_branches`
     // (adam-rs/src/sheet.rs); it stays untested at the adam-lang parser level until adam-lang
     // grows named/referenceable relationships (tracked as a follow-up, not blocking this task).
+    /// Renders invalid conditional relationships and cells as related labels.
     #[test]
     fn conditional_invalid_relationship_and_cell_sites_render_as_secondary_labels() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
@@ -2997,6 +3106,7 @@ mod tests {
         assert!(out.contains("cell `p` is part of the cycle"), "{out}");
     }
 
+    /// Attributes a duplicate output requirement to the repeated label.
     #[test]
     /// Locates duplicate labels at the repeated requirement, not the sheet opening.
     fn out_decl_duplicate_requirement_error_spans_the_duplicate_label() {

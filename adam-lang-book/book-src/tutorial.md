@@ -15,8 +15,8 @@ readable text labels, instead of cell identifiers.
 
 ## A first sheet
 
-An Adam program is a single `sheet`, named, with a body of declarations between braces. A simple
-sheet declares a couple of source cells:
+The first example defines one named `sheet`, with declarations between braces.
+Modules may contain multiple definitions and imports. This sheet declares two source cells:
 
 ```adam
 {{#include examples/tutorial/first_sheet.adm2}}
@@ -143,9 +143,12 @@ in an out role, violating a filter will trigger a diagnostic.
 {{#include examples/tutorial/requirements_filter_diagnostic.adm2}}
 ```
 
-A cell may also have one or more requirements. For source cell or when a cell is writable, the requirements act are a boolean expression that act as a filter rejecting any input that doesn't satisfy the requirements.
+A cell may also have one or more requirements. Each requirement is a Boolean diagnostic,
+not an input gate: a source or writable cell retains a value that violates a requirement,
+and propagation reports the requirement's failed validity.
 
-For an out cell, violating a requirement will trigger a diagnostic. Requirements have an optional name that can be associated with a message explaining the issue.
+The same rule applies to an out cell. Requirements have an optional name that can be
+associated with a message explaining the issue.
 
 ```adam
 {{#include examples/tutorial/area_with_requirement.adm2}}

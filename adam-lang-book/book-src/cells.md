@@ -2,7 +2,8 @@
 
 ## Sheets
 
-Every Adam source file is one sheet:
+The examples begin with a single root sheet. An Adam module may also contain imports
+and multiple root or parameterized sheet definitions:
 
 ```adam
 sheet name {
@@ -12,9 +13,8 @@ sheet name {
 }
 ```
 
-The sheet's own name (`name` above) is consumed by the parser and is not otherwise meaningful
-to `adam-rs`; it exists for readability and for host tooling, such as a language server or an
-example picker, to have something to display.
+The sheet's name (`name` above) identifies the definition for module resolution and
+root selection. Host tooling also uses it for display.
 
 ## Cell declarations
 
@@ -36,8 +36,8 @@ syntax error ("expected `:` or `=` in cell declaration"). A `cell` may also carr
 trailing `filter` clause and/or `require` block — a standing domain constraint and named
 boolean diagnostics, respectively, both covered in full in the [filters chapter](filters.md) and
 [requirements: diagnostics, not gates](outputs.md#requirements-diagnostics-not-gates) (those two chapters introduce the
-mechanisms via `out`, but both apply to a plain `cell` — and, `require` only, to a
-[`source`](source.md) cell — exactly the same way).
+mechanisms via `out`, but both also apply to a plain `cell` or a
+[`source`](source.md) cell).
 
 A cell's initializer may reference literals and CEL operators, but not other cells: it's
 evaluated before the sheet has any state to read.

@@ -1,6 +1,7 @@
 //! Examples backing `book-src/cells.md` (Chapter 2). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
+/// Reads both default coordinates of the displayed tuple cell.
 #[test]
 fn tuple_typed_cell() {
     let mut parser = adam_lang_book::support::parser();
@@ -10,6 +11,7 @@ fn tuple_typed_cell() {
         ))
         .unwrap();
     let point = parsed.cell_names["point"].0;
+    /// Represents the canonical pair of floating-point coordinates.
     type Point = cel_runtime::Cons<
         cel_runtime::Leaf<f64>,
         cel_runtime::Cons<cel_runtime::Leaf<f64>, cel_runtime::Nil>,

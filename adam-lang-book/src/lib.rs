@@ -5,9 +5,9 @@
 //! file under `book-src/examples/<chapter>/`, pulled directly into a chapter's markdown with
 //! mdBook's `{{#include examples/<chapter>/<name>.adm2}}` directive. The matching test in
 //! `tests/<chapter>.rs` loads that same file with `include_str!` and asserts on its behavior,
-//! verified by `cargo test -p adam-lang-book` — so a chapter's prose can never drift from code
-//! that actually compiles and passes. [`support::parser`] is the one piece of shared setup those
-//! tests build on.
+//! verified by `cargo test -p adam-lang-book`. These assertions check the documented language
+//! behavior; the staged browser build separately checks live rendering.
+//! [`support::parser`] supplies the shared host registrations.
 //!
 //! Build the book itself with `mdbook build` (or `mdbook serve`) from this directory.
 

@@ -87,8 +87,27 @@ impl TokenCursor {
     /// afterward, whether the sub-parse succeeded or failed: `count` is `0` on success (a no-op),
     /// and the net number of delimiters CEL left dangling, unmatched, in the stream on failure —
     /// see [`Self::depth`]'s doc comment for why that can happen.
-    pub(crate) fn absorb_unbalanced_delimiters(&mut self, count: i32) {
-        self.depth += count;
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic if the resulting nesting depth cannot be represented.
+    pub(crate) fn absorb_unbalanced_delimiters(&mut self, count: i32) -> Result<()> {
+        self.adjust_depth(count)
+    }
+
+    /// Updates nesting depth, reporting unrepresentable external-input nesting.
+    ///
+    /// # Errors
+    ///
+    /// Returns a diagnostic without changing depth if the signed addition overflows.
+    fn adjust_depth(&mut self, delta: i32) -> Result<()> {
+        self.depth = self.depth.checked_add(delta).ok_or_else(|| {
+            ParseError::new(
+                "delimiter nesting depth exceeds the supported range",
+                self.last_span,
+            )
+        })?;
+        Ok(())
     }
 
     /// Takes the token stream, leaving `None` behind — used to hand the stream to an embedded
@@ -104,16 +123,19 @@ impl TokenCursor {
         self.tokens = Some(tokens);
     }
 
+    /// Borrows the current token without consuming it.
     pub(crate) fn peek_token(&mut self) -> Option<&Token> {
         self.tokens.as_mut()?.peek()
     }
 
+    /// Consumes the current token and records its span, or returns `None` at end of input.
     pub(crate) fn advance(&mut self) -> Option<Token> {
         let token = self.tokens.as_mut()?.next()?;
         self.last_span = token.span();
         Some(token)
     }
 
+    /// Returns the current token's span or a call-site span at end of input.
     pub(crate) fn peek_span(&mut self) -> Span {
         self.tokens
             .as_mut()
@@ -122,6 +144,9 @@ impl TokenCursor {
             .unwrap_or_else(Span::call_site)
     }
 
+    /// Constructs a diagnostic at the current token or end-of-input call site.
+    ///
+    /// - Complexity: O(m) time and space when converting an m-byte message.
     pub(crate) fn err_at(&mut self, msg: impl Into<String>) -> ParseError {
         ParseError::new(msg.into(), self.peek_span())
     }
@@ -195,7 +220,7 @@ impl TokenCursor {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the next token is not `{`.
+    /// Returns a diagnostic if the next token is not `{` or the new depth is unrepresentable.
     ///
     /// - Postcondition: on success, increments [`Self::depth`] by 1.
     pub(crate) fn expect_open_brace(&mut self) -> Result<Span> {
@@ -208,7 +233,7 @@ impl TokenCursor {
         };
         if ok {
             self.advance();
-            self.depth += 1;
+            self.adjust_depth(1)?;
             Ok(span)
         } else {
             Err(ParseError::new("expected `{`", span))
@@ -219,7 +244,7 @@ impl TokenCursor {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the next token is not `}`.
+    /// Returns a diagnostic if the next token is not `}` or the new depth is unrepresentable.
     ///
     /// - Postcondition: on success, decrements [`Self::depth`] by 1.
     pub(crate) fn expect_close_brace(&mut self) -> Result<Span> {
@@ -232,7 +257,7 @@ impl TokenCursor {
         };
         if ok {
             self.advance();
-            self.depth -= 1;
+            self.adjust_depth(-1)?;
             Ok(span)
         } else {
             Err(ParseError::new("expected `}`", span))
@@ -243,7 +268,7 @@ impl TokenCursor {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the next token is not `(`.
+    /// Returns a diagnostic if the next token is not `(` or the new depth is unrepresentable.
     ///
     /// - Postcondition: on success, increments [`Self::depth`] by 1.
     pub(crate) fn expect_open_paren(&mut self) -> Result<Span> {
@@ -256,7 +281,7 @@ impl TokenCursor {
         };
         if ok {
             self.advance();
-            self.depth += 1;
+            self.adjust_depth(1)?;
             Ok(span)
         } else {
             Err(ParseError::new("expected `(`", span))
@@ -289,7 +314,7 @@ impl TokenCursor {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the next token is not `)`.
+    /// Returns a diagnostic if the next token is not `)` or the new depth is unrepresentable.
     ///
     /// - Postcondition: on success, decrements [`Self::depth`] by 1.
     pub(crate) fn expect_close_paren(&mut self) -> Result<Span> {
@@ -302,7 +327,7 @@ impl TokenCursor {
         };
         if ok {
             self.advance();
-            self.depth -= 1;
+            self.adjust_depth(-1)?;
             Ok(span)
         } else {
             Err(ParseError::new("expected `)`", span))
@@ -396,21 +421,25 @@ impl TokenCursor {
     ///
     /// The failed production must consume its starting keyword before recovery.
     ///
-    /// - Complexity: O(n) in skipped tokens.
-    pub(crate) fn skip_to_module_item(&mut self) -> Span {
+    /// - Complexity: O(n) time in skipped tokens and O(1) auxiliary space.
+    ///
+    /// # Errors
+    ///
+    /// Reports an unrepresentable nesting-depth transition.
+    pub(crate) fn skip_to_module_item(&mut self) -> Result<Span> {
         let mut last = self.last_span;
         loop {
             let top_level = self.depth <= 0;
             match self.peek_token() {
-                None => return last,
+                None => return Ok(last),
                 Some(Token::Identifier(id)) if top_level && (id == "use" || id == "sheet") => {
-                    return last;
+                    return Ok(last);
                 }
                 Some(Token::OpenDelim { .. }) => {
-                    self.depth = self.depth.checked_add(1).expect("token nesting fits i32")
+                    self.adjust_depth(1)?;
                 }
                 Some(Token::CloseDelim { .. }) => {
-                    self.depth = self.depth.checked_sub(1).expect("token nesting fits i32")
+                    self.adjust_depth(-1)?;
                 }
                 _ => {}
             }
@@ -422,6 +451,7 @@ impl TokenCursor {
         }
     }
 
+    /// Reports whether the current token is a closing brace or input has ended.
     pub(crate) fn at_close_brace(&mut self) -> bool {
         matches!(
             self.tokens.as_mut().and_then(|t| t.peek()),
@@ -436,7 +466,8 @@ impl TokenCursor {
     /// cursor's [`Self::depth`] as observed by the caller *before* it dispatched to the
     /// production that failed. A recovery point is: a `;` seen while at or below `target_depth`
     /// (consumed); a `}` that closes back to at or below `target_depth` (not consumed, so the
-    /// caller's `at_close_brace` check still sees it); or the `cell`/`relationship`/`conditional`
+    /// caller's `at_close_brace` check still sees it); or a `cell`/`source`/`out`/
+    /// `relationship`/`conditional`
     /// keyword that starts the next sheet item, seen while at or below `target_depth` (not
     /// consumed).
     ///
@@ -496,22 +527,30 @@ impl TokenCursor {
     /// - Postcondition: [`Self::depth`] is left at (or, only on malformed input, possibly below)
     ///   `target_depth`, kept consistent with every `OpenDelim`/`CloseDelim` consumed here.
     ///
-    /// - Complexity: O(n) in the number of tokens skipped.
-    pub(crate) fn skip_to_recovery_point(&mut self, target_depth: i32, fallback: Span) -> Span {
+    /// - Complexity: O(n) time in skipped tokens and O(1) auxiliary space.
+    ///
+    /// # Errors
+    ///
+    /// Reports an unrepresentable nesting-depth transition.
+    pub(crate) fn skip_to_recovery_point(
+        &mut self,
+        target_depth: i32,
+        fallback: Span,
+    ) -> Result<Span> {
         let mut last = fallback;
         loop {
             let at_or_below_target = self.depth <= target_depth;
             match self.peek_token() {
-                None => return last,
+                None => return Ok(last),
                 Some(Token::CloseDelim {
                     delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
                     ..
-                }) if at_or_below_target => return last,
+                }) if at_or_below_target => return Ok(last),
                 Some(Token::CloseDelim {
                     delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
                     ..
                 }) => {
-                    self.depth -= 1;
+                    self.adjust_depth(-1)?;
                     last = self.peek_span();
                     self.advance();
                 }
@@ -519,23 +558,24 @@ impl TokenCursor {
                     delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
                     ..
                 }) => {
-                    self.depth += 1;
+                    self.adjust_depth(1)?;
                     last = self.peek_span();
                     self.advance();
                 }
                 Some(Token::Punct { op, .. }) if op == ";" && at_or_below_target => {
                     last = self.peek_span();
                     self.advance();
-                    return last;
+                    return Ok(last);
                 }
                 Some(Token::Identifier(id))
                     if at_or_below_target
                         && (id == "cell"
+                            || id == "source"
                             || id == "relationship"
                             || id == "conditional"
                             || id == "out") =>
                 {
-                    return last;
+                    return Ok(last);
                 }
                 _ => {
                     last = self.peek_span();
@@ -569,6 +609,16 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    /// Reports an unrepresentable nesting transition without arithmetic overflow.
+    #[test]
+    fn nesting_overflow_is_a_diagnostic() {
+        let stream = proc_macro2::TokenStream::from_str("{}").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        cursor.depth = i32::MAX;
+        assert!(cursor.expect_open_brace().is_err());
+    }
+
+    /// Increments tracked depth when consuming an opening parenthesis.
     #[test]
     fn expect_open_paren_increments_depth() {
         let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
@@ -578,6 +628,7 @@ mod tests {
         assert_eq!(cursor.depth(), 1);
     }
 
+    /// Decrements tracked depth when consuming a closing parenthesis.
     #[test]
     fn expect_close_paren_decrements_depth() {
         let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
@@ -587,6 +638,7 @@ mod tests {
         assert_eq!(cursor.depth(), 0);
     }
 
+    /// Recognizes an opening parenthesis without consuming it.
     #[test]
     fn at_open_paren_is_true_at_an_open_paren() {
         let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
@@ -594,6 +646,7 @@ mod tests {
         assert!(cursor.at_open_paren());
     }
 
+    /// Stops recognizing an opening parenthesis after consuming it.
     #[test]
     fn at_open_paren_is_false_after_the_open_paren_is_consumed() {
         let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
@@ -602,6 +655,7 @@ mod tests {
         assert!(!cursor.at_open_paren());
     }
 
+    /// Recognizes the current closing parenthesis.
     #[test]
     fn at_close_paren_is_true_at_a_close_paren() {
         // `proc_macro2::TokenStream::from_str` tokenizes delimiters as a matched tree up front, so
@@ -615,6 +669,7 @@ mod tests {
         assert!(cursor.at_close_paren());
     }
 
+    /// Treats end of input as a closing boundary.
     #[test]
     fn at_close_paren_is_true_at_end_of_input() {
         let stream = proc_macro2::TokenStream::from_str("").unwrap();
@@ -622,6 +677,7 @@ mod tests {
         assert!(cursor.at_close_paren());
     }
 
+    /// Consumes an unsigned-in-syntax literal pattern without negation.
     #[test]
     fn consume_literal_pattern_accepts_a_bare_literal() {
         let stream = proc_macro2::TokenStream::from_str("5i32").unwrap();
@@ -630,6 +686,7 @@ mod tests {
         assert!(!negated);
     }
 
+    /// Consumes a negated explicitly signed integer pattern.
     #[test]
     fn consume_literal_pattern_accepts_a_negated_signed_integer() {
         let stream = proc_macro2::TokenStream::from_str("-5i32").unwrap();
@@ -638,6 +695,7 @@ mod tests {
         assert!(negated);
     }
 
+    /// Consumes a negated unsuffixed integer pattern.
     #[test]
     fn consume_literal_pattern_accepts_a_negated_unsuffixed_integer() {
         let stream = proc_macro2::TokenStream::from_str("-5").unwrap();
@@ -645,6 +703,7 @@ mod tests {
         assert!(cursor.consume_literal_pattern().is_ok());
     }
 
+    /// Consumes a negated floating-point literal pattern.
     #[test]
     fn consume_literal_pattern_accepts_a_negated_float() {
         let stream = proc_macro2::TokenStream::from_str("-1.5f64").unwrap();
@@ -652,6 +711,7 @@ mod tests {
         assert!(cursor.consume_literal_pattern().is_ok());
     }
 
+    /// Rejects negation of an unsigned literal pattern.
     #[test]
     fn consume_literal_pattern_rejects_a_negated_unsigned_integer() {
         let stream = proc_macro2::TokenStream::from_str("-5u32").unwrap();
@@ -659,6 +719,7 @@ mod tests {
         assert!(cursor.consume_literal_pattern().is_err());
     }
 
+    /// Rejects negation of a Boolean literal pattern.
     #[test]
     fn consume_literal_pattern_rejects_a_negated_bool() {
         let stream = proc_macro2::TokenStream::from_str("-true").unwrap();
@@ -666,6 +727,7 @@ mod tests {
         assert!(cursor.consume_literal_pattern().is_err());
     }
 
+    /// Leaves an ordinary token untouched when no documentation run begins.
     #[test]
     fn consume_doc_comment_run_returns_none_when_next_token_is_not_a_doc_comment() {
         let stream = proc_macro2::TokenStream::from_str("cell").unwrap();
@@ -673,6 +735,7 @@ mod tests {
         assert!(cursor.consume_doc_comment_run(false).is_none());
     }
 
+    /// Joins consecutive documentation comments with matching innerness.
     #[test]
     fn consume_doc_comment_run_joins_consecutive_matching_doc_comments() {
         let stream = proc_macro2::TokenStream::from_str("/// a\n/// b\ncell").unwrap();
@@ -684,6 +747,7 @@ mod tests {
         assert!(cursor.is_keyword("cell"));
     }
 
+    /// Leaves a documentation comment with different innerness unconsumed.
     #[test]
     fn consume_doc_comment_run_does_not_consume_a_mismatched_inner_flag() {
         let stream = proc_macro2::TokenStream::from_str("//! inner\ncell").unwrap();

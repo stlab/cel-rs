@@ -1,6 +1,7 @@
 //! Examples backing `book-src/outputs.md` (Chapter 8). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
+/// Evaluates the displayed output product.
 #[test]
 fn basic_output() {
     let mut parser = adam_lang_book::support::parser();
@@ -14,6 +15,7 @@ fn basic_output() {
     assert_eq!(*parsed.read::<i32>(area).unwrap(), 200);
 }
 
+/// Reads a chained output and rejects external writes to its upstream output.
 #[test]
 fn output_cell_can_be_referenced_but_never_written() {
     let mut parser = adam_lang_book::support::parser();
@@ -33,6 +35,7 @@ fn output_cell_can_be_referenced_but_never_written() {
     assert!(matches!(err, adam_rs::Error::InvalidCellKind { .. }));
 }
 
+/// Reports failed output validity after increasing its input.
 #[test]
 fn requirement_diagnostic() {
     let mut parser = adam_lang_book::support::parser();
@@ -51,6 +54,7 @@ fn requirement_diagnostic() {
     assert!(!parsed.cell_requirements_valid(output));
 }
 
+/// Reports exactly one failed requirement for the displayed negative input.
 #[test]
 fn multiple_requirements() {
     let mut parser = adam_lang_book::support::parser();

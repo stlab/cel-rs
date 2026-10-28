@@ -9,8 +9,8 @@
 //! - `call_dyn_fn` — an explicit checked host-call convenience for registered leaves
 //! - `default_fn`  — constructs a default `Box<dyn Any>` (when `Default` is available)
 //!
-//! Persistent compound storage owns canonical values, not external tuple wrappers
-//! wrappers. Sheet construction freezes complete descriptors and raw-frame adapters once;
+//! Persistent compound storage owns canonical values, not external tuple wrappers.
+//! Sheet construction freezes complete descriptors and raw-frame adapters once;
 //! the legacy external tuple helpers below are host-boundary utilities only.
 //!
 //! # Example
@@ -33,6 +33,17 @@ use cel_runtime::DynSegment;
 /// Identifies a declared cell recursively, independently of its erased storage carrier.
 ///
 /// Only concrete registered leaves carry Rust `TypeId`s; compound identities are structural.
+///
+/// # Examples
+///
+/// ```
+/// use adam_lang::type_registry::TypeShape;
+/// let pair = TypeShape::Tuple(vec![
+///     TypeShape::Named(std::any::TypeId::of::<i32>()),
+///     TypeShape::Named(std::any::TypeId::of::<bool>()),
+/// ]);
+/// assert!(adam_lang::TypeRegistry::new().validate_shape(&pair).is_ok());
+/// ```
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum TypeShape {
     /// A registered leaf type, by its Rust `TypeId`.
@@ -46,22 +57,62 @@ pub enum TypeShape {
 }
 
 /// Registers a `push_arg<T>(index)` op on a segment.
+///
+/// - Complexity: follows [`DynSegment::push_arg`], including segment storage growth.
+///
+/// # Examples
+///
+/// See [`TypeEntry`] for selecting a concrete registration; [`TypeRegistry::get`]
+/// retains the matching adapter and type identity together.
 pub type PushArgFn = fn(&mut DynSegment, usize);
 
 /// Adds a typed cell from a boxed value and returns its handle.
+///
+/// - Precondition: the box contains the exact registered concrete type.
+/// - Complexity: follows [`Sheet::add_cell`].
+///
+/// # Examples
+///
+/// See [`TypeEntry`] for creating a cell through its selected registration.
 pub type AddCellFn = fn(&mut Sheet, Box<dyn Any>) -> CellId;
 
 /// Adds a typed source cell (via [`Sheet::add_source`]) from a boxed value and returns its
 /// handle.
+///
+/// - Precondition: the box contains the exact registered concrete type.
+/// - Complexity: follows [`Sheet::add_source`].
+///
+/// # Examples
+///
+/// See [`TypeEntry`] for creating a source through its selected registration.
 pub type AddSourceFn = fn(&mut Sheet, Box<dyn Any>) -> CellId;
 
 /// Executes a compiled segment with the supplied inputs and boxes the result.
+///
+/// - Complexity: follows dynamic segment evaluation and concrete result cloning.
+///
+/// # Errors
+///
+/// Reports rejected argument or result types and evaluation failures.
+///
+/// # Examples
+///
+/// See [`TypeEntry`] for calling a segment with the registered argument and result adapters.
 pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>;
 
 /// Calls `Sheet::add_conditional` with the appropriate concrete type.
 ///
 /// Each branch carries a single boxed key value and the `RelationshipId`s active for that
 /// branch. The default is a list of `RelationshipId`s active when no branch key matches.
+///
+/// - Precondition: every boxed branch key contains the exact registered concrete type.
+/// - Complexity: O(b + r) time and space for b branches and r relationship identifiers,
+///   plus the sheet's conditional validation.
+///
+/// # Examples
+///
+/// See [`Sheet::add_conditional`] for branch activation and [`TypeRegistry::get`]
+/// for selecting the erased key adapter.
 pub type AddConditionalFn = fn(
     &mut Sheet,
     MatchExpr,
@@ -77,19 +128,41 @@ pub type AddConditionalFn = fn(
 pub(crate) struct RangeEntry {
     /// `T`'s own `TypeId` — compared against a filtered cell's declared type by the caller.
     pub(crate) element_type_id: TypeId,
-    /// Evaluates a compiled segment producing a `RangeInclusive<T>` against `value` (the
-    /// candidate being conformed — read only if the segment's expression actually references
-    /// `_`) and `args` (the filter's deduced cell dependencies, in declaration order), clamping
-    /// `value` into the resulting bounds.
+    /// Consumes an already evaluated range and clones the candidate or its nearest endpoint.
+    ///
+    /// - Precondition: the range is bound to this registered numeric type and the
+    ///   candidate has `element_type_id`.
     pub(crate) clamp_fn: fn(cel_runtime::OwnedValue, &dyn Any) -> anyhow::Result<Box<dyn Any>>,
-    /// Evaluates the same kind of segment against `placeholder` (substituted for `_`, which a
-    /// recognized range expression's bounds never actually depend on) and `args`, returning the
-    /// resulting `(lo, hi)` bounds.
+    /// Consumes an evaluated range and clones both inclusive endpoints.
+    ///
+    /// - Precondition: the result is bound to this registered numeric range type.
     pub(crate) bounds_fn:
         fn(cel_runtime::OwnedValue) -> anyhow::Result<(Box<dyn Any>, Box<dyn Any>)>,
 }
 
 /// Metadata for a single type registered in a [`TypeRegistry`].
+///
+/// Cell/source/conditional adapters require boxed values of `type_id`; callers establish
+/// this before dispatch. Checked host calls report runtime mismatches. Erased equality
+/// returns false if either operand has another concrete type.
+///
+/// # Examples
+///
+/// ```
+/// let registry = adam_lang::TypeRegistry::new();
+/// let entry = registry.get("i32").unwrap();
+/// let mut sheet = adam_rs::Sheet::new();
+/// let cell = (entry.add_cell_fn)(&mut sheet, Box::new(7i32));
+/// assert_eq!(*sheet.read::<i32>(cell).unwrap(), 7);
+/// assert!((entry.eq_dyn_fn)(&7i32, &7i32));
+/// assert!(!(entry.eq_dyn_fn)(&"other", &"other"));
+/// let source = (entry.add_source_fn)(&mut sheet, Box::new(8i32));
+/// assert_eq!(*sheet.read::<i32>(source).unwrap(), 8);
+/// let mut segment = cel_runtime::DynSegment::new::<()>();
+/// (entry.push_arg_fn)(&mut segment, 0);
+/// let result = (entry.call_dyn_fn)(&mut segment, &[&9i32]).unwrap();
+/// assert_eq!(*result.downcast::<i32>().unwrap(), 9);
+/// ```
 #[derive(Clone)]
 pub struct TypeEntry {
     /// Selects native recipe constructors monomorphized for this registered leaf.
@@ -109,7 +182,7 @@ pub struct TypeEntry {
     pub add_source_fn: AddSourceFn,
     /// Calls `DynSegment::call_dyn::<T>` and boxes the result.
     pub call_dyn_fn: CallDynFn,
-    /// Compares two type-erased values of this type for equality.
+    /// Compares registered values; returns false if either operand has another concrete type.
     pub eq_dyn_fn: fn(&dyn Any, &dyn Any) -> bool,
     /// Constructs a default `T` if the type implements `Default`; otherwise `None`.
     pub default_fn: Option<fn() -> Box<dyn Any>>,
@@ -120,6 +193,10 @@ pub struct TypeEntry {
 }
 
 /// Maps DSL type names to Rust types for adam-lang cell declarations.
+///
+/// Every registered concrete type remains reverse-reachable while at least one of its
+/// names survives. Registering a new alias makes it the preferred reverse name;
+/// replacing that alias selects a surviving name if one exists.
 ///
 /// # Example
 ///
@@ -137,6 +214,9 @@ pub struct TypeRegistry {
     range_inclusive: HashMap<TypeId, RangeEntry>,
 }
 
+/// Appends a typed argument read using this registration's concrete leaf type.
+///
+/// - Complexity: follows [`DynSegment::push_arg`], including segment storage growth.
 fn push_arg_impl<T: 'static + Clone>(segment: &mut DynSegment, index: usize) {
     segment.push_arg::<T>(index);
 }
@@ -158,6 +238,7 @@ fn add_conditional_impl<T: Any + PartialEq + 'static>(
     branches: Vec<(Box<dyn Any>, Vec<RelationshipId>)>,
     default: Vec<RelationshipId>,
 ) -> Result<ConditionalId, adam_rs::Error> {
+    debug_assert!(branches.iter().all(|(value, _)| value.is::<T>()));
     let typed_branches: Vec<(Vec<T>, Vec<RelationshipId>)> = branches
         .into_iter()
         .map(|(val, rel_ids)| {
@@ -170,7 +251,11 @@ fn add_conditional_impl<T: Any + PartialEq + 'static>(
     sheet.add_conditional::<T>(source, typed_branches, default)
 }
 
+/// Adds one cell whose boxed value has the registration's exact concrete type.
+///
+/// - Precondition: `value` contains `T`.
 fn add_cell_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn Any>) -> CellId {
+    debug_assert!(value.is::<T>());
     let v = value
         .downcast::<T>()
         .expect("add_cell_impl: type matches registration");
@@ -182,22 +267,30 @@ fn add_cell_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn
 ///
 /// - Precondition: `value` holds a `T` matching the registration that produced this fn pointer.
 fn add_source_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn Any>) -> CellId {
+    debug_assert!(value.is::<T>());
     let v = value
         .downcast::<T>()
         .expect("add_source_impl: type matches registration");
     sheet.add_source(*v)
 }
 
-/// Compares two type-erased values of `T`, for `TypeEntry::eq_dyn_fn`.
+/// Compares concrete `T` values and returns false for either mismatched operand.
 ///
-/// A generic function monomorphized per registered `T`, with no captured state — this is
-/// what lets it coerce to a bare `fn` pointer despite `T` only being known via a runtime
-/// `TypeId` at the call site (exactly like `call_dyn_impl` already does for calling a
-/// compiled segment).
+/// - Complexity: the concrete type's equality cost; no additional allocation.
 fn eq_dyn_impl<T: PartialEq + 'static>(a: &dyn Any, b: &dyn Any) -> bool {
-    a.downcast_ref::<T>() == b.downcast_ref::<T>()
+    match (a.downcast_ref::<T>(), b.downcast_ref::<T>()) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
+/// Executes the checked host-call boundary and boxes its concrete result.
+///
+/// # Errors
+///
+/// Reports rejected argument types, result types, or evaluation failures.
+///
+/// - Complexity: the segment's execution cost plus its result's clone cost.
 fn call_dyn_impl<T: 'static + Clone>(
     seg: &mut DynSegment,
     inputs: &[&dyn Any],
@@ -216,12 +309,15 @@ fn value_type_impl<T: Clone + PartialEq + std::fmt::Debug + 'static>()
         .expect("same registered leaf")
 }
 
-/// Evaluates `seg` (producing a `RangeInclusive<T>`) against `value` prepended to `args`, then
-/// clamps `value` into the resulting bounds. For [`RangeEntry::clamp_fn`].
+/// Consumes a bound numeric range and clones the candidate or its nearest endpoint.
+///
+/// - Precondition: `result` is bound to `RangeInclusive<T>` and `value` contains `T`.
+/// - Complexity: one value clone and at most two value comparisons.
 fn range_clamp_impl<T: Clone + PartialOrd + 'static>(
     result: cel_runtime::OwnedValue,
     value: &dyn Any,
 ) -> anyhow::Result<Box<dyn Any>> {
+    debug_assert!(value.is::<T>());
     // SAFETY: The registered range and cell descriptors are bound during preparation.
     let range =
         unsafe { result.into_typed_bound::<cel_runtime::Leaf<std::ops::RangeInclusive<T>>>() };
@@ -236,8 +332,10 @@ fn range_clamp_impl<T: Clone + PartialOrd + 'static>(
     Ok(Box::new(clamped) as Box<dyn Any>)
 }
 
-/// Evaluates `seg` (producing a `RangeInclusive<T>`) against `placeholder` prepended to `args`,
-/// returning the resulting `(lo, hi)` bounds. For [`RangeEntry::bounds_fn`].
+/// Consumes a bound numeric range and clones both inclusive endpoints.
+///
+/// - Precondition: `result` is bound to `RangeInclusive<T>`.
+/// - Complexity: two endpoint clones.
 fn range_bounds_impl<T: Clone + 'static>(
     result: cel_runtime::OwnedValue,
 ) -> anyhow::Result<(Box<dyn Any>, Box<dyn Any>)> {
@@ -266,7 +364,17 @@ impl TypeRegistry {
     /// annotations, keeping sheet construction and other Adam-specific function pointers out of
     /// `cel-parser`.
     ///
-    /// - Complexity: O(n) in the number of registered leaf types.
+    /// - Complexity: O(n + b) time and space for n registered names totaling b bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_parser::TypeResolver;
+    /// let registry = adam_lang::TypeRegistry::new();
+    /// let snapshot = registry.cel_type_resolver();
+    /// drop(registry);
+    /// assert!(snapshot.resolve_named_type("i32", &[]).is_some());
+    /// ```
     #[must_use]
     pub fn cel_type_resolver(&self) -> RegistryTypeResolver {
         let by_name = self
@@ -286,6 +394,13 @@ impl TypeRegistry {
     ///
     /// Registered types: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`,
     /// `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64`, `bool`, `String`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let registry = adam_lang::TypeRegistry::new();
+    /// assert_eq!(registry.get("i32").unwrap().type_id, std::any::TypeId::of::<i32>());
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         let mut r = TypeRegistry {
@@ -329,6 +444,9 @@ impl TypeRegistry {
     /// Registers `T` under `name` with default initialization support.
     ///
     /// - Postcondition: `self.get(name)` returns `Some(entry)` with `entry.default_fn.is_some()`.
+    ///   Surviving aliases remain reachable by name and concrete type identity.
+    /// - Complexity: O(n + k) time and O(k) new name space for n registrations
+    ///   and k copied or compared name bytes.
     ///
     /// # Examples
     ///
@@ -343,9 +461,7 @@ impl TypeRegistry {
         name: &str,
     ) {
         let type_id = TypeId::of::<T>();
-        if let Some(old) = self.by_name.get(name) {
-            self.by_type_id.remove(&old.type_id);
-        }
+        self.remove_registration_name(name);
         self.by_name.insert(
             name.to_owned(),
             TypeEntry {
@@ -371,6 +487,9 @@ impl TypeRegistry {
     /// A cell declared as `cell x: T;` (no initializer) is a parse error for this type.
     ///
     /// - Postcondition: `self.get(name)` returns `Some(entry)` with `entry.default_fn.is_none()`.
+    ///   Surviving aliases remain reachable by name and concrete type identity.
+    /// - Complexity: O(n + k) time and O(k) new name space for n registrations
+    ///   and k copied or compared name bytes.
     ///
     /// # Examples
     ///
@@ -388,9 +507,7 @@ impl TypeRegistry {
         name: &str,
     ) {
         let type_id = TypeId::of::<T>();
-        if let Some(old) = self.by_name.get(name) {
-            self.by_type_id.remove(&old.type_id);
-        }
+        self.remove_registration_name(name);
         self.by_name.insert(
             name.to_owned(),
             TypeEntry {
@@ -411,9 +528,39 @@ impl TypeRegistry {
         self.by_type_id.insert(type_id, name.to_owned());
     }
 
+    /// Removes `name`, retaining reverse lookup through a surviving alias before replacement.
+    ///
+    /// - Complexity: O(n + k) time over n registrations and k inspected or copied
+    ///   name bytes; O(k) space for a surviving name.
+    fn remove_registration_name(&mut self, name: &str) {
+        let Some(old) = self.by_name.remove(name) else {
+            return;
+        };
+        let old_id = old.type_id;
+        if self
+            .by_type_id
+            .get(&old_id)
+            .is_none_or(|canonical| canonical != name)
+        {
+            return;
+        }
+        let remaining = self
+            .by_name
+            .iter()
+            .find(|(_, entry)| entry.type_id == old_id)
+            .map(|(alias, _)| alias.clone());
+        if let Some(alias) = remaining {
+            self.by_type_id.insert(old_id, alias);
+        } else {
+            self.by_type_id.remove(&old_id);
+        }
+    }
+
     /// Looks up a type entry by its DSL name.
     ///
     /// Returns `None` if `name` has not been registered.
+    ///
+    /// - Complexity: expected O(k) time in k name bytes and O(1) space.
     ///
     /// # Examples
     ///
@@ -431,6 +578,8 @@ impl TypeRegistry {
     /// Looks up a type entry by its `TypeId`.
     ///
     /// Returns `None` if no type with this `TypeId` has been registered.
+    ///
+    /// - Complexity: expected O(k) time in the selected registered name's k bytes and O(1) space.
     ///
     /// # Examples
     ///
@@ -521,26 +670,67 @@ impl TypeRegistry {
         self.by_type_id.get(&type_id).map(String::as_str)
     }
 
-    /// Formats `shape` recursively, e.g. `"(i32, (f64, String))"`, for error messages.
+    /// Formats `shape` recursively using registered leaf names, or `?` for unknown leaves.
+    ///
+    /// - Complexity: O(n + b) time for n shape nodes and b result bytes; O(b + d)
+    ///   space including the result and recursion depth d.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use adam_lang::{TypeRegistry, type_registry::TypeShape};
+    /// let shape = TypeShape::Tuple(vec![TypeShape::Named(std::any::TypeId::of::<i32>())]);
+    /// assert_eq!(TypeRegistry::new().display_name(&shape), "(i32,)");
+    /// ```
     #[must_use]
     pub fn display_name(&self, shape: &TypeShape) -> String {
+        let mut output = String::new();
+        self.write_shape_name(&mut output, shape);
+        output
+    }
+
+    /// Appends a shape name without cloning shapes or allocating intermediate names.
+    ///
+    /// - Complexity: O(n + b) amortized time and O(b + d) space for n nodes,
+    ///   b appended bytes, and recursion depth d, including output growth.
+    fn write_shape_name(&self, output: &mut String, shape: &TypeShape) {
         match shape {
-            TypeShape::Named(type_id) => self.registered_name(*type_id).unwrap_or("?").to_string(),
-            TypeShape::Tuple(elements) => {
-                let parts: Vec<String> = elements.iter().map(|e| self.display_name(e)).collect();
-                format!(
-                    "({}{})",
-                    parts.join(", "),
-                    if elements.len() == 1 { "," } else { "" }
-                )
+            TypeShape::Named(type_id) => {
+                output.push_str(self.registered_name(*type_id).unwrap_or("?"));
             }
-            TypeShape::Array(element) => format!("[{}]", self.display_name(element)),
-            TypeShape::Callable(parameters, result) => format!(
-                "Fn({}, {})",
-                self.display_name(&TypeShape::Tuple(parameters.clone())),
-                self.display_name(result)
-            ),
+            TypeShape::Tuple(elements) => self.write_tuple_name(output, elements),
+            TypeShape::Array(element) => {
+                output.push('[');
+                self.write_shape_name(output, element);
+                output.push(']');
+            }
+            TypeShape::Callable(parameters, result) => {
+                output.push_str("Fn(");
+                self.write_tuple_name(output, parameters);
+                output.push_str(", ");
+                self.write_shape_name(output, result);
+                output.push(')');
+            }
         }
+    }
+
+    /// Appends a tuple name, including the required terminal comma for one element.
+    ///
+    /// - Complexity: O(n + b) amortized time and O(b + d) space over n reachable
+    ///   shape nodes, b appended bytes, and recursion depth d, including output growth.
+    fn write_tuple_name(&self, output: &mut String, elements: &[TypeShape]) {
+        output.push('(');
+        // Emit each borrowed element directly into the shared output.
+        for (index, element) in elements.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            self.write_shape_name(output, element);
+        }
+        if elements.len() == 1 {
+            output.push(',');
+        }
+        output.push(')');
     }
 
     /// Builds one `AssociatedType` entry describing `shape`: a leaf's own registered layout for
@@ -551,6 +741,7 @@ impl TypeRegistry {
     ///
     /// - Postcondition: the returned entry's `offset` is always 0; the caller
     ///   (`ValueType::tuple`) computes canonical tail-first sibling offsets.
+    /// - Complexity: O(n) descriptor nodes and space, including recursive traversal.
     fn one_associated(&self, shape: &TypeShape) -> cel_runtime::AssociatedType {
         let value_type = match shape {
             TypeShape::Named(type_id) => {
@@ -749,6 +940,12 @@ impl TypeRegistry {
 }
 
 /// A CEL-facing snapshot of one [`TypeRegistry`]'s registered leaf types.
+///
+/// The metadata remains valid independently of later registry mutation or destruction.
+///
+/// # Examples
+///
+/// See [`TypeRegistry::cel_type_resolver`] for a snapshot used after registry destruction.
 #[derive(Clone, Default)]
 pub struct RegistryTypeResolver {
     by_name: HashMap<String, ResolvedLeafType>,
@@ -786,13 +983,16 @@ fn named_key<'a>(name: &'a str, args: &[ResolvedType]) -> std::borrow::Cow<'a, s
     if args.is_empty() {
         std::borrow::Cow::Borrowed(name)
     } else {
-        std::borrow::Cow::Owned(format!(
-            "{name}({})",
-            args.iter()
-                .map(ResolvedType::display_name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
+        let mut key = String::from(name);
+        key.push('(');
+        for (index, argument) in args.iter().enumerate() {
+            if index != 0 {
+                key.push_str(", ");
+            }
+            key.push_str(&argument.display_name());
+        }
+        key.push(')');
+        std::borrow::Cow::Owned(key)
     }
 }
 
@@ -809,6 +1009,30 @@ mod tests {
     use proc_macro2::Span;
     use std::any::TypeId;
 
+    /// Renders empty, singleton, array, callable, and unknown shapes with strict tuple syntax.
+    #[test]
+    fn display_name_covers_recursive_shape_variants() {
+        let integer = TypeShape::Named(TypeId::of::<i32>());
+        let cases = [
+            (TypeShape::Tuple(vec![]), "()"),
+            (TypeShape::Tuple(vec![integer.clone()]), "(i32,)"),
+            (
+                TypeShape::Array(Box::new(TypeShape::Tuple(vec![integer.clone()]))),
+                "[(i32,)]",
+            ),
+            (
+                TypeShape::Callable(vec![integer], Box::new(TypeShape::Tuple(vec![]))),
+                "Fn((i32,), ())",
+            ),
+            (TypeShape::Named(TypeId::of::<Vec<i32>>()), "?"),
+        ];
+        let registry = TypeRegistry::new();
+        for (shape, expected) in cases {
+            assert_eq!(registry.display_name(&shape), expected);
+        }
+    }
+
+    /// Constructs a zero-width expression range at the supplied span.
     fn point(span: Span) -> crate::ast::ExprSpan {
         crate::ast::ExprSpan {
             start: span,
@@ -816,6 +1040,7 @@ mod tests {
         }
     }
 
+    /// Registers the built-in integer under its concrete runtime type.
     #[test]
     fn new_registers_builtin_i32() {
         let reg = TypeRegistry::new();
@@ -852,6 +1077,7 @@ mod tests {
         }
     }
 
+    /// Registers floating-point values with default construction.
     #[test]
     fn new_registers_builtin_f64_with_default() {
         let reg = TypeRegistry::new();
@@ -860,6 +1086,7 @@ mod tests {
         assert!(entry.default_fn.is_some(), "f64 must have a default");
     }
 
+    /// Registers the built-in owned string type.
     #[test]
     fn new_registers_builtin_string() {
         let reg = TypeRegistry::new();
@@ -867,6 +1094,7 @@ mod tests {
         assert_eq!(entry.type_id, TypeId::of::<String>());
     }
 
+    /// Registers a custom name with its concrete type and default factory.
     #[test]
     fn register_custom_type_with_default() {
         let mut reg = TypeRegistry::new();
@@ -876,8 +1104,10 @@ mod tests {
         assert!(entry.default_fn.is_some());
     }
 
+    /// Omits default construction when registering a non-defaultable leaf.
     #[test]
     fn register_no_default_has_no_default_fn() {
+        /// Supplies a test leaf without a `Default` implementation.
         #[derive(PartialEq, Clone, Debug)]
         struct NoDefault(i32);
 
@@ -887,8 +1117,10 @@ mod tests {
         assert!(entry.default_fn.is_none());
     }
 
+    /// Preserves a registered custom leaf's requested CEL name and type.
     #[test]
     fn cel_type_resolver_uses_registered_leaf_names() {
+        /// Supplies a non-built-in leaf for name resolution.
         #[derive(PartialEq, Clone, Debug)]
         struct Custom(i32);
 
@@ -904,6 +1136,7 @@ mod tests {
         assert_eq!(leaf.type_name(), "Custom");
     }
 
+    /// Forwards a registered argument through dynamic segment invocation.
     #[test]
     fn push_arg_fn_drives_call_dyn() {
         use cel_runtime::DynSegment;
@@ -918,6 +1151,7 @@ mod tests {
         assert_eq!(result, 7);
     }
 
+    /// Adds exactly one cell storing the supplied concrete value.
     #[test]
     fn add_cell_fn_creates_cell() {
         use adam_rs::Sheet;
@@ -927,10 +1161,12 @@ mod tests {
         let entry = reg.get("f64").unwrap();
         let mut sheet = Sheet::new();
         let val: Box<dyn Any> = Box::new(42.14_f64);
-        let _cell_id = (entry.add_cell_fn)(&mut sheet, val);
-        // Compiles and runs without panicking: add_cell_fn is callable.
+        let cell_id = (entry.add_cell_fn)(&mut sheet, val);
+        assert_eq!(sheet.cells().count(), 1);
+        assert_eq!(*sheet.read::<f64>(cell_id).unwrap(), 42.14);
     }
 
+    /// Boxes a dynamic call's concrete result without changing its value.
     #[test]
     fn call_dyn_fn_returns_boxed_result() {
         use cel_runtime::DynSegment;
@@ -946,6 +1182,7 @@ mod tests {
         assert_eq!(*result, 99);
     }
 
+    /// Resolves a registered leaf through its concrete `TypeId`.
     #[test]
     fn entry_by_type_id_roundtrip() {
         let reg = TypeRegistry::new();
@@ -955,12 +1192,14 @@ mod tests {
         assert_eq!(entry.type_id, std::any::TypeId::of::<f64>());
     }
 
+    /// Returns no entry for an unknown registered name.
     #[test]
     fn get_nonexistent_returns_none() {
         let reg = TypeRegistry::new();
         assert!(reg.get("nonexistent").is_none());
     }
 
+    /// Returns no entry for an unregistered concrete type.
     #[test]
     fn entry_by_type_id_nonexistent_returns_none() {
         let reg = TypeRegistry::new();
@@ -971,10 +1210,13 @@ mod tests {
         );
     }
 
+    /// Removes reverse lookup when the replaced leaf has no surviving name.
     #[test]
     fn register_overwrite_removes_stale_type_id() {
+        /// Identifies the defaultable leaf whose last name is replaced.
         #[derive(PartialEq, Clone, Default, Debug)]
         struct TypeA;
+        /// Identifies the replacement defaultable leaf.
         #[derive(PartialEq, Clone, Default, Debug)]
         struct TypeB;
 
@@ -992,10 +1234,13 @@ mod tests {
         assert_eq!(reg.get("alias").unwrap().type_id, TypeId::of::<TypeB>());
     }
 
+    /// Removes obsolete reverse lookup when replacing a non-defaultable leaf.
     #[test]
     fn register_no_default_overwrite_removes_stale_type_id() {
+        /// Identifies the leaf whose last name is replaced.
         #[derive(PartialEq, Clone, Debug)]
         struct TypeA;
+        /// Identifies the replacement leaf.
         #[derive(PartialEq, Clone, Debug)]
         struct TypeB;
 
@@ -1023,6 +1268,7 @@ mod tests {
         assert_eq!(cloned.try_debug().unwrap(), "7");
     }
 
+    /// Resolves a named annotation to its registered concrete shape.
     #[test]
     fn resolve_named_type_expr_returns_the_matching_type_shape() {
         let reg = TypeRegistry::new();
@@ -1035,6 +1281,7 @@ mod tests {
         assert_eq!(shape, TypeShape::Named(TypeId::of::<i32>()));
     }
 
+    /// Reports an unknown named annotation.
     #[test]
     fn resolve_unknown_named_type_expr_is_an_error() {
         let reg = TypeRegistry::new();
@@ -1046,6 +1293,7 @@ mod tests {
         assert!(reg.resolve(&expr).is_err());
     }
 
+    /// Resolves recursively nested tuple annotations.
     #[test]
     fn resolve_tuple_type_expr_returns_a_nested_type_shape() {
         let reg = TypeRegistry::new();
@@ -1088,6 +1336,7 @@ mod tests {
         );
     }
 
+    /// Resolves structural arrays without registering their carrier.
     #[test]
     fn resolve_accepts_structural_array_cell_type() {
         let registry = TypeRegistry::new();
@@ -1106,6 +1355,7 @@ mod tests {
         );
     }
 
+    /// Resolves a registered generic leaf annotation.
     #[test]
     fn resolve_accepts_registered_generic_leaf() {
         let mut registry = TypeRegistry::new();
@@ -1211,6 +1461,7 @@ mod tests {
         }
     }
 
+    /// Resolves built-in generic types through the CEL fallback.
     #[test]
     fn cel_type_resolver_falls_back_to_builtin_generics() {
         let registry = TypeRegistry::new();
@@ -1222,6 +1473,7 @@ mod tests {
         assert_eq!(resolved.type_name(), "RangeInclusive(f64)");
     }
 
+    /// Renders a recursive tuple shape with registered leaf names.
     #[test]
     fn display_name_formats_a_nested_tuple_shape() {
         let reg = TypeRegistry::new();
@@ -1235,6 +1487,7 @@ mod tests {
         assert_eq!(reg.display_name(&shape), "(i32, (f64, String))");
     }
 
+    /// Describes a flat tuple using its canonical runtime layout.
     #[test]
     fn canonical_descriptor_describes_a_flat_tuple() {
         let reg = TypeRegistry::new();
@@ -1251,6 +1504,7 @@ mod tests {
         assert_eq!(prototype[1].offset, 0);
     }
 
+    /// Retains recursive element descriptors for a nested tuple.
     #[test]
     fn canonical_descriptor_describes_a_nested_tuple() {
         let reg = TypeRegistry::new();
@@ -1285,6 +1539,7 @@ mod tests {
         let parsed = crate::AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new())
             .parse_str("sheet s { cell x: (i32, ([f64],)); }")
             .unwrap();
+        /// Represents the recursive tuple and array default requested by the fixture.
         type Shape = Cons<Leaf<i32>, Cons<Cons<ArrayOf<Leaf<f64>>, Nil>, Nil>>;
         let (number, nested) = parsed
             .read_compound::<Shape>(parsed.cell_names["x"].0)
@@ -1292,6 +1547,7 @@ mod tests {
             .into_rust_tuple();
         assert_eq!(number, 0);
         assert!(nested.into_rust_tuple().0.is_empty());
+        /// Supplies a leaf whose missing default must be diagnosed.
         #[derive(Clone, PartialEq, Debug)]
         struct NoDefault;
         let mut registry = TypeRegistry::new();
@@ -1303,6 +1559,7 @@ mod tests {
         assert!(error.to_string().contains("NoDefault"));
     }
 
+    /// Compares equal concrete integers as equal through the erased adapter.
     #[test]
     fn eq_dyn_fn_compares_equal_i32_values_as_equal() {
         let reg = TypeRegistry::new();
@@ -1312,6 +1569,7 @@ mod tests {
         assert!((entry.eq_dyn_fn)(&a, &b));
     }
 
+    /// Compares unequal concrete integers as unequal through the erased adapter.
     #[test]
     fn eq_dyn_fn_compares_unequal_i32_values_as_unequal() {
         let reg = TypeRegistry::new();
@@ -1321,8 +1579,10 @@ mod tests {
         assert!(!(entry.eq_dyn_fn)(&a, &b));
     }
 
+    /// Supplies value equality for non-defaultable registered leaves.
     #[test]
     fn register_no_default_also_populates_eq_dyn_fn() {
+        /// Supplies a non-defaultable leaf with value equality.
         #[derive(PartialEq, Clone, Debug)]
         struct NoDefault(i32);
 
@@ -1336,6 +1596,7 @@ mod tests {
         assert!(!(entry.eq_dyn_fn)(&a, &c));
     }
 
+    /// Associates a registered numeric range with its element type.
     #[test]
     fn range_entry_recognizes_a_registered_numeric_range_inclusive_type() {
         let reg = TypeRegistry::new();
@@ -1345,12 +1606,14 @@ mod tests {
         assert_eq!(entry.element_type_id, TypeId::of::<i32>());
     }
 
+    /// Returns no range adapter for an ordinary scalar type.
     #[test]
     fn range_entry_returns_none_for_a_non_range_type() {
         let reg = TypeRegistry::new();
         assert!(reg.range_entry(TypeId::of::<i32>()).is_none());
     }
 
+    /// Clamps an erased candidate to evaluated inclusive bounds.
     #[test]
     fn range_entry_clamp_fn_clamps_a_value_into_the_evaluated_bounds() {
         let reg = TypeRegistry::new();
@@ -1369,6 +1632,7 @@ mod tests {
         assert_eq!(*result.downcast_ref::<i32>().unwrap(), 100);
     }
 
+    /// Returns both evaluated inclusive bounds with their concrete values.
     #[test]
     fn range_entry_bounds_fn_returns_the_evaluated_bounds() {
         let reg = TypeRegistry::new();
