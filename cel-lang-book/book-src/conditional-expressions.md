@@ -29,7 +29,9 @@ if score > 90 { "high" } else if score > 75 { "mid" } else { "low" }
   selected branch.
 - CEL supports the branch forms `if`, `if ... else`, and `if ... else if ...`
   chains.
-- The condition and every branch body are ordinary expressions.
+- The condition reserves the following body brace. Parenthesize a record
+  constructor in the condition, such as `if (Point { x: 0.0 }).x == 0.0 { 1 } else { 2 }`.
+  Branch bodies are ordinary expressions.
 - Omitting the final `else` supplies an implicit `()` branch, so the
   remaining branches must still be type-compatible with unit.
 - The braces belong to `if` syntax. CEL does not use free-standing block

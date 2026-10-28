@@ -391,6 +391,8 @@ fn runtime_errors_keep_source_spans() {
     )
     .unwrap();
     let error = retained.call0::<i32>().unwrap_err();
+    assert!(error.root_cause().to_string().contains("zero"));
+    #[cfg(feature = "span-diagnostics")]
     assert_eq!(
         error
             .downcast_ref::<cel_parser::SpanContext>()
@@ -398,6 +400,11 @@ fn runtime_errors_keep_source_spans() {
             .span(),
         expected
     );
+    #[cfg(not(feature = "span-diagnostics"))]
+    {
+        let _ = expected;
+        assert!(error.downcast_ref::<cel_parser::SpanContext>().is_none());
+    }
 }
 
 /// Callback failures preserve their identifier location and release already emitted owners.

@@ -42,30 +42,31 @@
 //! [reference chapter](../cel-book/reference.html).
 //!
 //! ```text
-//! expression = range_expression.
-//! range_expression = or_expression [ ".." [ or_expression ] | "..=" or_expression ]
-//!                   | ".." [ or_expression ]
-//!                   | "..=" or_expression.
-//! or_expression = and_expression { "||" and_expression }.
-//! and_expression = comparison_expression { "&&" comparison_expression }.
-//! comparison_expression = bitwise_or_expression
-//!     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
-//! bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
-//! bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
-//! bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
-//! bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
-//! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
-//! multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.
-//! cast_expression = unary_expression { "as" identifier }.
-//! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
-//! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ parameter_list ] ")" ]) }.
-//! primary_expression = literal | identifier [ record_fields ] | tuple_or_group | array_expression
-//!                    | if_expression | closure_expression.
+//! expression = ".." [ ranged_operand ] | "..=" ranged_operand | operand.
+//! operand = ("-" | "!") operand | closure_expression | atom tail.
+//! compared_operand = ("-" | "!") compared_operand | closure_expression | atom compared_tail.
+//! ranged_operand = ("-" | "!") ranged_operand | closure_expression | atom ranged_tail.
+//! ranged_compared_operand = ("-" | "!") ranged_compared_operand
+//!                         | closure_expression | atom ranged_compared_tail.
+//! atom = primary_expression { postfix_suffix } { "as" identifier }.
+//! postfix_suffix = "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier).
+//! tail = [ high_operator operand | comparison_operator compared_operand
+//!        | logical_operator operand | ".." [ ranged_operand ] | "..=" ranged_operand ].
+//! compared_tail = [ high_operator compared_operand | logical_operator operand
+//!                 | ".." [ ranged_operand ] | "..=" ranged_operand ].
+//! ranged_tail = [ high_operator ranged_operand | comparison_operator ranged_compared_operand
+//!               | logical_operator ranged_operand ].
+//! ranged_compared_tail = [ high_operator ranged_compared_operand | logical_operator ranged_operand ].
+//! high_operator = "+" | "-" | "*" | "/" | "%" | "|" | "^" | "&" | "<<" | ">>".
+//! comparison_operator = "==" | "!=" | "<" | ">" | "<=" | ">=".
+//! logical_operator = "&&" | "||".
+//! primary_expression = literal | value_identifier [ record_fields ] | tuple_or_group
+//!                    | array_expression | if_expression.
 //! record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } ] "}".
 //! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
 //! array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expression ].
 //! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
-//! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
+//! closure_expression = ("||" | "|" closure_param { "," closure_param } "|") expression.
 //! closure_param = identifier ":" type_expression.
 //! parameter_list = expression { "," expression }.
 //!
@@ -75,6 +76,21 @@
 //!
 //! literal_pattern = ["-"] literal.
 //! ```
+//!
+//! This recognition grammar separates syntax from operator binding. The parser applies the
+//! precedence levels documented on its production methods; the book's operator table gives the
+//! same ordering. A closure consumes the remaining expression in its current delimiter boundary.
+//! The four operand/tail states prevent comparison and range chaining without an ambiguous
+//! optional continuation after a bare closure. Postfix calls directly following a named member
+//! dispatch that member; grouping the member first calls its result instead.
+//!
+//! Expand these productions in ordinary and header modes. Header mode omits `record_fields`
+//! from its primary production, so its following `{` belongs to the host body. Groups, argument
+//! lists, arrays, record field values and branch bodies enter ordinary mode; closure bodies
+//! inherit their enclosing mode. A condition enters header mode. Each tail's operator tokens
+//! are disjoint from its FOLLOW set (closing delimiters, comma, body brace or end of input).
+//! Operand alternatives start with unary punctuation, closure punctuation or a primary token;
+//! `value_identifier` excludes the five reserved words.
 //!
 //! Registered records use a constructor namespace independent of value bindings and evaluate
 //! fields once in written order. All schema fields are required exactly once with exact types.
@@ -1775,23 +1791,12 @@ impl<C: ParserContext> Parser<C> {
         Ok(Some(count))
     }
 
-    /// Applies a single `.N` tuple-index operation to the value currently on
-    /// top of the stack, replacing it with element `index`. `start` is the span
-    /// of the base expression the index chain is rooted at.
+    /// Applies `.N`, leaving semantic bounds validation to the owning context.
     ///
     /// # Errors
     /// Returns an error if the top of stack isn't a tuple, or if `index` is
     /// out of range for its arity.
     fn apply_tuple_index(&mut self, index: usize, start: Span) -> Result<()> {
-        let arity = self
-            .context
-            .peek_tuple_arity()
-            .ok_or_else(|| self.error_at("'.N' requires a tuple"))?;
-        if index >= arity {
-            return Err(self.error_at(&format!(
-                "tuple index `{index}` out of range for tuple of arity {arity}"
-            )));
-        }
         self.context.tuple_index(index, start, self.last_span)?;
         Ok(())
     }
@@ -1864,6 +1869,9 @@ impl<C: ParserContext> Parser<C> {
 
                 if ident_name == "if" {
                     return self.is_if_expression(ident_span);
+                }
+                if matches!(ident_name.as_str(), "else" | "as") {
+                    return Err(self.error_at("reserved keyword is not a value name"));
                 }
 
                 if self.restriction == ExpressionRestriction::None
@@ -2294,7 +2302,8 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error if a parameter name, its `:`, its type, or the closing `|` is malformed
+    /// Returns an error if a parameter name is reserved or duplicated, its `:`, its type,
+    /// or the closing `|` is malformed
     /// or missing; if a runtime parameter names an unrecognized type or unsupported array
     /// element shape; if a used parameter lacks clone support; if the body is missing or malformed;
     /// or if this `ParserContext` implementation's `push_closure` rejects the closure (e.g.
@@ -2331,27 +2340,31 @@ impl<C: ParserContext> Parser<C> {
             }
         }
 
-        let param_types = params
-            .iter()
-            .filter_map(|(_, _, ty, _)| ty.clone())
-            .collect();
-        let ast_params: Vec<ClosureParam> = params
-            .iter()
-            .map(|(name, name_span, _, ty_ast)| ClosureParam {
+        let mut param_types = Vec::with_capacity(params.len());
+        let mut ast_params = Vec::with_capacity(params.len());
+        let mut param_table = HashMap::with_capacity(params.len());
+        // Transfer each type tree once; runtime formals and syntax retain independent names.
+        for (index, (name, name_span, ty, ty_ast)) in params.into_iter().enumerate() {
+            if let Some(ty) = &ty {
+                param_types.push(ty.clone());
+            }
+            ast_params.push(ClosureParam {
                 name: name.clone(),
                 name_span: ExprSpan {
-                    start: *name_span,
-                    end: *name_span,
+                    start: name_span,
+                    end: name_span,
                 },
-                type_expr: ty_ast.clone(),
-            })
-            .collect();
-        let isolated = self.op_lookup.isolate_scopes();
-        let param_table: HashMap<String, (usize, Option<cel_runtime::ValueType>)> = params
+                type_expr: ty_ast,
+            });
+            param_table.insert(name, (index, ty));
+        }
+        if let Some(error) = ast::closure_parameter_diagnostics(&ast_params)
             .into_iter()
-            .enumerate()
-            .map(|(idx, (name, _, ty, _))| (name, (idx, ty)))
-            .collect();
+            .next()
+        {
+            return Err(error);
+        }
+        let isolated = self.op_lookup.isolate_scopes();
         self.op_lookup
             .push_scope(move |name, segment, arity, _span| {
                 if arity != 0 {
@@ -3111,7 +3124,7 @@ mod tests {
     }
 
     #[test]
-    fn cast_binds_tighter_than_unary_negation() {
+    fn unary_negation_binds_tighter_than_cast() {
         // `-x as u32` must parse as `(-x) as u32` (matching Rust): the negative operand hits the
         // checked int->int cast's own out-of-range check at execution, not a "no operation `-`
         // for `u32`" error at parse time, which is what parsing it as `-(x as u32)` would
@@ -3617,7 +3630,11 @@ mod tests {
                     Ok(true)
                 }
                 ("()", 1) => {
-                    segment.op1(|_callee: i32| 7i32)?;
+                    segment.op1r(|callee: i32| {
+                        callee
+                            .checked_add(7)
+                            .ok_or_else(|| anyhow::anyhow!("overflow"))
+                    })?;
                     Ok(true)
                 }
                 _ => Ok(false),
@@ -3627,7 +3644,7 @@ mod tests {
         let mut segment = parser
             .parse_str("f()()")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        assert_eq!(segment.call0::<i32>()?, 7);
+        assert_eq!(segment.call0::<i32>()?, 14);
         Ok(())
     }
 
@@ -3674,7 +3691,7 @@ mod tests {
     fn and_chained_short_circuits() {
         let mut parser = CELParser::new(OpLookup::new());
         let mut segment = parser
-            .parse_str("false && false && false")
+            .parse_str("true && false && (1i32 / 0i32 == 0i32)")
             .expect("should parse");
         assert!(!segment.call0::<bool>().unwrap());
     }
@@ -4464,13 +4481,12 @@ mod tests {
             .call0::<cel_runtime::OwnedValue>()?
             .try_into_typed::<cel_runtime::ArrayOf<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>>>(
             )?;
-        let inner = array.into_vec();
-        assert_eq!(inner.len(), 2);
-        let mut values = Vec::new();
-        for element in inner {
-            values.extend(element.into_vec());
-        }
-        assert_eq!(values, vec![0, 1]);
+        let rows: Vec<_> = array
+            .into_vec()
+            .into_iter()
+            .map(|row| row.into_vec())
+            .collect();
+        assert_eq!(rows, vec![vec![0], vec![1]]);
         Ok(())
     }
 
@@ -4858,17 +4874,8 @@ mod playground {
             Ok(false)
         });
         let mut parser = CELParser::new(lookup);
-        let line = line!() + 1;
-        let source = r#"
-            (("hello" + " world") == constant) && (15i64 < constant)
-        "#;
-        match parser.parse_str(source) {
-            Ok(mut seg) => println!("{:?}", seg.call0::<bool>()),
-            Err(e) => println!(
-                "{}",
-                e.format_rustc_style(source, file!(), line, &Renderer::styled())
-            ),
-        }
+        let mut segment = parser.parse_str("constant == 42i64 && 15i64 < constant")?;
+        assert!(segment.call0::<bool>().unwrap());
         Ok(())
     }
     #[test]
@@ -4878,13 +4885,14 @@ mod playground {
         let source = r#"
             b'a'
         "#;
-        println!(
-            "{:?}",
+        assert_eq!(
             CELParser::new(OpLookup::new())
                 .parse_str(source)
                 .unwrap()
                 .call0::<u8>()
-        )
+                .unwrap(),
+            b'a'
+        );
     }
 
     #[test]

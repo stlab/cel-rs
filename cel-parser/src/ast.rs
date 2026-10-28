@@ -361,16 +361,45 @@ pub struct ClosureParam {
     pub type_expr: crate::TypeExpr,
 }
 
-/// Converts a statically-known literal value into its [`Literal`] variant.
+/// Reports reserved or repeated parameter names without resolving their type annotations.
+///
+/// - Complexity: Expected O(n + b) time and O(n) space for n parameters and b name bytes.
+pub(crate) fn closure_parameter_diagnostics(params: &[ClosureParam]) -> Vec<crate::ParseError> {
+    let mut names = std::collections::HashSet::with_capacity(params.len());
+    params
+        .iter()
+        .filter_map(|param| {
+            let message = if matches!(param.name.as_str(), "if" | "else" | "as" | "true" | "false")
+            {
+                "reserved keyword is not a closure parameter name"
+            } else if !names.insert(param.name.as_str()) {
+                "duplicate closure parameter name"
+            } else {
+                return None;
+            };
+            Some(crate::ParseError::new_range(
+                message,
+                param.name_span.start,
+                param.name_span.end,
+            ))
+        })
+        .collect()
+}
+
+/// Converts a statically-known literal value into its [`Literal`] variant, transferring owned buffers.
 ///
 /// - Precondition: `T` is one of the concrete types `push_literal_token` (`lib.rs`) pushes:
 ///   the signed/unsigned integer widths, `f32`/`f64`, `bool`, `char`, `String`, `Vec<u8>`,
 ///   `CString`, or `()`.
-fn to_literal<T: 'static + Clone>(value: &T) -> Literal {
-    let any = value as &dyn Any;
+fn to_literal<T: 'static>(value: T) -> Literal {
+    // Taking an Option transfers even CString without constructing a replacement buffer.
+    let mut value = Some(value);
+    let any = &mut value as &mut dyn Any;
     macro_rules! map {
         ($($t:ty => $variant:path),+ $(,)?) => {
-            $( if let Some(x) = any.downcast_ref::<$t>() { return $variant(x.clone()); } )+
+            $( if let Some(x) = any.downcast_mut::<Option<$t>>() {
+                return $variant(x.take().expect("literal is transferred once"));
+            } )+
         };
     }
     map! {
@@ -382,7 +411,7 @@ fn to_literal<T: 'static + Clone>(value: &T) -> Literal {
         bool => Literal::Bool, char => Literal::Char, String => Literal::Str,
         Vec<u8> => Literal::ByteStr, CString => Literal::CStr,
     }
-    if any.is::<()>() {
+    if any.is::<Option<()>>() {
         return Literal::Unit;
     }
     unreachable!("push_literal called with an unsupported literal type")
@@ -421,6 +450,7 @@ impl AstContext {
     /// Removes and returns the top `n` nodes, in source order.
     ///
     /// - Precondition: at least `n` nodes are present.
+    /// - Complexity: O(n) time and space for the returned nodes.
     fn pop_n(&mut self, n: usize) -> Vec<Expr> {
         let at = self.values.len() - n;
         self.values.split_off(at)
@@ -429,6 +459,14 @@ impl AstContext {
     /// Consumes the context, returning the single parsed expression.
     ///
     /// - Precondition: parsing completed successfully (exactly one node remains).
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, ParserContext, Expr, Literal};
+    /// let mut context = AstContext::new_context();
+    /// context.push_literal(7i32, proc_macro2::Span::call_site());
+    /// assert!(matches!(context.into_expr(), Expr::Literal { value: Literal::I32(7), .. }));
+    /// ```
     pub fn into_expr(mut self) -> Expr {
         debug_assert_eq!(
             self.values.len(),
@@ -440,25 +478,33 @@ impl AstContext {
 }
 
 impl ParserContext for AstContext {
+    /// Defers closure annotation resolution to semantic checking or compilation.
     fn resolves_closure_types() -> bool {
         false
     }
 
+    /// Creates an empty syntax stack.
     fn new_context() -> Self {
         AstContext { values: Vec::new() }
     }
 
+    /// Creates an independent empty syntax stack.
     fn new_fragment(&self) -> Self {
         AstContext { values: Vec::new() }
     }
 
+    /// Transfers one supported literal into a leaf node without copying owned buffers.
     fn push_literal<T: 'static + Clone>(&mut self, value: T, span: Span) {
         self.values.push(Expr::Literal {
-            value: to_literal(&value),
+            value: to_literal(value),
             span: ExprSpan::point(span),
         });
     }
 
+    /// Records an identifier, ordinary call, or operator with source-order operands.
+    ///
+    /// - Precondition: the stack contains `arity` operands, including a callee for `"()"`.
+    /// - Complexity: O(a + b) time and space for a operands and b name bytes.
     fn apply_op(
         &mut self,
         _op_lookup: &OpLookup,
@@ -549,6 +595,9 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
+    /// Records a lazy logical operation without replacing it with conditional syntax.
+    ///
+    /// - Precondition: `name` is `"&&"` or `"||"`; each side contains one expression.
     fn apply_logical(
         &mut self,
         name: &str,
@@ -577,6 +626,9 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
+    /// Records one conditional, preserving an absent `else` rather than synthesizing syntax.
+    ///
+    /// - Precondition: the condition and each supplied branch contain one expression.
     fn join2(
         &mut self,
         mut then_fragment: Self,
@@ -608,6 +660,10 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
+    /// Collects source-order elements into a tuple, representing the empty tuple as unit.
+    ///
+    /// - Precondition: exactly `n` nodes follow `ambient_start`.
+    /// - Complexity: O(n) time and space for n elements.
     fn make_tuple(
         &mut self,
         n: usize,
@@ -635,6 +691,10 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
+    /// Collects source-order elements into an unannotated array node.
+    ///
+    /// - Precondition: exactly `n` nodes follow `ambient_start`.
+    /// - Complexity: O(n) time and space for n elements.
     fn make_array(
         &mut self,
         n: usize,
@@ -657,6 +717,10 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
+    /// Collects elements and retains unresolved annotation syntax and its source boundary.
+    ///
+    /// - Precondition: exactly `n` nodes follow `ambient_start`.
+    /// - Complexity: O(n) time and space for n elements.
     fn make_annotated_array(
         &mut self,
         n: usize,
@@ -681,15 +745,14 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
+    /// Reports no semantic tuple arity during syntax-only parsing.
     fn peek_tuple_arity(&self) -> Option<usize> {
-        // No static type info is available during parsing (full type inference is a later,
-        // separate phase), so a real arity can't be reported. usize::MAX makes
-        // `apply_tuple_index`'s `index < arity` check in lib.rs always pass, so `.N` is always
-        // recorded rather than rejected at parse time — e.g. `some_call().0` must still produce
-        // an AST even though whether the call actually returns a tuple isn't known here.
-        Some(usize::MAX)
+        None
     }
 
+    /// Records every representable tuple index without prematurely checking its base type.
+    ///
+    /// - Precondition: one base expression is present.
     fn tuple_index(&mut self, index: usize, start: Span, end: Span) -> crate::Result<()> {
         let base = self.pop();
         self.values.push(Expr::TupleIndex {
@@ -700,10 +763,15 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
+    /// Returns the node offset used to delimit the current element list.
     fn current_stack_offset(&self) -> usize {
         self.values.len()
     }
 
+    /// Records a cast without resolving its target type.
+    ///
+    /// - Precondition: one operand is present.
+    /// - Complexity: O(b) time and space for b type-name bytes.
     fn apply_cast(
         &mut self,
         _op_lookup: &OpLookup,
@@ -720,6 +788,9 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
+    /// Transfers parameter syntax and its sole body expression into a closure node.
+    ///
+    /// - Precondition: `body` contains exactly one expression.
     fn push_closure(
         &mut self,
         param_types: Vec<cel_runtime::ValueType>,
@@ -743,60 +814,119 @@ impl ParserContext for AstContext {
 mod tests {
     use super::*;
     use crate::Parser;
+
+    /// Name validation reports the duplicate or reserved formal at its own source location.
+    #[test]
+    fn parameter_diagnostics_use_the_offending_formals_span() {
+        let Expr::Closure { mut params, .. } = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast("|x: i32, y: bool| x")
+            .unwrap()
+        else {
+            panic!("closure")
+        };
+        assert!(closure_parameter_diagnostics(&params).is_empty());
+        params[1].name = "x".to_owned();
+        let errors = closure_parameter_diagnostics(&params);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message().contains("duplicate"));
+        assert_eq!(errors[0].span().start().column, 9);
+        params[1].name = "as".to_owned();
+        assert!(
+            closure_parameter_diagnostics(&params)[0]
+                .message()
+                .contains("reserved")
+        );
+    }
+
+    /// Converting owned literals retains their existing allocations and contents.
+    #[test]
+    fn owned_literal_buffers_transfer_without_copying() {
+        let text = String::from("owned");
+        let pointer = text.as_ptr();
+        let Literal::Str(text) = to_literal(text) else {
+            panic!("string literal")
+        };
+        assert_eq!(text, "owned");
+        assert_eq!(text.as_ptr(), pointer);
+        let bytes = vec![1u8, 2, 3];
+        let pointer = bytes.as_ptr();
+        let Literal::ByteStr(bytes) = to_literal(bytes) else {
+            panic!("byte string literal")
+        };
+        assert_eq!(bytes, [1, 2, 3]);
+        assert_eq!(bytes.as_ptr(), pointer);
+        let text = CString::new("owned").unwrap();
+        let pointer = text.as_ptr();
+        let Literal::CStr(text) = to_literal(text) else {
+            panic!("C string literal")
+        };
+        assert_eq!(text.to_bytes(), b"owned");
+        assert_eq!(text.as_ptr(), pointer);
+    }
+
+    /// Supplies a real range distinct from call-site and nested fixture spans.
+    fn distinct_span() -> ExprSpan {
+        let tokens: proc_macro2::TokenStream = "\n outer\n end".parse().unwrap();
+        let mut tokens = tokens.into_iter();
+        ExprSpan {
+            start: tokens.next().unwrap().span(),
+            end: tokens.next().unwrap().span(),
+        }
+    }
     use proc_macro2::Span;
 
     #[test]
     fn span_returns_the_range_stored_on_a_leaf_variant() {
-        let target = ExprSpan {
-            start: Span::call_site(),
-            end: Span::call_site(),
-        };
+        let target = distinct_span();
         let expr = Expr::Ident {
             name: "x".to_string(),
             span: target,
         };
-        assert_eq!(format!("{:?}", expr.span()), format!("{target:?}"));
+        assert_eq!(
+            crate::SourceSpan::from_proc_macro2_range(expr.span().start, expr.span().end),
+            crate::SourceSpan::new(2, 1, 3, 4)
+        );
     }
 
     #[test]
     fn span_returns_the_range_stored_on_a_composite_variant() {
-        let target = ExprSpan {
-            start: Span::call_site(),
-            end: Span::call_site(),
-        };
+        let target = distinct_span();
         let expr = Expr::If {
             cond: Box::new(Expr::Literal {
                 value: Literal::Bool(true),
-                span: target,
+                span: ExprSpan::point(Span::call_site()),
             }),
             then_branch: Box::new(Expr::Literal {
                 value: Literal::I32(1),
-                span: target,
+                span: ExprSpan::point(Span::call_site()),
             }),
             else_branch: Some(Box::new(Expr::Literal {
                 value: Literal::I32(2),
-                span: target,
+                span: ExprSpan::point(Span::call_site()),
             })),
             span: target,
         };
-        assert_eq!(format!("{:?}", expr.span()), format!("{target:?}"));
+        assert_eq!(
+            crate::SourceSpan::from_proc_macro2_range(expr.span().start, expr.span().end),
+            crate::SourceSpan::new(2, 1, 3, 4)
+        );
     }
 
     #[test]
     fn closure_span_is_the_stored_span() {
-        let target = ExprSpan {
-            start: Span::call_site(),
-            end: Span::call_site(),
-        };
+        let target = distinct_span();
         let expr = Expr::Closure {
             params: Vec::new(),
             body: Box::new(Expr::Literal {
                 value: Literal::I32(1),
-                span: target,
+                span: ExprSpan::point(Span::call_site()),
             }),
             span: target,
         };
-        assert_eq!(format!("{:?}", expr.span()), format!("{target:?}"));
+        assert_eq!(
+            crate::SourceSpan::from_proc_macro2_range(expr.span().start, expr.span().end),
+            crate::SourceSpan::new(2, 1, 3, 4)
+        );
     }
 
     #[test]
@@ -993,7 +1123,7 @@ mod tests {
         ctx.push_literal(2i32, Span::call_site());
         ctx.make_tuple(2, ambient_start, Span::call_site(), Span::call_site())
             .unwrap();
-        assert_eq!(ctx.peek_tuple_arity(), Some(usize::MAX));
+        assert_eq!(ctx.peek_tuple_arity(), None);
         ctx.tuple_index(1, Span::call_site(), Span::call_site())
             .unwrap();
         match ctx.into_expr() {
@@ -1006,10 +1136,10 @@ mod tests {
     }
 
     #[test]
-    fn peek_tuple_arity_is_always_some_since_types_are_unresolved_during_parsing() {
+    fn tuple_arity_is_unknown_during_syntax_only_parsing() {
         let mut ctx = AstContext::new_context();
         ctx.push_literal(5i32, Span::call_site());
-        assert_eq!(ctx.peek_tuple_arity(), Some(usize::MAX));
+        assert_eq!(ctx.peek_tuple_arity(), None);
     }
 
     #[test]

@@ -19,39 +19,37 @@ another item, except for the required terminal comma in a singleton tuple value
 or type. No other list accepts a trailing comma.
 
 ```text
-expression = range_expression .
-range_expression = ".." [ or_expression ]
-                 | "..=" or_expression
-                 | or_expression [ ".." [ or_expression ] | "..=" or_expression ] .
-or_expression = and_expression { "||" and_expression } .
-and_expression = comparison_expression { "&&" comparison_expression } .
-comparison_expression = bitwise_or_expression
-    [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ] .
-bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression } .
-bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression } .
-bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression } .
-bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression } .
-additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression } .
-multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
-cast_expression = unary_expression { "as" identifier } .
-unary_expression = (("-" | "!") unary_expression) | postfix_expression .
-postfix_expression = primary_expression {
-    "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ argument_list ] ")" ])
-} .
+expression = ".." [ ranged_operand ] | "..=" ranged_operand | operand .
+operand = ("-" | "!") operand | closure_expression | atom tail .
+compared_operand = ("-" | "!") compared_operand | closure_expression | atom compared_tail .
+ranged_operand = ("-" | "!") ranged_operand | closure_expression | atom ranged_tail .
+ranged_compared_operand = ("-" | "!") ranged_compared_operand
+                       | closure_expression | atom ranged_compared_tail .
+atom = primary_expression { postfix_suffix } { "as" identifier } .
+postfix_suffix = "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier) .
+tail = [ high_operator operand | comparison_operator compared_operand
+       | logical_operator operand | ".." [ ranged_operand ] | "..=" ranged_operand ] .
+compared_tail = [ high_operator compared_operand | logical_operator operand
+                | ".." [ ranged_operand ] | "..=" ranged_operand ] .
+ranged_tail = [ high_operator ranged_operand | comparison_operator ranged_compared_operand
+              | logical_operator ranged_operand ] .
+ranged_compared_tail = [ high_operator ranged_compared_operand | logical_operator ranged_operand ] .
+high_operator = "+" | "-" | "*" | "/" | "%" | "|" | "^" | "&" | "<<" | ">>" .
+comparison_operator = "==" | "!=" | "<" | ">" | "<=" | ">=" .
+logical_operator = "&&" | "||" .
 argument_list = expression { "," expression } .
 primary_expression = literal
-                   | identifier [ record_fields ]
+                   | value_identifier [ record_fields ]
                    | tuple_or_group
                    | array_expression
-                   | if_expression
-                   | closure_expression .
+                   | if_expression .
 record_fields = "{"
     [ field_initializer { "," field_initializer } ] "}" .
 field_initializer = identifier ":" expression .
 tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
 array_expression = "[" [ expression { "," expression } ] "]"
                  [ ":" type_expr ] .
-type_expr = identifier [ "(" type_expr { "," type_expr } ")" ]
+type_expr = identifier [ "(" [ type_expr { "," type_expr } ] ")" ]
           | "[" type_expr "]"
           | "(" [ type_expr [ "," [ type_expr { "," type_expr } ] ] ] ")" .
 if_expression = "if" expression "{" expression "}"
@@ -60,6 +58,26 @@ closure_expression = "||" expression
                    | "|" closure_param { "," closure_param } "|" expression .
 closure_param = identifier ":" type_expr .
 ```
+
+This grammar recognizes token structure. The precedence table below determines
+operator binding, independently of the recognition grammar's right recursion.
+Unary operators bind before casts; a closure body consumes the remaining expression
+inside its delimiter boundary. The four operand/tail states reject chained ranges
+and comparisons while allowing separate comparisons across logical operators.
+A call suffix directly after a named member dispatches that member. Parenthesize
+the member before the call suffix to call its result instead.
+
+Expand the productions in ordinary and header modes. Header mode removes
+`record_fields` from its primary production, reserving the following `{` for the
+body. A condition enters header mode; a closure body inherits its enclosing mode.
+Groups, arguments, arrays, record field values, and branch bodies enter ordinary
+mode. `value_identifier` excludes `if`, `else`, `as`, `true`, and `false`.
+
+Every operand chooses among unary punctuation, closure punctuation, and a primary
+token. Every tail chooses among disjoint operator tokens or ends at a closing
+delimiter, comma, body brace, or end of input. The optional ranged operand has
+the same disjoint start and end sets. A consumed comma always requires another
+item, except the required comma marking a singleton tuple.
 
 ## Worked examples
 

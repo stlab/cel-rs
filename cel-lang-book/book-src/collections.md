@@ -18,7 +18,7 @@ their own literal rules and do not use tuple indexing syntax.
 tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
 array_expression = "[" [ expression { "," expression } ] "]"
                  [ ":" type_expr ] .
-type_expr = identifier [ "(" type_expr { "," type_expr } ")" ]
+type_expr = identifier [ "(" [ type_expr { "," type_expr } ] ")" ]
           | "[" type_expr "]"
           | "(" [ type_expr [ "," [ type_expr { "," type_expr } ] ] ] ")" .
 ```

@@ -27,7 +27,7 @@ use crate::{
 /// need to outlive the returned segment.
 ///
 /// # Errors
-/// Returns a spanned error for unresolved names, incompatible operands, invalid annotations,
+/// Returns a spanned error for unresolved names, duplicate/reserved parameters, incompatible operands, invalid annotations,
 /// or external emitter failures. Partially emitted resources remain safely discardable.
 ///
 /// - Complexity: O(n) traversal time and space, plus type resolution, linear formal-name
@@ -189,14 +189,6 @@ where
         }
         Expr::TupleIndex { base, index, .. } => {
             emit(base, context, lookup, types, resolve, locals)?;
-            let arity = context
-                .peek_tuple_arity()
-                .ok_or_else(|| error("'.N' requires a tuple".into()))?;
-            if *index >= arity {
-                return Err(error(format!(
-                    "tuple index `{index}` out of range for tuple of arity {arity}"
-                )));
-            }
             context.tuple_index(*index, span.start, span.end)?;
         }
         Expr::If {
@@ -247,6 +239,12 @@ where
             context.apply_cast(lookup, type_name, span.start, span.end)?;
         }
         Expr::Closure { params, body, .. } => {
+            if let Some(error) = crate::ast::closure_parameter_diagnostics(params)
+                .into_iter()
+                .next()
+            {
+                return Err(error);
+            }
             let bindings = params
                 .iter()
                 .map(|param| {
@@ -295,4 +293,69 @@ fn push_literal(context: &mut DynSegmentContext, value: &Literal, span: ExprSpan
         ByteStr, CStr
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AstContext, Parser, builtin_type_resolver};
+    use std::{cell::Cell, rc::Rc};
+
+    /// Resolves formals before external names and keeps compiled output independent of syntax.
+    #[test]
+    fn formals_shadow_external_names_without_retaining_syntax() {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast("(|value: i32| value)(7)")
+            .unwrap();
+        let calls = Cell::new(0usize);
+        let mut segment = compile_expr(
+            &expr,
+            &OpLookup::new(),
+            builtin_type_resolver().as_ref(),
+            &mut |_, segment, _| {
+                calls.set(calls.get() + 1);
+                segment.just(99i32);
+                Ok(true)
+            },
+        )
+        .unwrap();
+        drop(expr);
+        assert_eq!(segment.call0::<i32>().unwrap(), 7);
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// Compilation failure releases previously emitted owners without executing them.
+    #[test]
+    fn failed_emission_releases_resources() {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast("owned + missing")
+            .unwrap();
+        let owner = Rc::new(Cell::new(false));
+        let result = compile_expr(
+            &expr,
+            &OpLookup::new(),
+            builtin_type_resolver().as_ref(),
+            &mut |name, segment, _| {
+                if name == "owned" {
+                    let owner = owner.clone();
+                    segment.op0(move || {
+                        owner.set(true);
+                        1i32
+                    });
+                    Ok(true)
+                } else {
+                    anyhow::bail!("external emission failed")
+                }
+            },
+        );
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .message()
+                .contains("external emission failed")
+        );
+        assert_eq!(Rc::strong_count(&owner), 1);
+        assert!(!owner.get());
+    }
 }

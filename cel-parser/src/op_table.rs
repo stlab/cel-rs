@@ -15,7 +15,8 @@
 //!   that can be pushed and popped as needed.
 //! - **Type optimization**: Most built-in operations are homogeneous (both operands share
 //!   a type), so signatures store a primary `TypeId` plus arity. Heterogeneous binary ops
-//!   (e.g. shifts, where the RHS is always `u32`) additionally store an RHS `TypeId` index.
+//!   (e.g. shifts, which accept every signed and unsigned integer RHS) additionally store an RHS
+//!   `TypeId` index.
 //!
 //! # Semantics
 //!
@@ -2781,13 +2782,21 @@ mod tests {
     fn scope_fn_accepts_source_span_parameter() {
         let mut lookup = OpLookup::new();
         lookup.push_scope(
-            |_name: &str, _seg: &mut DynSegment, _n: usize, span: crate::SourceSpan| {
-                // span is available for forwarding to op closures
-                let _ = span;
-                Ok(false)
+            |name: &str, segment: &mut DynSegment, arity: usize, span: crate::SourceSpan| {
+                if name != "value" || arity != 0 {
+                    return Ok(false);
+                }
+                assert_eq!(span, crate::SourceSpan::new(1, 4, 1, 9));
+                segment.just(span.start.column);
+                Ok(true)
             },
         );
-        // If this compiles, the ScopeFn signature correctly includes SourceSpan.
+        let span = crate::ExprSpan::for_text("    value");
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup("value", &mut segment, 0, span.start, span.end)
+            .unwrap();
+        assert_eq!(segment.call0::<usize>().unwrap(), 4);
     }
 
     /// Verifies that `FormatRustcStyle` on an `anyhow::Error` without a `SpanContext`
@@ -2798,7 +2807,18 @@ mod tests {
         use crate::FormatRustcStyle;
         use annotate_snippets::Renderer;
 
-        let err = anyhow::anyhow!("custom domain error");
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _| {
+            if name != "failure" || arity != 0 {
+                return Ok(false);
+            }
+            segment.just(0i32);
+            segment
+                .op1r(|_: i32| -> anyhow::Result<i32> { anyhow::bail!("custom domain error") })?;
+            Ok(true)
+        });
+        let mut segment = crate::CELParser::new(lookup).parse_str("failure").unwrap();
+        let err = segment.call0::<i32>().unwrap_err();
         let output = err.format_rustc_style("unused source", "unused.cel", 1, &Renderer::plain());
         assert_eq!(output, "custom domain error");
     }
@@ -2966,12 +2986,35 @@ mod tests {
 
     #[test]
     fn builtin_operand_types_covers_heterogeneous_shift_signatures() {
-        let sigs = builtin_operand_types("<<");
-        assert!(
-            sigs.iter().any(|s| s.arity == 2
-                && s.lhs == TypeId::of::<u64>()
-                && s.rhs == TypeId::of::<u32>())
-        );
+        let integers = [
+            TypeId::of::<u8>(),
+            TypeId::of::<u16>(),
+            TypeId::of::<u32>(),
+            TypeId::of::<u64>(),
+            TypeId::of::<u128>(),
+            TypeId::of::<usize>(),
+            TypeId::of::<i8>(),
+            TypeId::of::<i16>(),
+            TypeId::of::<i32>(),
+            TypeId::of::<i64>(),
+            TypeId::of::<i128>(),
+            TypeId::of::<isize>(),
+        ];
+        for operator in ["<<", ">>"] {
+            let signatures = builtin_operand_types(operator);
+            assert_eq!(signatures.len(), integers.len() * integers.len());
+            for lhs in integers {
+                for rhs in integers {
+                    assert_eq!(
+                        signatures
+                            .iter()
+                            .filter(|s| s.arity == 2 && s.lhs == lhs && s.rhs == rhs)
+                            .count(),
+                        1
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -3019,22 +3062,27 @@ mod tests {
 
     #[test]
     fn builtin_generic_type_resolves_every_range_family_member_for_every_numeric_type() {
-        for generic in [
-            "Range",
-            "RangeInclusive",
-            "RangeFrom",
-            "RangeTo",
-            "RangeToInclusive",
-        ] {
-            for arg in [
-                "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
-                "isize", "f32", "f64",
-            ] {
-                let resolved = builtin_generic_type(generic, arg)
-                    .unwrap_or_else(|| panic!("expected `{generic}({arg})` to resolve"));
-                assert_eq!(resolved.type_name, format!("{generic}({arg})"));
-            }
+        macro_rules! check {
+            ($($ty:ty),* $(,)?) => {$(
+                for (generic, identity, size, align) in [
+                    ("Range", TypeId::of::<std::ops::Range<$ty>>(), std::mem::size_of::<std::ops::Range<$ty>>(), std::mem::align_of::<std::ops::Range<$ty>>()),
+                    ("RangeInclusive", TypeId::of::<std::ops::RangeInclusive<$ty>>(), std::mem::size_of::<std::ops::RangeInclusive<$ty>>(), std::mem::align_of::<std::ops::RangeInclusive<$ty>>()),
+                    ("RangeFrom", TypeId::of::<std::ops::RangeFrom<$ty>>(), std::mem::size_of::<std::ops::RangeFrom<$ty>>(), std::mem::align_of::<std::ops::RangeFrom<$ty>>()),
+                    ("RangeTo", TypeId::of::<std::ops::RangeTo<$ty>>(), std::mem::size_of::<std::ops::RangeTo<$ty>>(), std::mem::align_of::<std::ops::RangeTo<$ty>>()),
+                    ("RangeToInclusive", TypeId::of::<std::ops::RangeToInclusive<$ty>>(), std::mem::size_of::<std::ops::RangeToInclusive<$ty>>(), std::mem::align_of::<std::ops::RangeToInclusive<$ty>>()),
+                ] {
+                    let resolved = builtin_generic_type(generic, stringify!($ty)).unwrap();
+                    let descriptor = (resolved.value_type)();
+                    assert_eq!(resolved.type_name, format!("{generic}({})", stringify!($ty)));
+                    assert_eq!(descriptor.type_id(), identity);
+                    assert_eq!(descriptor.size(), size);
+                    assert_eq!(descriptor.align(), align);
+                }
+            )*};
         }
+        check!(
+            u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+        );
     }
 
     #[test]
@@ -3124,19 +3172,37 @@ mod tests {
     #[test]
     fn isolate_scopes_leaves_library_scopes_reachable() {
         let mut lookup = OpLookup::new();
+        lookup.push_library_scope(|name, segment, arity, _| {
+            if name != "persistent" || arity != 0 {
+                return Ok(false);
+            }
+            segment.just(42i32);
+            Ok(true)
+        });
         let mut segment = DynSegment::new::<()>();
         let isolated = lookup.isolate_scopes();
         lookup
             .lookup(
-                "range_full",
+                "persistent",
                 &mut segment,
                 0,
                 proc_macro2::Span::call_site(),
                 proc_macro2::Span::call_site(),
             )
-            .expect("range_full is a library scope and must survive isolation");
+            .expect("installed library callbacks survive isolation");
+        assert_eq!(segment.call0::<i32>().unwrap(), 42);
         lookup.restore_scopes(isolated);
-        assert_eq!(segment.peek_stack_infos(1).len(), 1);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "persistent",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .unwrap();
+        assert_eq!(segment.call0::<i32>().unwrap(), 42);
     }
 
     #[test]

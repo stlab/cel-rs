@@ -12,9 +12,60 @@
 //! including the comma that distinguishes a singleton tuple from grouping.
 
 use crate::ast::{Expr, LogicalOp};
-use crate::trivia::{
-    Comment, GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap, take_block_comment,
-};
+use crate::trivia::{Comment, GapPiece, scan_gap, take_block_comment};
+
+/// Owns one character-position index for a borrowed source.
+///
+/// Line starts index a shared character-to-byte boundary table.
+struct Source<'a> {
+    text: &'a str,
+    lines: Vec<usize>,
+    bytes: Vec<usize>,
+}
+
+impl<'a> Source<'a> {
+    /// Indexes every source position once in O(n) time and space for n source bytes.
+    fn new(text: &'a str) -> Self {
+        let mut lines = vec![0];
+        let mut bytes = Vec::new();
+        // Record each character boundary in its owning line.
+        for (character, (byte, ch)) in text.char_indices().enumerate() {
+            bytes.push(byte);
+            if ch == '\n' {
+                lines.push(character + 1);
+            }
+        }
+        bytes.push(text.len());
+        Self { text, lines, bytes }
+    }
+
+    /// Returns the byte boundary for a position in this source.
+    ///
+    /// - Precondition: `position` belongs to this source.
+    fn byte(&self, position: proc_macro2::LineColumn) -> usize {
+        debug_assert!((1..=self.lines.len()).contains(&position.line));
+        let character = self.lines[position.line - 1] + position.column;
+        debug_assert!(
+            character
+                < self
+                    .lines
+                    .get(position.line)
+                    .copied()
+                    .unwrap_or(self.bytes.len())
+        );
+        self.bytes[character]
+    }
+
+    /// Borrows the source between two positions, or an empty slice for synthetic source.
+    ///
+    /// - Precondition: nonempty source owns both positions.
+    fn between(&self, from: proc_macro2::LineColumn, to: proc_macro2::LineColumn) -> &'a str {
+        if self.text.is_empty() {
+            return "";
+        }
+        self.text.get(self.byte(from)..self.byte(to)).unwrap_or("")
+    }
+}
 
 /// An immutable Wadler document; construction never lays out a child expression.
 type Doc = pretty::RcDoc<'static, ()>;
@@ -314,24 +365,16 @@ fn render_literal(span: crate::ExprSpan) -> String {
 /// hand-built `Expr`), so a source-less format still works.
 ///
 /// - Precondition: when `source` is non-empty, it is the exact text `expr` was parsed from —
-///   `prev_end`/`next_start` must resolve within it (checked by `line_column_to_byte`'s own
-///   `debug_assert!`).
+///   `prev_end`/`next_start` must resolve within it.
 ///
-/// - Complexity: O(n) in the gap's length.
+/// - Complexity: O(g + e) time and space for g gap bytes and e expected-token bytes.
 fn gap_between(
-    source: &str,
+    source: &Source<'_>,
     prev_end: proc_macro2::Span,
     next_start: proc_macro2::Span,
     expected: &[&'static str],
 ) -> Vec<GapPiece> {
-    if source.is_empty() {
-        return scan_gap("", expected);
-    }
-    let line_starts = line_start_byte_offsets(source);
-    let start = line_column_to_byte(source, &line_starts, prev_end.end());
-    let end = line_column_to_byte(source, &line_starts, next_start.start());
-    let gap = source.get(start..end).unwrap_or("");
-    scan_gap(gap, expected)
+    scan_gap(source.between(prev_end.end(), next_start.start()), expected)
 }
 
 /// Recovers member-dot comments across closing receiver groups omitted from the AST.
@@ -339,9 +382,9 @@ fn gap_between(
 /// - Precondition: non-empty `source` is the receiver's original parsed text, and both spans
 ///   resolve within it.
 /// - Postcondition: grouping delimiters are omitted; comments and the dot retain source order.
-/// - Complexity: O(n) in the source length plus the gap length.
+/// - Complexity: O(g) time and space for g gap bytes.
 fn member_gap(
-    source: &str,
+    source: &Source<'_>,
     receiver_end: proc_macro2::Span,
     name_start: proc_macro2::Span,
 ) -> Vec<GapPiece> {
@@ -352,10 +395,10 @@ fn member_gap(
 ///
 /// - Precondition: `start` is the postfix node's original start in `source`, or source is empty.
 /// - Postcondition: the base's leading comments appear once, before its first rendered token.
-/// - Complexity: O(n) in the base's rendering cost plus source and gap lengths.
+/// - Complexity: O(n + g) document space for n base nodes and g recovered gap bytes.
 fn format_postfix_base(
     base: &Expr,
-    source: &str,
+    source: &Source<'_>,
     depth: usize,
     start: proc_macro2::LineColumn,
 ) -> Doc {
@@ -393,7 +436,7 @@ fn format_postfix_base(
 ///
 /// - Complexity: O(n) in the number of elements plus their gap lengths.
 fn emit_list(
-    source: &str,
+    source: &Source<'_>,
     depth: usize,
     delims: (&'static str, &'static str),
     bounds: (proc_macro2::LineColumn, proc_macro2::LineColumn),
@@ -408,16 +451,7 @@ fn emit_list(
     let scan = |from: proc_macro2::LineColumn,
                 to: proc_macro2::LineColumn,
                 expected: &[&'static str]|
-     -> Vec<GapPiece> {
-        if source.is_empty() {
-            return scan_gap("", expected);
-        }
-        let line_starts = line_start_byte_offsets(source);
-        let start = line_column_to_byte(source, &line_starts, from);
-        let end = line_column_to_byte(source, &line_starts, to);
-        let gap = source.get(start..end).unwrap_or("");
-        scan_gap(gap, expected)
-    };
+     -> Vec<GapPiece> { scan_gap(source.between(from, to), expected) };
 
     if elements.is_empty() {
         // Whole gap between the delimiters: `open`, comments, `close`.
@@ -538,35 +572,56 @@ fn unary_op_token(name: &str) -> &'static str {
 /// identically. Recursive arrays keep their bracket nesting, and tuple type expressions keep the
 /// same reusable syntax the parser accepts for future typed CEL surfaces.
 ///
-/// - Complexity: O(n) in the number of nodes in `type_expr`.
-fn render_type_expr(type_expr: &crate::TypeExpr) -> String {
+/// - Complexity: O(n + b) time and O(b + d) space for n nodes, b emitted bytes and depth d.
+fn render_type_expr(type_expr: &crate::TypeExpr, source: &Source<'_>) -> String {
+    let span = type_expr.span();
+    let original = source.between(span.start.start(), span.end.end());
+    if original.contains("/*") || original.contains("//") {
+        return original.to_owned();
+    }
+    let mut output = String::new();
+    write_type_expr(type_expr, &mut output);
+    output
+}
+
+/// Appends canonical type syntax without materializing intermediate child strings.
+///
+/// - Complexity: O(n + b) time and O(d) stack space for n nodes, b emitted bytes and depth d.
+fn write_type_expr(type_expr: &crate::TypeExpr, output: &mut String) {
     match type_expr {
         crate::TypeExpr::Named { name, args, .. } => {
-            if args.is_empty() {
-                name.clone()
-            } else {
-                let inner = args
-                    .iter()
-                    .map(render_type_expr)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{name}({inner})")
+            output.push_str(name);
+            if !args.is_empty() {
+                write_type_list(args, output, false);
             }
         }
-        crate::TypeExpr::Array { element, .. } => format!("[{}]", render_type_expr(element)),
+        crate::TypeExpr::Array { element, .. } => {
+            output.push('[');
+            write_type_expr(element, output);
+            output.push(']');
+        }
         crate::TypeExpr::Tuple { elements, .. } => {
-            let inner = elements
-                .iter()
-                .map(render_type_expr)
-                .collect::<Vec<_>>()
-                .join(", ");
-            match elements.len() {
-                0 => "()".to_string(),
-                1 => format!("({inner},)"),
-                _ => format!("({inner})"),
-            }
+            write_type_list(elements, output, true);
         }
     }
+}
+
+/// Appends parenthesized type arguments or tuple elements with committed separators.
+///
+/// - Complexity: O(n + b) time and O(d) stack space for n descendant nodes, b bytes and depth d.
+fn write_type_list(elements: &[crate::TypeExpr], output: &mut String, tuple: bool) {
+    output.push('(');
+    // Emit each child directly into the shared output.
+    for (index, element) in elements.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        write_type_expr(element, output);
+    }
+    if tuple && elements.len() == 1 {
+        output.push(',');
+    }
+    output.push(')');
 }
 
 /// Builds `expr`'s document alongside its binding-strength level, so the
@@ -575,8 +630,9 @@ fn render_type_expr(type_expr: &crate::TypeExpr) -> String {
 /// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`).
 /// Children contribute documents, never independently formatted strings.
 ///
-/// - Complexity: O(n) document space plus existing source-gap scan costs.
-fn render(expr: &Expr, source: &str, depth: usize) -> (Doc, Level) {
+/// - Complexity: O(v + g + b) time and space for v node visits, g inspected source-slice bytes
+///   and b document-text bytes.
+fn render(expr: &Expr, source: &Source<'_>, depth: usize) -> (Doc, Level) {
     match expr {
         Expr::Struct {
             name,
@@ -637,19 +693,17 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (Doc, Level) {
             (out, Level::PRIMARY)
         }
         Expr::Literal { span, .. } => (verbatim_doc(render_literal(*span)), Level::PRIMARY),
-        // `AstContext::apply_op` records every arity-0 operator as a plain `Expr::Ident` (see
-        // its own test `apply_op_with_arity_zero_records_an_ident_node`) — `"range_full"` (`..`)
-        // is the only one this grammar has, so it's intercepted here rather than in the
-        // `Expr::Op` arms below, which a real parse never produces it as.
-        //
-        // Known gap (tracked as issue #155): this is indistinguishable from a genuine bare
-        // identifier reference literally named `range_full`, since `AstContext` deliberately
-        // does no scope resolution during parsing (unlike the runtime path, where
-        // `OpLookup::lookup` checks user scopes before builtins and so correctly lets a real
-        // variable named `range_full` shadow this operator). Narrow in practice — the other
-        // five range-family operators have no such collision, since a real function call is
-        // never represented as `Expr::Op`.
-        Expr::Ident { name, .. } if name == "range_full" => (Doc::text(".."), Level::RANGE),
+        // The parser records the full-range operator as an identifier; its source token
+        // distinguishes syntax from a genuine value binding with the same lookup name.
+        Expr::Ident { name, span }
+            if name == "range_full"
+                && span
+                    .start
+                    .source_text()
+                    .is_some_and(|text| matches!(text.as_str(), "." | "..")) =>
+        {
+            (Doc::text(".."), Level::RANGE)
+        }
         Expr::Ident { name, .. } => (Doc::text(name.clone()), Level::PRIMARY),
         Expr::Logical { op, lhs, rhs, .. } => {
             let level = match op {
@@ -902,15 +956,30 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (Doc, Level) {
                 false,
             );
             if let Some(type_annotation) = type_annotation {
+                let comments = annotation_span
+                    .map(|annotation| {
+                        gap_between(source, annotation.start, type_annotation.span().start, &[])
+                    })
+                    .unwrap_or_default();
+                let gap = emit_gap(&comments, Spacing::None, 0);
                 list = list
-                    .append(": ")
-                    .append(Doc::text(render_type_expr(type_annotation)));
+                    .append(":")
+                    .append(trivia_doc(if gap.is_empty() {
+                        " ".to_owned()
+                    } else {
+                        gap
+                    }))
+                    .append(verbatim_doc(render_type_expr(type_annotation, source)));
             }
             (list, Level::PRIMARY)
         }
         Expr::TupleIndex { base, index, span } => (
             format_postfix_base(base, source, depth, span.start.start())
-                .append(Doc::text(format!(".{index}"))),
+                .append(gap_doc(
+                    &grouping_gap(source, base.span().end.end(), span.end.start(), &["."]),
+                    Spacing::None,
+                ))
+                .append(Doc::text(index.to_string())),
             Level::POSTFIX,
         ),
         Expr::If {
@@ -1030,7 +1099,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (Doc, Level) {
                     parameters = parameters
                         .append(Doc::text(param.name.clone()))
                         .append(trivia_doc(emit_gap(&colon, Spacing::CommaAfter, 0)))
-                        .append(Doc::text(render_type_expr(&param.type_expr)));
+                        .append(verbatim_doc(render_type_expr(&param.type_expr, source)));
                 }
                 Doc::text("|")
                     .append(Doc::line_().append(parameters).nest(4))
@@ -1111,21 +1180,14 @@ fn header_end(expr: &Expr) -> proc_macro2::LineColumn {
 ///
 /// - Precondition: positions refer to `source`, or `source` is empty.
 /// - Postcondition: comments and expected tokens retain source order without grouping tokens.
-/// - Complexity: O(n) in source length and gap size.
+/// - Complexity: O(g + e) time and space for g gap bytes and e expected-token bytes.
 fn grouping_gap(
-    source: &str,
+    source: &Source<'_>,
     from: proc_macro2::LineColumn,
     to: proc_macro2::LineColumn,
     expected: &[&'static str],
 ) -> Vec<GapPiece> {
-    let starts = line_start_byte_offsets(source);
-    let gap = if source.is_empty() {
-        ""
-    } else {
-        let from = line_column_to_byte(source, &starts, from);
-        let to = line_column_to_byte(source, &starts, to);
-        source.get(from..to).unwrap_or("")
-    };
+    let gap = source.between(from, to);
     let mut rest = gap;
     let mut tokens = Vec::new();
     let mut next = 0;
@@ -1184,7 +1246,8 @@ fn header_contains_record(expr: &Expr) -> bool {
 /// Ordinary delimiters and nested branch bodies retain their normal formatting.
 ///
 /// - Precondition: `source` is the parsed source, or empty for a hand-built AST.
-/// - Complexity: O(n) document space plus layout and existing source-gap scans.
+/// - Complexity: O(s + v + g + b) construction time and space for s source bytes,
+///   v node visits, g inspected source-slice bytes and b document-text bytes, plus pretty layout.
 ///
 /// # Examples
 /// ```
@@ -1201,7 +1264,7 @@ pub fn format_expr_restricted(
     restriction: crate::ExpressionRestriction,
 ) -> String {
     render_document(
-        restricted_doc(expr, source, depth, restriction),
+        restricted_doc(expr, &Source::new(source), depth, restriction),
         depth,
         depth * 4,
         100,
@@ -1211,10 +1274,11 @@ pub fn format_expr_restricted(
 
 /// Builds a brace-reserving expression without independently laying out its children.
 ///
-/// - Complexity: O(n) document construction plus existing source-gap scans.
+/// - Complexity: O(v + g + b) time and space for v node visits, g inspected source-slice bytes
+///   and b document-text bytes.
 fn restricted_doc(
     expr: &Expr,
-    source: &str,
+    source: &Source<'_>,
     depth: usize,
     restriction: crate::ExpressionRestriction,
 ) -> Doc {
@@ -1234,7 +1298,8 @@ fn restricted_doc(
 ///
 /// - Precondition: `source` is the parsed source and `bounds` encloses `expr`, or source is empty.
 /// - Postcondition: boundary comments appear exactly once in source order.
-/// - Complexity: O(n) document space plus layout and existing source-gap scans.
+/// - Complexity: O(s + v + g + b) construction time and space for s source bytes,
+///   v node visits, g inspected source-slice bytes and b document-text bytes, plus pretty layout.
 ///
 /// # Examples
 /// ```
@@ -1262,7 +1327,8 @@ pub fn format_expr_header(
 /// nest four spaces from `depth`; unbreakable tokens and comments may exceed `width`.
 ///
 /// - Precondition: `source` is the parsed source and `bounds` encloses `expr`, or source is empty.
-/// - Complexity: O(n) document space plus layout and existing source-gap scans.
+/// - Complexity: O(s + v + g + b) construction time and space for s source bytes,
+///   v node visits, g inspected source-slice bytes and b document-text bytes, plus pretty layout.
 ///
 /// # Examples
 /// ```
@@ -1282,6 +1348,7 @@ pub fn format_expr_header_with_layout(
     width: usize,
     suffix_columns: usize,
 ) -> String {
+    let source = &Source::new(source);
     let leading = grouping_gap(source, bounds.0, header_start(expr), &[]);
     let trailing = grouping_gap(source, header_end(expr), bounds.1, &[]);
     let mut text = trivia_doc(emit_gap(&leading, Spacing::None, 0).trim_start().to_owned());
@@ -1304,8 +1371,9 @@ pub fn format_expr_header_with_layout(
 ///
 /// `source` and `depth` are forwarded to [`render`] unchanged; see its doc comment.
 ///
-/// - Complexity: O(n) document space plus existing source-gap scan costs.
-fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> Doc {
+/// - Complexity: O(v + g + b) time and space for v node visits, g inspected source-slice bytes
+///   and b document-text bytes.
+fn format_at(expr: &Expr, source: &Source<'_>, depth: usize, min_level: Level) -> Doc {
     let (text, level) = render(expr, source, depth);
     if level < min_level {
         Doc::text("(").append(text).append(")").group()
@@ -1321,7 +1389,8 @@ fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> Doc {
 /// Postfix bases retain leading group comments, and member-dot comments survive omitted groups.
 /// Closure bases stay grouped so following postfixes cannot move into their bodies.
 ///
-/// - Complexity: O(n) document space plus layout and existing source-gap scans.
+/// - Complexity: O(s + v + g + b) construction time and space for s source bytes,
+///   v node visits, g inspected source-slice bytes and b document-text bytes, plus pretty layout.
 ///
 /// # Examples
 ///
@@ -1346,7 +1415,8 @@ pub fn format_expr(expr: &Expr, source: &str, depth: usize) -> String {
 /// the expression starts on a new line indented four spaces beyond `depth`.
 ///
 /// - Precondition: `source` is the expression's parsed source, or empty for a hand-built AST.
-/// - Complexity: O(n) document space plus layout and existing source-gap scans.
+/// - Complexity: O(s + v + g + b) construction time and space for s source bytes,
+///   v node visits, g inspected source-slice bytes and b document-text bytes, plus pretty layout.
 ///
 /// # Examples
 /// ```
@@ -1365,7 +1435,7 @@ pub fn format_expr_with_layout(
     suffix_columns: usize,
 ) -> String {
     render_document(
-        format_at(expr, source, depth, Level::RANGE),
+        format_at(expr, &Source::new(source), depth, Level::RANGE),
         depth,
         column,
         width,
@@ -1606,14 +1676,55 @@ mod tests {
                 "{source} -> {text}"
             );
         }
+        for (source, expected) in [
+            ("-(10 + 3) as i32", -13),
+            ("10 - (3 - 1)", 8),
+            ("(|value: i32| value + 5)(7)", 12),
+            ("(1 + 2,).0", 3),
+            ("if true && false { 1 / 0 } else { 42 }", 42),
+        ] {
+            let text = format_expr_with_layout(&parse(source), source, 0, 0, 12, 0);
+            let mut segment = crate::CELParser::new(OpLookup::new())
+                .parse_str(&text)
+                .unwrap();
+            assert_eq!(
+                segment.call0::<i32>().unwrap(),
+                expected,
+                "{source} -> {text}"
+            );
+        }
     }
 
+    /// Maps empty, Unicode, newline, and final-line positions through one reusable index.
+    #[test]
+    fn source_index_preserves_character_boundaries() {
+        let source = Source::new("é\nβ\n");
+        assert_eq!(
+            source.byte(proc_macro2::LineColumn { line: 1, column: 1 }),
+            2
+        );
+        assert_eq!(
+            source.byte(proc_macro2::LineColumn { line: 2, column: 1 }),
+            5
+        );
+        assert_eq!(
+            source.byte(proc_macro2::LineColumn { line: 3, column: 0 }),
+            6
+        );
+        assert_eq!(
+            Source::new("").byte(proc_macro2::LineColumn { line: 1, column: 0 }),
+            0
+        );
+    }
+
+    /// Parses one complete expression for formatter contracts.
     fn parse(source: &str) -> Expr {
         Parser::<AstContext>::new(OpLookup::new())
             .parse_str_ast(source)
             .unwrap()
     }
 
+    /// Formats one parsed expression with the default layout.
     fn fmt(source: &str) -> String {
         format_expr(&parse(source), source, 0)
     }
@@ -1847,15 +1958,6 @@ mod tests {
     }
 
     #[test]
-    fn comment_free_if_else_is_unchanged() {
-        assert_eq!(
-            fmt("if true { 1i32 } else { 2i32 }"),
-            "if true { 1i32 } else { 2i32 }"
-        );
-        assert_eq!(fmt("if true { 1i32 }"), "if true { 1i32 }");
-    }
-
-    #[test]
     fn logical_or_and_and_are_not_desugared_and_need_no_extra_parens() {
         assert_eq!(fmt("a || b && c"), "a || b && c");
     }
@@ -1864,11 +1966,6 @@ mod tests {
     fn a_comment_around_a_logical_operator_is_preserved() {
         assert_eq!(fmt("a /* x */ || b"), "a /* x */ || b");
         assert_eq!(fmt("a && /* y */ b"), "a && /* y */ b");
-    }
-
-    #[test]
-    fn comment_free_logical_is_unchanged() {
-        assert_eq!(fmt("a || b && c"), "a || b && c");
     }
 
     #[test]
@@ -1913,13 +2010,6 @@ mod tests {
             fmt("|x: i32| /* b */ x + 1i32"),
             "|x: i32| /* b */ x + 1i32"
         );
-    }
-
-    #[test]
-    fn comment_free_closures_are_unchanged() {
-        assert_eq!(fmt("|x: i32| x + 1i32"), "|x: i32| x + 1i32");
-        assert_eq!(fmt("|| 1i32"), "|| 1i32");
-        assert_eq!(fmt("|x: i32, y: i32| x + y"), "|x: i32, y: i32| x + y");
     }
 
     #[test]
@@ -2058,17 +2148,6 @@ mod tests {
     }
 
     #[test]
-    fn a_line_comment_after_a_binary_operator_wraps_the_expression() {
-        let source = "1i32 +\n    // why 2\n    2i32";
-        assert_eq!(fmt(source), "1i32 + // why 2\n    2i32");
-    }
-
-    #[test]
-    fn a_comment_free_binary_op_still_prints_on_one_line() {
-        assert_eq!(fmt("1i32 + 2i32 * 3i32"), "1i32 + 2i32 * 3i32");
-    }
-
-    #[test]
     fn a_comment_after_unary_minus_is_preserved() {
         assert_eq!(fmt("- /* neg */ 1i32"), "- /* neg */ 1i32");
     }
@@ -2108,6 +2187,7 @@ mod tests {
         // The exact repro from stlab/cel-rs#201.
         let source = "1i32 +\n    // why 2\n    2i32";
         let once = fmt(source);
+        assert_eq!(once, "1i32 + // why 2\n    2i32");
         assert!(once.contains("// why 2"), "comment must survive: {once:?}");
         let twice = format_expr(&parse(&once), &once, 0);
         assert_eq!(once, twice, "formatting must be idempotent");

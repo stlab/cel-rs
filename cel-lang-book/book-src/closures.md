@@ -12,10 +12,10 @@ callable value.
 ## Syntax
 
 ```text
-closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|")
+closure_expression = ("||" | "|" closure_param { "," closure_param } "|")
                      expression .
 closure_param = identifier ":" type_expression .
-type_expression = identifier [ "(" type_expression { "," type_expression } ")" ]
+type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
                 | "[" type_expression "]"
                 | "(" [ type_expression [ "," [ type_expression { "," type_expression } ] ] ] ")" .
 ```
@@ -37,7 +37,7 @@ type_expression = identifier [ "(" type_expression { "," type_expression } ")" ]
 
 Closures:
 
-- `|| body` declares a zero-parameter closure.
+- `|| body` declares a zero-parameter closure; spaced empty pipes `| |` are not this token.
 - `|name: Type| body` declares one typed parameter.
 - `|a: T, b: U| body` declares multiple typed parameters in source order.
 - An annotation uses the host's configured type environment: built-in
@@ -47,6 +47,9 @@ Closures:
 - `|pair: (i32, i32)| pair.0 + pair.1` declares one tuple-typed
   parameter, not two separate parameters.
 - The closure body is one expression.
+- A bare closure body extends to its enclosing expression boundary. For example,
+  `|| 1 + 2` returns `3`; write `(|| 1)()` to apply a zero-parameter closure.
+- Parameter names are unique and cannot use reserved value names.
 - A closure body resolves its own parameters and does not capture free
   variables from an enclosing expression. Installed library operations
   remain available inside it.

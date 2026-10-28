@@ -54,6 +54,13 @@ pub enum TypeExpr {
 
 impl TypeExpr {
     /// Returns this type expression's source span.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup};
+    /// let ty = CELParser::new(OpLookup::new()).parse_type_expr_str("i32").unwrap();
+    /// assert_eq!(ty.span().start.start().column, 0);
+    /// ```
     #[must_use]
     pub fn span(&self) -> ExprSpan {
         match self {
@@ -70,7 +77,14 @@ impl TypeExpr {
     /// Returns `Err` if some named leaf is not recognized by `resolver`, or `Fn` lacks
     /// exactly two arguments with a tuple of parameter types first.
     ///
-    /// - Complexity: O(n) in the number of nodes in this type tree.
+    /// - Complexity: O(n) traversal and output nodes, plus resolver and descriptor-copy costs.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup, builtin_type_resolver};
+    /// let ty = CELParser::new(OpLookup::new()).parse_type_expr_str("[i32]").unwrap();
+    /// assert_eq!(ty.resolve(builtin_type_resolver().as_ref()).unwrap().display_name(), "[i32]");
+    /// ```
     pub fn resolve(&self, resolver: &dyn TypeResolver) -> Result<ResolvedType> {
         match self {
             TypeExpr::Named { name, args, span } => {
@@ -128,9 +142,20 @@ impl TypeExpr {
 ///
 /// Implementations return `None` when `name` is unknown. Recursive array and tuple composition is
 /// performed by [`TypeExpr::resolve`], so a resolver only needs to recognize leaf names.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{TypeResolver, ResolvedLeafType};
+/// let resolver = [("Count", ResolvedLeafType::leaf::<u32>("Count").unwrap())];
+/// assert!(resolver.resolve_named_type("Count", &[]).is_some());
+/// assert!(resolver.resolve_named_type("Missing", &[]).is_none());
+/// ```
 pub trait TypeResolver: Send + Sync {
     /// Returns the registered leaf type named `name` applying `args` (already resolved), or
     /// `None` if `name`/`args` is unrecognized. `args` is empty for a plain (non-generic) name.
+    ///
+    /// # Examples
+    /// See the [`TypeResolver`] example.
     fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType>;
 }
 
@@ -138,12 +163,16 @@ impl<F> TypeResolver for F
 where
     F: Fn(&str, &[ResolvedType]) -> Option<ResolvedLeafType> + Send + Sync,
 {
+    /// Delegates leaf recognition without imposing additional name or argument policies.
     fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
         self(name, args)
     }
 }
 
 impl<const N: usize> TypeResolver for [(&'static str, ResolvedLeafType); N] {
+    /// Resolves an exact registered name only when no generic arguments are supplied.
+    ///
+    /// - Complexity: O(N * b + c) for N names of at most b bytes and descriptor-copy cost c.
     fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
         if !args.is_empty() {
             return None;
@@ -154,10 +183,12 @@ impl<const N: usize> TypeResolver for [(&'static str, ResolvedLeafType); N] {
     }
 }
 
+/// Resolves builtin scalar and range leaf names without storing mutable registry state.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct BuiltinTypeResolver;
 
 impl TypeResolver for BuiltinTypeResolver {
+    /// Resolves zero- or one-argument builtin leaves and rejects unsupported shapes.
     fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
         let builtin = match args {
             [] => op_table::builtin_scalar_type(name)
@@ -200,6 +231,12 @@ pub fn builtin_type_resolver() -> Box<dyn TypeResolver> {
 /// Equivalent to `builtin_type_resolver().resolve_named_type(name, args)`, but for a host that
 /// only needs a one-off built-in fallback lookup (rather than a `TypeResolver` trait object to
 /// pass around), this avoids constructing a trait object.
+///
+/// # Examples
+/// ```
+/// assert!(cel_parser::resolve_builtin_named_type("i32", &[]).is_some());
+/// assert!(cel_parser::resolve_builtin_named_type("Missing", &[]).is_none());
+/// ```
 #[must_use]
 pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
     BuiltinTypeResolver.resolve_named_type(name, args)
@@ -346,18 +383,36 @@ impl ResolvedLeafType {
     }
 
     /// Returns this leaf type's concrete Rust [`TypeId`].
+    ///
+    /// # Examples
+    /// ```
+    /// let leaf = cel_parser::ResolvedLeafType::leaf::<i32>("Integer").unwrap();
+    /// assert_eq!(leaf.type_id(), std::any::TypeId::of::<i32>());
+    /// ```
     #[must_use]
     pub fn type_id(&self) -> TypeId {
         self.type_id
     }
 
     /// Returns this leaf type's human-readable name.
+    ///
+    /// # Examples
+    /// ```
+    /// let leaf = cel_parser::ResolvedLeafType::leaf::<i32>("Integer").unwrap();
+    /// assert_eq!(leaf.type_name(), "Integer");
+    /// ```
     #[must_use]
     pub fn type_name(&self) -> &str {
         &self.type_name
     }
 
     /// Returns complete canonical metadata for this leaf.
+    ///
+    /// # Examples
+    /// ```
+    /// let leaf = cel_parser::ResolvedLeafType::leaf::<i32>("Integer").unwrap();
+    /// assert_eq!(leaf.element_type().type_id(), leaf.type_id());
+    /// ```
     #[must_use]
     pub fn element_type(&self) -> &ValueType {
         &self.complete
@@ -458,31 +513,62 @@ impl ResolvedType {
 
     /// Returns a human-readable name for this resolved type.
     ///
-    /// - Complexity: O(n) in the number of nodes in this type tree.
+    /// - Complexity: O(n + b) time and O(b + d) space for n nodes, b output bytes and depth d.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{ResolvedType, ResolvedLeafType};
+    /// use cel_runtime::ValueType;
+    /// let ty = ResolvedType::Array {
+    ///     element: Box::new(ResolvedLeafType::new("i32", ValueType::leaf::<i32>()).into())
+    /// };
+    /// assert_eq!(ty.display_name(), "[i32]");
+    /// ```
     #[must_use]
     pub fn display_name(&self) -> String {
+        let mut output = String::new();
+        self.write_name(&mut output);
+        output
+    }
+
+    /// Appends a type name in O(n + b) time and O(d) stack space for n nodes, b bytes and depth d.
+    fn write_name(&self, output: &mut String) {
         match self {
-            ResolvedType::Scalar(leaf) => leaf.type_name().to_string(),
-            ResolvedType::Array { element } => format!("[{}]", element.display_name()),
-            ResolvedType::Tuple { elements } => {
-                let parts: Vec<String> = elements.iter().map(Self::display_name).collect();
-                format!(
-                    "({}{})",
-                    parts.join(", "),
-                    if parts.len() == 1 { "," } else { "" }
-                )
+            ResolvedType::Scalar(leaf) => output.push_str(leaf.type_name()),
+            ResolvedType::Array { element } => {
+                output.push('[');
+                element.write_name(output);
+                output.push(']');
             }
-            Self::Callable { parameters, result } => format!(
-                "Fn(({}{}), {})",
-                parameters
-                    .iter()
-                    .map(Self::display_name)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                if parameters.len() == 1 { "," } else { "" },
-                result.display_name()
-            ),
+            ResolvedType::Tuple { elements } => {
+                Self::write_tuple_name(elements, output);
+            }
+            Self::Callable { parameters, result } => {
+                output.push_str("Fn(");
+                Self::write_tuple_name(parameters, output);
+                output.push_str(", ");
+                result.write_name(output);
+                output.push(')');
+            }
         }
+    }
+
+    /// Appends reusable tuple syntax, including the required singleton comma.
+    ///
+    /// - Complexity: O(n + b) time and O(d) stack space for n descendant nodes, b bytes and depth d.
+    fn write_tuple_name(elements: &[Self], output: &mut String) {
+        output.push('(');
+        // Emit each element once, separating adjacent names.
+        for (index, element) in elements.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            element.write_name(output);
+        }
+        if elements.len() == 1 {
+            output.push(',');
+        }
+        output.push(')');
     }
 }
 
@@ -1186,15 +1272,30 @@ mod tests {
 
     #[test]
     fn resolve_builtin_named_type_matches_the_boxed_resolver() {
+        let boxed = crate::builtin_type_resolver();
         let scalar = crate::resolve_builtin_named_type("i32", &[]).unwrap();
         assert_eq!(scalar.type_name(), "i32");
+        assert!(
+            scalar
+                .element_type()
+                .same_shape(boxed.resolve_named_type("i32", &[]).unwrap().element_type())
+        );
 
         let arg = ResolvedType::Scalar(crate::resolve_builtin_named_type("f64", &[]).unwrap());
         let generic =
             crate::resolve_builtin_named_type("RangeInclusive", std::slice::from_ref(&arg))
                 .unwrap();
         assert_eq!(generic.type_name(), "RangeInclusive(f64)");
+        assert!(
+            generic.element_type().same_shape(
+                boxed
+                    .resolve_named_type("RangeInclusive", std::slice::from_ref(&arg))
+                    .unwrap()
+                    .element_type()
+            )
+        );
 
         assert!(crate::resolve_builtin_named_type("not_a_type", &[]).is_none());
+        assert!(boxed.resolve_named_type("not_a_type", &[]).is_none());
     }
 }

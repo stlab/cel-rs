@@ -202,7 +202,8 @@ pub struct SpanLabel {
 /// primary caret and the rest as secondary context, in rustc style.
 ///
 /// - Precondition: `labels` is non-empty.
-/// - Complexity: O(n) in `source_code`'s length plus the number of labels.
+/// - Complexity: O(k * s + l) annotation work for k labels, s source bytes and l label bytes,
+///   plus the renderer's layout cost.
 ///
 /// # Examples
 ///
@@ -818,6 +819,7 @@ pub trait FormatRustcStyle {
     /// Formats in rustc diagnostic style.
     ///
     /// If the error carries a [`SpanContext`], produces a multi-line caret diagnostic.
+    /// Uses the root failure as the diagnostic title, regardless of textual context wrappers.
     /// Otherwise returns `self.to_string()`.
     fn format_rustc_style(
         &self,
@@ -837,13 +839,7 @@ impl FormatRustcStyle for anyhow::Error {
         renderer: &Renderer,
     ) -> String {
         if let Some(ctx) = self.downcast_ref::<SpanContext>() {
-            // `SpanContext` is the outermost layer in the anyhow chain, so `self.to_string()`
-            // would return the span location string ("at 1:5-1:6") rather than the op error
-            // message. `source()` recovers the actual error from the layer below.
-            let message = self
-                .source()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| self.to_string());
+            let message = self.root_cause().to_string();
             ctx.format_rustc_style(&message, source_code, filename, start_line, renderer)
         } else {
             self.to_string()
@@ -1110,7 +1106,7 @@ mod tests {
         let span = SourceSpan::new(1, 0, 1, 5);
         let ctx = SpanContext::new(span);
         let s = ctx.to_string();
-        assert!(!s.is_empty());
+        assert_eq!(s, "at 1:0-1:5");
     }
 
     #[test]
@@ -1214,6 +1210,8 @@ mod tests {
         assert!(out.contains("mismatch"), "{out}");
         assert!(out.contains("first"), "{out}");
         assert!(out.contains("third"), "{out}");
+        assert!(out.contains("| ^^^     --- third"), "{out}");
+        assert!(out.contains("| first"), "{out}");
         assert!(!out.contains('\u{1b}'), "plain renderer has no ANSI: {out}");
     }
 

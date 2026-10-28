@@ -56,7 +56,10 @@ integer suffixes.
 | `usize` | `usize` |
 
 Unary `-` combines with a numeric literal to form a negative numeric
-expression.
+expression. The numeric token must fit its declared type before negation.
+For example, `-128i8` reports an out-of-range literal because `128i8` does
+not fit. Write `-127i8 - 1i8` to express `i8`'s minimum with checked arithmetic.
+The same rule applies to every signed width and to literal patterns.
 
 ```text
 0

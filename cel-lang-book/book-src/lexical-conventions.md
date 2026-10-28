@@ -80,6 +80,9 @@ user-defined values:
 
 `true` and `false` are boolean literals. `if` and `else` introduce conditional
 expressions. `as` introduces an explicit cast.
+This restriction applies to value references and closure parameters. Member labels,
+record field labels, and type names have separate namespaces; CEL does not apply
+the value-name restriction to them. Boolean tokens remain literals in every namespace.
 
 ## Literal tokens
 

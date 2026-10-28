@@ -39,7 +39,13 @@ pub enum GapPiece {
 ///   (an empty or synthetic `gap` still yields all expected tokens, so a hand-built `Expr` with no
 ///   real source re-synthesizes its separators).
 ///
-/// - Complexity: O(n) in `gap.len()`.
+/// - Complexity: O(n + e) time and space for n gap bytes and e expected-token bytes.
+///
+/// # Examples
+/// ```
+/// use cel_parser::trivia::{GapPiece, scan_gap};
+/// assert_eq!(scan_gap(" + ", &["+"]), vec![GapPiece::Punct("+")]);
+/// ```
 pub fn scan_gap(gap: &str, expected: &[&'static str]) -> Vec<GapPiece> {
     let mut pieces = Vec::new();
     let mut next = 0usize;
@@ -272,10 +278,17 @@ mod tests {
 
     #[test]
     fn multiple_expected_tokens_are_returned_in_order() {
-        // Between a callee and its first arg with a trailing comma case:
-        let pieces = scan_gap(" ( /* c */ ", &["("]);
-        assert!(matches!(pieces[0], GapPiece::Punct("(")));
-        assert!(matches!(pieces[1], GapPiece::Comment(Comment::Block(ref t)) if t == "c"));
+        let pieces = scan_gap("} /* first */ else // second\n {", &["}", "else", "{"]);
+        assert_eq!(
+            pieces,
+            vec![
+                GapPiece::Punct("}"),
+                GapPiece::Comment(Comment::Block("first".into())),
+                GapPiece::Punct("else"),
+                GapPiece::Comment(Comment::Line("second".into())),
+                GapPiece::Punct("{"),
+            ]
+        );
     }
 
     #[test]
@@ -292,5 +305,25 @@ mod tests {
         // line 2 (1-based), column 1 (0-based) => the 'd', byte offset 4.
         let pos = LineColumn { line: 2, column: 1 };
         assert_eq!(line_column_to_byte(source, &starts, pos), 4);
+    }
+
+    /// Maps empty, Unicode, newline, and final-line boundaries without splitting characters.
+    #[test]
+    fn position_conversion_covers_text_boundaries() {
+        for (source, line, column, expected) in [
+            ("", 1, 0, 0),
+            ("é\nβ", 1, 1, 2),
+            ("é\nβ", 2, 1, 5),
+            ("x\n", 2, 0, 2),
+        ] {
+            assert_eq!(
+                line_column_to_byte(
+                    source,
+                    &line_start_byte_offsets(source),
+                    LineColumn { line, column }
+                ),
+                expected
+            );
+        }
     }
 }
