@@ -329,6 +329,8 @@ fn build_single_conditional_decl(
         branches,
         default: Some(DefaultBranch {
             relationships: default_relationships,
+            leading_comment: None,
+            blank_line_before: false,
             trailing_comment: None,
             trailing_line_comment: None,
             blank_line_before_close: false,
@@ -427,6 +429,8 @@ fn build_decomposed_multi_cell_conditionals(
             }],
             default: Some(DefaultBranch {
                 relationships: Vec::new(),
+                leading_comment: None,
+                blank_line_before: false,
                 trailing_comment: None,
                 trailing_line_comment: None,
                 blank_line_before_close: false,
