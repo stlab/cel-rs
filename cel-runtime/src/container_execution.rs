@@ -258,8 +258,12 @@ impl StackFramePlan {
             })
         }
         .expect("raw moves cannot return an error");
-        stack.release_top(fields.len());
-        unsafe { stack.truncate_to(self.ambient, false) };
+        // SAFETY: All fields now belong to result. Restore the retained ambient
+        // frame immediately, before any operation can unwind or destroy an owner.
+        unsafe {
+            stack.release_top(fields.len());
+            stack.truncate_to(self.ambient, false);
+        }
         result
     }
 }
@@ -433,8 +437,12 @@ impl ResultPlan {
     pub(crate) unsafe fn take_typed<T>(&self, stack: &mut RawStack) -> T {
         debug_assert_eq!(stack.len(), self.end);
         let value = unsafe { stack.read_at(self.offset, |pointer| pointer.cast::<T>().read()) };
-        stack.release_top(1);
-        unsafe { stack.truncate_to(self.ambient, false) };
+        // SAFETY: The result is moved into value. Restore the retained prefix
+        // without user code or a possible unwind between these raw operations.
+        unsafe {
+            stack.release_top(1);
+            stack.truncate_to(self.ambient, false);
+        }
         value
     }
 
@@ -491,6 +499,8 @@ impl ResultPlan {
                     self.value_type.layout().size(),
                 );
             });
+            // SAFETY: The allocation owns the copied result. Restore the ambient
+            // prefix before constructing the owner or allowing its destruction.
             stack.release_top(1);
             stack.truncate_to(self.ambient, false);
             OwnedValue::from_allocation(allocation, self.value_type.clone())

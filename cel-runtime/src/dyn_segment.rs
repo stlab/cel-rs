@@ -902,6 +902,8 @@ impl DynSegment {
                     Ok(())
                 })?
             };
+            // SAFETY: All children have moved into owner. Restore the ambient
+            // prefix before registering the new result or allowing unwinding.
             unsafe {
                 stack.release_top(n);
                 stack.truncate_to(ambient_start, false);

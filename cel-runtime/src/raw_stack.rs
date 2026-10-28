@@ -2,7 +2,9 @@
 //!
 //! Push typed values and pop them with their matching type and padding flag.
 //! Before raw movement, release affected owners with [`RawStack::release_top`]
-//! and separately reconstruct or destroy every released value.
+//! and separately manage the released values.
+//! Ownership release is unsafe: restore the retained physical frame before
+//! owner-based operations or any possible unwinding.
 //!
 //! ```
 //! use cel_runtime::RawStack;
@@ -140,9 +142,31 @@ impl RawStack {
     /// - Postcondition: The caller owns the released values' destruction obligations.
     /// - Complexity: O(count), excluding descriptor destruction.
     ///
+    /// # Safety
+    ///
+    /// Removing entries can leave released bytes above the retained owners.
+    /// Before any owner-based stack operation or stack destruction, including
+    /// unwinding, the buffer's length, values, and padding must again match all
+    /// retained ownership entries. The caller must not permit unwinding while
+    /// that physical frame is invalid; complete its raw repair before invoking
+    /// user code or another potentially panicking operation.
+    /// If no owners remain, unowned bytes may remain in the buffer without
+    /// invalidating its destruction.
+    ///
+    /// Released values remain the caller's responsibility. If transferred or
+    /// destroyed, their abandoned representations must not be used again.
+    /// Intentionally forgetting a released value is permitted; leaking resources
+    /// alone does not violate memory safety.
+    ///
     /// # Examples
     /// See [`Self::drop_at`] for releasing a value before destroying it in place.
-    pub fn release_top(&mut self, count: usize) {
+    ///
+    /// Unguarded calls are rejected even when no owners would be removed:
+    /// ```compile_fail,E0133
+    /// let mut stack = cel_runtime::RawStack::with_base_alignment(1);
+    /// stack.release_top(0);
+    /// ```
+    pub unsafe fn release_top(&mut self, count: usize) {
         debug_assert!(count <= self.depth());
         let depth = self.depth() - count;
         while self
@@ -490,8 +514,9 @@ impl RawStack {
     /// use cel_runtime::RawStack;
     /// let mut stack = RawStack::with_base_alignment(align_of::<String>());
     /// stack.push(String::from("owned"));
-    /// stack.release_top(1);
+    /// // SAFETY: Releasing the sole owner leaves no retained value to destroy.
     /// unsafe {
+    ///     stack.release_top(1);
     ///     stack.drop_at(0, |ptr| ptr.cast::<String>().drop_in_place());
     ///     stack.truncate_to(0, false);
     /// }
@@ -592,8 +617,9 @@ impl RawStack {
         debug_assert!(size <= self.buffer.len());
         let p = self.buffer.len() - size;
         let pointer = unsafe { self.buffer.as_mut_ptr().add(p).cast::<u8>() };
-        self.release_top(1);
+        // SAFETY: Restore the retained prefix before calling the user's destructor.
         unsafe {
+            self.release_top(1);
             self.truncate_to(p, padding);
             run_drop(pointer);
         }
@@ -619,9 +645,10 @@ impl RawStack {
     /// use cel_runtime::RawStack;
     /// let mut stack = RawStack::with_base_alignment(1);
     /// stack.push([11u8, 22, 33]);
-    /// stack.release_top(1);
     /// let mut bytes = [0u8; 3];
+    /// // SAFETY: All owners are released; the byte array needs no destruction.
     /// unsafe {
+    ///     stack.release_top(1);
     ///     assert!(stack.repack(0, 1, 3, &[0], &[0], &[3]));
     ///     stack.copy_from(1, 3, bytes.as_mut_ptr().cast());
     ///     stack.truncate_to(0, false);
@@ -754,7 +781,9 @@ impl RawStack {
             0
         };
         self.buffer.truncate(p - padding_count);
-        self.release_top(1);
+        // SAFETY: The result was moved out and the byte prefix already restored;
+        // removing its matching entry reconciles metadata before any cleanup.
+        unsafe { self.release_top(1) };
         result
     }
 
@@ -1076,13 +1105,55 @@ mod tests {
         stack.push(42usize);
         stack.push(ZeroSized);
         let origin = stack.len();
-        stack.release_top(1);
+        // SAFETY: This unpadded ZST leaves the retained usize at the physical top.
+        // Its destruction is intentionally omitted.
+        unsafe { stack.release_top(1) };
         assert_eq!(stack.len(), origin);
         assert_eq!(stack.depth(), 1);
         let value: usize = unsafe { stack.pop(false) };
         assert_eq!(value, 42);
         drop(stack);
         ZST_DROPS.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    /// Completes suffix transfer before normal or unwinding destruction of an owned prefix.
+    #[test]
+    fn released_suffix_transfer_preserves_owned_prefix() {
+        for unwind in [false, true] {
+            let drops = Rc::new(RefCell::new(Vec::new()));
+            let mut stack = RawStack::with_base_alignment(align_of::<Box<Tracked>>());
+            stack.push(Box::new(Tracked {
+                id: 1,
+                drops: drops.clone(),
+                panic: false,
+            }));
+            let origin = stack.len();
+            stack.push(Box::new(Tracked {
+                id: 2,
+                drops: drops.clone(),
+                panic: false,
+            }));
+            // SAFETY: The suffix is an aligned Box<Tracked>. No operation can
+            // unwind between moving it, releasing its entry, and restoring the
+            // retained prefix's physical end.
+            let transferred = unsafe {
+                let value = stack.read_at(origin, |ptr| ptr.cast::<Box<Tracked>>().read());
+                stack.release_top(1);
+                stack.truncate_to(origin, false);
+                value
+            };
+            assert_eq!(stack.len(), origin);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _retained = stack;
+                drop(transferred);
+                assert!(
+                    !unwind,
+                    "unwind after completing the raw ownership protocol"
+                );
+            }));
+            assert_eq!(result.is_err(), unwind);
+            assert_eq!(*drops.borrow(), [2, 1]);
+        }
     }
 
     #[test]
@@ -1276,8 +1347,9 @@ mod tests {
         let mut stack = RawStack::with_base_alignment(align_of::<DropCounter>());
         let _ = stack.push(DropCounter(count.clone()));
         let len_before = stack.len();
-        stack.release_top(1);
+        // SAFETY: No retained owner remains, including if this destructor panics.
         unsafe {
+            stack.release_top(1);
             stack.drop_at(0, |ptr| std::ptr::drop_in_place(ptr.cast::<DropCounter>()));
         }
         assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -1291,8 +1363,12 @@ mod tests {
         let _ = stack.push(1u8);
         let padding = stack.push(2.5f64); // padding == true: 7 bytes inserted before the f64
         let len_with_value = stack.len();
-        stack.release_top(1);
-        unsafe { stack.truncate_to(len_with_value - size_of::<f64>(), padding) };
+        // SAFETY: The released scalar needs no destruction. Restore the exact
+        // retained prefix immediately, before any assertion can unwind.
+        unsafe {
+            stack.release_top(1);
+            stack.truncate_to(len_with_value - size_of::<f64>(), padding);
+        }
         assert_eq!(stack.len(), 1); // back to just the u8
     }
 
@@ -1333,7 +1409,8 @@ mod tests {
             stack.reserve_and_write(2, 1, |dst| dst.write(22));
             stack.reserve_and_write(128, 1, |dst| dst.write(33));
         }
-        stack.release_top(3);
+        // SAFETY: All owners are released and these bytes require no destruction.
+        unsafe { stack.release_top(3) };
 
         assert!(!unsafe { stack.repack(0, 0, 3, &[0, 2, 128], &[0, 1, 2], &[1, 1, 1]) });
         let mut bytes = [0u8; 3];
@@ -1354,23 +1431,27 @@ mod tests {
             stack.reserve_and_write(2, 1, |dst| dst.write(44));
             stack.reserve_and_write(128, 1, |dst| dst.write(55));
         }
-        stack.release_top(5);
-        assert!(unsafe {
-            stack.repack(
+        // SAFETY: This fixed layout and byte reads cannot unwind. Restore the
+        // retained prefix before assertions or any owner-based operation.
+        let (padding, values, length) = unsafe {
+            stack.release_top(5);
+            let padding = stack.repack(
                 1,
                 2,
                 4095,
                 &[1, 2, 128, 130, 256],
                 &[0, 1, 2, 126, 4094],
                 &[1; 5],
-            )
-        });
-        let values =
-            [2, 3, 4, 128, 4096].map(|offset| unsafe { stack.read_at(offset, |ptr| ptr.read()) });
+            );
+            let values = [2, 3, 4, 128, 4096].map(|offset| stack.read_at(offset, |ptr| ptr.read()));
+            let snapshot = (padding, values, stack.len());
+            stack.truncate_to(2, true);
+            snapshot
+        };
+        assert!(padding);
         assert_eq!(values, [11, 22, 33, 44, 55]);
-        assert_eq!(stack.len(), 4097);
+        assert_eq!(length, 4097);
         assert_eq!(stack.depth(), 1);
-        unsafe { stack.truncate_to(2, true) };
         assert_eq!(unsafe { stack.pop::<u8>(false) }, 0xAA);
     }
 
@@ -1379,7 +1460,8 @@ mod tests {
     fn repack_preserves_self_overlapping_field_bytes() {
         let mut stack = RawStack::with_base_alignment(1);
         stack.push([11u8, 22, 33, 44]);
-        stack.release_top(1);
+        // SAFETY: No retained owner remains; the released byte array is trivial.
+        unsafe { stack.release_top(1) };
         assert!(unsafe { stack.repack(0, 1, 4, &[0], &[0], &[4]) });
         let mut bytes = [0u8; 4];
         unsafe { stack.copy_from(1, 4, bytes.as_mut_ptr().cast()) };
@@ -1396,7 +1478,8 @@ mod tests {
         stack.push(11u8);
         unsafe { stack.reserve_and_write(8, 0, |_| {}) };
         stack.push(22u8);
-        stack.release_top(3);
+        // SAFETY: No retained owner remains; these scalar/ZST fields are trivial.
+        unsafe { stack.release_top(3) };
         assert!(!unsafe { stack.repack(0, 0, 2, &[0, 8, 8], &[0, 1, 1], &[1, 0, 1]) });
         let mut bytes = [0u8; 2];
         unsafe { stack.copy_from(0, 2, bytes.as_mut_ptr().cast()) };
@@ -1424,7 +1507,8 @@ mod tests {
         let total_size = 12usize;
         let dest_base = 0usize; // ambient_start (0) is already 4-aligned
 
-        stack.release_top(3);
+        // SAFETY: No retained owner remains; these scalar fields are trivial.
+        unsafe { stack.release_top(3) };
         let padding = unsafe {
             stack.repack(
                 ambient_start,
@@ -1476,31 +1560,33 @@ mod tests {
         let total_size = 8usize;
         let dest_base = 4usize; // align_index(4, ambient_start=1) == 4, so this shifts right
 
-        stack.release_top(2);
-        let padding = unsafe {
-            stack.repack(
+        let mut sentinel = [0u8; 1];
+        let mut a = [0u8; 1];
+        let mut b = [0u8; 4];
+        // SAFETY: The fixed copy layout cannot unwind. Remove the released
+        // suffix and padding before assertions can expose the retained owner.
+        let (padding, length) = unsafe {
+            stack.release_top(2);
+            let padding = stack.repack(
                 ambient_start,
                 dest_base,
                 total_size,
                 &src_offsets,
                 &dest_offsets,
                 &sizes,
-            )
+            );
+            let length = stack.len();
+            stack.copy_from(0, 1, sentinel.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base, 1, a.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.truncate_to(dest_base, true);
+            (padding, length)
         };
         assert!(
             padding,
             "ambient_start (1) is not 4-aligned; a leading pad is expected"
         );
-        assert_eq!(stack.len(), dest_base + total_size);
-
-        let mut sentinel = [0u8; 1];
-        let mut a = [0u8; 1];
-        let mut b = [0u8; 4];
-        unsafe {
-            stack.copy_from(0, 1, sentinel.as_mut_ptr().cast::<MaybeUninit<u8>>());
-            stack.copy_from(dest_base, 1, a.as_mut_ptr().cast::<MaybeUninit<u8>>());
-            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr().cast::<MaybeUninit<u8>>());
-        }
+        assert_eq!(length, dest_base + total_size);
         assert_eq!(
             sentinel[0], 0xFF,
             "bytes before the tuple must be untouched"
