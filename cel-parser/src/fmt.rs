@@ -1132,8 +1132,7 @@ fn render(expr: &Expr, source: &Source<'_>, depth: usize) -> (Doc, Level) {
             } else {
                 trivia_doc(format!(" {} ", gap.trim()))
             };
-            // A closure's body greedily consumes expressions, including following postfixes.
-            // Its primary-expression grammar position does not make it a tight-binding value.
+            // Closures are complete expressions; operator and postfix operands require grouping.
             (
                 header.append(sep.append(body_s).nest(4)).group(),
                 Level::RANGE,

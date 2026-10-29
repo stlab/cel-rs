@@ -14,6 +14,7 @@ comparison and range forms do not chain.
 ## Syntax
 
 ```text
+expression = closure_expression | range_expression .
 range_expression = ".." [ or_expression ]
                  | "..=" or_expression
                  | or_expression [ ".." [ or_expression ] | "..=" or_expression ] .
@@ -29,9 +30,8 @@ additive_expression = multiplicative_expression { ("+" | "-") multiplicative_exp
 multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
 cast_expression = unary_expression { "as" identifier } .
 unary_expression = (("-" | "!") unary_expression) | postfix_expression .
-postfix_expression = primary_expression {
-    "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ argument_list ] ")" ])
-} .
+postfix_expression = primary_expression { postfix_suffix } .
+postfix_suffix = "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier) .
 argument_list = expression { "," expression } .
 ```
 
@@ -82,6 +82,8 @@ not chain.
   Calls without metadata remain best-effort and still check every argument.
 - Postfix calls and tuple indices bind more tightly than unary and binary
   operators.
+- A bare closure is a complete expression, not an operator operand. Group it
+  before applying an operator or postfix suffix: `(|x: i32| x + 1)(2)`.
 - `+` accepts homogeneous numeric operands and `String + String`.
   Unsigned integer addition wraps. Signed integer addition reports
   `arithmetic overflow` on overflow.
@@ -108,7 +110,8 @@ not chain.
 - Range forms bind more loosely than every other operator. The valid forms
   are `a..b`, `a..=b`, `a..`, `..b`, `..=b`, and `..`.
 - `..=` always requires a right endpoint.
-- Range endpoints are full expressions.
+- Range endpoints are `or_expression`s. Group a closure or nested range used
+  as an endpoint; endpoint types must still satisfy the operator's requirements.
 - Range expressions do not chain, so `1..2..3` is not valid.
 - `1 + 2..3 * 4` means `(1 + 2)..(3 * 4)`.
 - `as` converts a value to one of the sixteen built-in scalar type names:

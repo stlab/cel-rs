@@ -3,6 +3,77 @@
 use cel_parser::{CELParser, OpLookup, ResolvedLeafType, resolve_builtin_named_type};
 use cel_runtime::ValueType;
 
+/// Operator operands require grouped closures, and formatting preserves those groups.
+#[test]
+fn closure_operands_require_grouping() {
+    for (bare, grouped) in [
+        ("1 + || 2", "1 + (|| 2)"),
+        ("1 + |x: i32| x", "1 + (|x: i32| x)"),
+        ("-|| 1", "-(|| 1)"),
+        ("!|| true", "!(|| true)"),
+        ("true && || true", "true && (|| true)"),
+        ("false || || true", "false || (|| true)"),
+        ("1 == || 1", "1 == (|| 1)"),
+        ("1 | |x: i32| x", "1 | (|x: i32| x)"),
+        ("1 ^ || 2", "1 ^ (|| 2)"),
+        ("1 & || 2", "1 & (|| 2)"),
+        ("1 << || 2", "1 << (|| 2)"),
+        ("1 >> || 2", "1 >> (|| 2)"),
+        ("1 * || 2", "1 * (|| 2)"),
+        ("1 / || 2", "1 / (|| 2)"),
+        ("1 % || 2", "1 % (|| 2)"),
+        ("..|| 1", "..(|| 1)"),
+        ("..=|| 1", "..=(|| 1)"),
+        ("1..|| 2", "1..(|| 2)"),
+        ("1..=|x: i32| x", "1..=(|x: i32| x)"),
+    ] {
+        assert!(
+            cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+                .parse_str_ast(bare)
+                .is_err(),
+            "ungrouped closure operand accepted: {bare}"
+        );
+        assert!(parser().parse_str(bare).is_err(), "{bare}");
+
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(grouped)
+            .unwrap();
+        let formatted = cel_parser::format_expr(&expr, grouped, 0);
+        assert_eq!(formatted, grouped);
+        let reparsed = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(&formatted)
+            .unwrap();
+        assert_eq!(cel_parser::format_expr(&reparsed, &formatted, 0), formatted);
+    }
+}
+
+/// Grouped calls and complete-expression arguments retain closure body precedence.
+#[test]
+fn closure_grouping_preserves_direct_and_retained_execution() {
+    for source in [
+        "(|| 1 + 2 * 3)()",
+        "(|x: i32| x - 2 - 1)(10)",
+        "(|f: Fn((i32,), i32)| f(6))(|x: i32| x + 1)",
+        "(|| || 7)()()",
+    ] {
+        assert_eq!(
+            parser().parse_str(source).unwrap().call0::<i32>().unwrap(),
+            7
+        );
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let mut segment = cel_parser::compile_expr(
+            &expr,
+            &OpLookup::new(),
+            cel_parser::builtin_type_resolver().as_ref(),
+            &mut |_, _, _| Ok(false),
+        )
+        .unwrap();
+        assert_eq!(segment.call0::<i32>().unwrap(), 7);
+    }
+}
+
 /// Callable annotations retain complete signatures through higher-order and tuple intermediates.
 #[test]
 fn full_callable_annotations_execute_without_host_shape_registration() {

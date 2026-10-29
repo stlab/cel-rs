@@ -19,24 +19,25 @@ another item, except for the required terminal comma in a singleton tuple value
 or type. No other list accepts a trailing comma.
 
 ```text
-expression = ".." [ ranged_operand ] | "..=" ranged_operand | operand .
-operand = ("-" | "!") operand | closure_expression | atom tail .
-compared_operand = ("-" | "!") compared_operand | closure_expression | atom compared_tail .
-ranged_operand = ("-" | "!") ranged_operand | closure_expression | atom ranged_tail .
-ranged_compared_operand = ("-" | "!") ranged_compared_operand
-                       | closure_expression | atom ranged_compared_tail .
-atom = primary_expression { postfix_suffix } { "as" identifier } .
+expression = closure_expression | range_expression .
+range_expression = ".." [ or_expression ]
+                 | "..=" or_expression
+                 | or_expression [ ".." [ or_expression ] | "..=" or_expression ] .
+or_expression = and_expression { "||" and_expression } .
+and_expression = comparison_expression { "&&" comparison_expression } .
+comparison_expression = bitwise_or_expression
+    [ comparison_operator bitwise_or_expression ] .
+bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression } .
+bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression } .
+bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression } .
+bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression } .
+additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression } .
+multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
+cast_expression = unary_expression { "as" identifier } .
+unary_expression = ("-" | "!") unary_expression | postfix_expression .
+postfix_expression = primary_expression { postfix_suffix } .
 postfix_suffix = "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier) .
-tail = [ high_operator operand | comparison_operator compared_operand
-       | logical_operator operand | ".." [ ranged_operand ] | "..=" ranged_operand ] .
-compared_tail = [ high_operator compared_operand | logical_operator operand
-                | ".." [ ranged_operand ] | "..=" ranged_operand ] .
-ranged_tail = [ high_operator ranged_operand | comparison_operator ranged_compared_operand
-              | logical_operator ranged_operand ] .
-ranged_compared_tail = [ high_operator ranged_compared_operand | logical_operator ranged_operand ] .
-high_operator = "+" | "-" | "*" | "/" | "%" | "|" | "^" | "&" | "<<" | ">>" .
 comparison_operator = "==" | "!=" | "<" | ">" | "<=" | ">=" .
-logical_operator = "&&" | "||" .
 argument_list = expression { "," expression } .
 primary_expression = literal
                    | value_identifier [ record_fields ]
@@ -59,11 +60,12 @@ closure_expression = "||" expression
 closure_param = identifier ":" type_expr .
 ```
 
-This grammar recognizes token structure. The precedence table below determines
-operator binding, independently of the recognition grammar's right recursion.
-Unary operators bind before casts; a closure body consumes the remaining expression
-inside its delimiter boundary. The four operand/tail states reject chained ranges
-and comparisons while allowing separate comparisons across logical operators.
+These productions encode precedence and left associativity directly. Comparisons
+and ranges do not chain; logical operators may combine separate comparisons.
+A closure is a complete expression, not a primary operand. Its body consumes the
+remaining expression inside its delimiter boundary. Group a closure before applying
+an operator or postfix suffix to it. Arguments and collection elements are complete
+expressions and accept bare closures.
 A call suffix directly after a named member dispatches that member. Parenthesize
 the member before the call suffix to call its result instead.
 
@@ -73,11 +75,11 @@ body. A condition enters header mode; a closure body inherits its enclosing mode
 Groups, arguments, arrays, record field values, and branch bodies enter ordinary
 mode. `value_identifier` excludes `if`, `else`, `as`, `true`, and `false`.
 
-Every operand chooses among unary punctuation, closure punctuation, and a primary
-token. Every tail chooses among disjoint operator tokens or ends at a closing
-delimiter, comma, body brace, or end of input. The optional ranged operand has
-the same disjoint start and end sets. A consumed comma always requires another
-item, except the required comma marking a singleton tuple.
+The first token distinguishes closures (`|` or `||`) from range expressions.
+Each precedence level selects its continuation from the current token and returns
+at a lower-precedence operator or expression boundary. Boundaries include closing
+delimiters, commas, body braces, and end of input. A consumed comma always requires
+another item, except the required comma marking a singleton tuple.
 
 ## Worked examples
 
@@ -155,7 +157,7 @@ true as i32
 | <code>&amp;&amp;</code>, <code>&#124;&#124;</code> | `bool` and `bool` | Short-circuit logical operators. |
 | `==`, `!=` | homogeneous numeric operands, homogeneous `bool`, or homogeneous `String` | Produces `bool`. |
 | `<`, `<=`, `>`, `>=` | homogeneous numeric operands or homogeneous `String` | Produces `bool`. |
-| range forms | homogeneous numeric endpoints, or no endpoints for `..` | `..=` requires a right endpoint. Endpoints are full expressions. |
+| range forms | homogeneous numeric endpoints, or no endpoints for `..` | `..=` requires a right endpoint. Group closures and nested ranges used as endpoints. |
 | `as` | expression plus built-in scalar target name | Integer targets accept integer, floating-point, and `bool` sources. `f32`/`f64` targets accept integer and floating-point sources. `bool` and `String` targets accept only their same-type sources. |
 | call and `.N` | a valid callee and arguments, or a tuple plus an unsuffixed integer | `.N` applies to tuples only. |
 
@@ -227,6 +229,9 @@ when the evaluation environment installs it. See
   A macro-compiled CEL backend does not yet exist.
 - Comparison expressions consume one comparison operator.
 - Range forms do not chain.
+- Closures require parentheses as operator operands, including range endpoints,
+  cast inputs, and postfix receivers. Complete-expression positions, including
+  call arguments, tuple elements, array elements, and branch bodies, accept bare closures.
 - `expr.name` and `expr.name()` invoke the same host-provided unary operation.
   `expr.name(a, b)` passes the receiver first, followed by explicit arguments.
   Each operand evaluates once in source order. A value binding named `name`

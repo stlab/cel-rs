@@ -42,24 +42,24 @@
 //! [reference chapter](../cel-book/reference.html).
 //!
 //! ```text
-//! expression = ".." [ ranged_operand ] | "..=" ranged_operand | operand.
-//! operand = ("-" | "!") operand | closure_expression | atom tail.
-//! compared_operand = ("-" | "!") compared_operand | closure_expression | atom compared_tail.
-//! ranged_operand = ("-" | "!") ranged_operand | closure_expression | atom ranged_tail.
-//! ranged_compared_operand = ("-" | "!") ranged_compared_operand
-//!                         | closure_expression | atom ranged_compared_tail.
-//! atom = primary_expression { postfix_suffix } { "as" identifier }.
+//! expression = closure_expression | range_expression.
+//! range_expression = ".." [ or_expression ]
+//!                  | "..=" or_expression
+//!                  | or_expression [ ".." [ or_expression ] | "..=" or_expression ].
+//! or_expression = and_expression { "||" and_expression }.
+//! and_expression = comparison_expression { "&&" comparison_expression }.
+//! comparison_expression = bitwise_or_expression [ comparison_operator bitwise_or_expression ].
+//! bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
+//! bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
+//! bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
+//! bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
+//! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
+//! multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.
+//! cast_expression = unary_expression { "as" identifier }.
+//! unary_expression = ("-" | "!") unary_expression | postfix_expression.
+//! postfix_expression = primary_expression { postfix_suffix }.
 //! postfix_suffix = "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier).
-//! tail = [ high_operator operand | comparison_operator compared_operand
-//!        | logical_operator operand | ".." [ ranged_operand ] | "..=" ranged_operand ].
-//! compared_tail = [ high_operator compared_operand | logical_operator operand
-//!                 | ".." [ ranged_operand ] | "..=" ranged_operand ].
-//! ranged_tail = [ high_operator ranged_operand | comparison_operator ranged_compared_operand
-//!               | logical_operator ranged_operand ].
-//! ranged_compared_tail = [ high_operator ranged_compared_operand | logical_operator ranged_operand ].
-//! high_operator = "+" | "-" | "*" | "/" | "%" | "|" | "^" | "&" | "<<" | ">>".
 //! comparison_operator = "==" | "!=" | "<" | ">" | "<=" | ">=".
-//! logical_operator = "&&" | "||".
 //! primary_expression = literal | value_identifier [ record_fields ] | tuple_or_group
 //!                    | array_expression | if_expression.
 //! record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } ] "}".
@@ -77,19 +77,20 @@
 //! literal_pattern = ["-"] literal.
 //! ```
 //!
-//! This recognition grammar separates syntax from operator binding. The parser applies the
-//! precedence levels documented on its production methods; the book's operator table gives the
-//! same ordering. A closure consumes the remaining expression in its current delimiter boundary.
-//! The four operand/tail states prevent comparison and range chaining without an ambiguous
-//! optional continuation after a bare closure. Postfix calls directly following a named member
-//! dispatch that member; grouping the member first calls its result instead.
+//! The productions encode operator precedence and left associativity; comparisons and ranges
+//! do not chain. A closure is a complete expression, not a primary operand. Its body consumes
+//! the remaining expression in its current delimiter boundary. Group a closure before applying
+//! an operator or postfix suffix to it: `(|x: i32| x + 1)(2)`. Arguments and collection elements
+//! are complete expressions and accept bare closures. Postfix calls directly following a named
+//! member dispatch that member; grouping the member first calls its result instead.
 //!
 //! Expand these productions in ordinary and header modes. Header mode omits `record_fields`
 //! from its primary production, so its following `{` belongs to the host body. Groups, argument
 //! lists, arrays, record field values and branch bodies enter ordinary mode; closure bodies
-//! inherit their enclosing mode. A condition enters header mode. Each tail's operator tokens
-//! are disjoint from its FOLLOW set (closing delimiters, comma, body brace or end of input).
-//! Operand alternatives start with unary punctuation, closure punctuation or a primary token;
+//! inherit their enclosing mode. A condition enters header mode. The first token distinguishes
+//! closures (`|` or `||`) from range expressions. Each precedence level selects its continuation
+//! from the current token and returns at a lower-precedence operator or expression boundary.
+//! Boundaries include closing delimiters, commas, body braces and end of input.
 //! `value_identifier` excludes the five reserved words.
 //!
 //! Registered records use a constructor namespace independent of value bindings and evaluate
@@ -1304,12 +1305,18 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `expression = range_expression.`
+    /// `expression = closure_expression | range_expression.`
     ///
     /// # Examples
     /// See [`Self::parse_tokens_ctx`] for recognizing an expression on the current cursor.
     pub fn is_expression(&mut self) -> Result<bool> {
-        self.is_range_expression()
+        if self.is_punctuation("||") {
+            self.is_closure_expression(true)
+        } else if self.is_punctuation("|") {
+            self.is_closure_expression(false)
+        } else {
+            self.is_range_expression()
+        }
     }
 
     /// `or_expression = and_expression { "||" and_expression }.`
@@ -1709,7 +1716,7 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `unary_expression = (("-" | "!") unary_expression) | primary_expression.`
+    /// `unary_expression = ("-" | "!") unary_expression | postfix_expression.`
     fn is_unary_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
         let op_name = if self.is_punctuation("-") {
@@ -1772,7 +1779,9 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ parameter_list ] ")" ]) }.`
+    /// `postfix_expression = primary_expression { postfix_suffix }.`
+    ///
+    /// `postfix_suffix = "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier).`
     ///
     /// The repetition allows chained indices (`t.0.1`): each `"." unsuffixed_integer`
     /// is applied in turn to whatever value the previous step left on top of the
@@ -1926,18 +1935,13 @@ impl<C: ParserContext> Parser<C> {
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier [ record_fields ] | tuple_or_group | array_expression |
-    /// if_expression | closure_expression.`
+    /// `primary_expression = literal | value_identifier [ record_fields ] | tuple_or_group |
+    /// array_expression | if_expression.`
     ///
     /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen,
     /// to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen, to
-    /// [`is_array_expression`](Self::is_array_expression) when `[` is seen, and to
-    /// [`is_closure_expression`](Self::is_closure_expression) when `|` or `||` is seen.
-    ///
-    /// A zero-parameter closure's opening and closing pipes (`||`) have nothing between them to
-    /// keep them apart, so the lexer combines them into one two-character token exactly like it
-    /// does for `&&`/`<=`/etc. elsewhere in this grammar — checked first, before the
-    /// one-character `|` case, so `is_punctuation("|")` doesn't (and can't) partially match it.
+    /// [`is_array_expression`](Self::is_array_expression) when `[` is seen.
+    /// A closure reaches this production only through a parenthesized expression.
     ///
     /// # Errors
     ///
@@ -1947,14 +1951,7 @@ impl<C: ParserContext> Parser<C> {
     /// - A tuple-or-group expression fails to parse.
     /// - An array literal fails to parse or is rejected by the context it emits into.
     /// - An `if` expression fails to parse.
-    /// - A closure expression fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
-        if self.is_punctuation("||") {
-            return self.is_closure_expression(true);
-        }
-        if self.is_punctuation("|") {
-            return self.is_closure_expression(false);
-        }
         match self.peek_token() {
             Some(Token::Literal(lit)) => {
                 let lit_clone = lit.clone();

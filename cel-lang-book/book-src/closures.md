@@ -1,7 +1,8 @@
 # Closures
 
-CEL uses `|...|` for closure literals. A closure is an expression and can
-appear anywhere an expression is expected. For the exact grammar, see the
+CEL uses `|...|` for closure literals. A bare closure occupies a complete
+expression; an operator operand requires parentheses around the closure.
+For the exact grammar, see the
 [Reference Manual](reference.md).
 
 ## Concept
@@ -12,6 +13,7 @@ callable value.
 ## Syntax
 
 ```text
+expression = closure_expression | range_expression .
 closure_expression = ("||" | "|" closure_param { "," closure_param } "|")
                      expression .
 closure_param = identifier ":" type_expression .
@@ -49,6 +51,11 @@ Closures:
 - The closure body is one expression.
 - A bare closure body extends to its enclosing expression boundary. For example,
   `|| 1 + 2` returns `3`; write `(|| 1)()` to apply a zero-parameter closure.
+- Group a closure before using it as an operator operand, cast input, or postfix
+  receiver. `a + |x: i32| x` is a syntax error; `a + (|x: i32| x)` is
+  syntactically valid, with operator/type checking performed separately.
+- Call arguments, tuple and array elements, branch bodies, and closure bodies
+  are complete expressions and accept bare closures, as in `f(|x: i32| x + 1)`.
 - Parameter names are unique and cannot use reserved value names.
 - A closure body resolves its own parameters and does not capture free
   variables from an enclosing expression. Installed library operations
