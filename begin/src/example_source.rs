@@ -306,7 +306,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("zeta.adm2"), "sheet s {}").unwrap();
         std::fs::write(dir.join("alpha.adm2"), "sheet s {}").unwrap();
         std::fs::write(dir.join("ignored.txt"), "not an example").unwrap();
@@ -372,7 +372,7 @@ mod watch_tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
 
         let (tx, rx) = mpsc::channel::<()>();
         let _watcher = spawn_watch_on_dir(dir.clone(), move || {
@@ -398,7 +398,7 @@ mod watch_tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("goes_away.adm2");
         std::fs::write(&file, "sheet s {}").unwrap();
 

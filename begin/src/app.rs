@@ -957,6 +957,7 @@ mod tests {
             "../target/{}-begin_app_test_load_opened_parse_error.adm2",
             std::process::id()
         ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "sheet s { cell x }").unwrap();
 
         let (sheet_labels, active) = load_opened(path.clone());

@@ -117,13 +117,13 @@ mod tests {
     use crate::model::cell::CellType;
     use crate::ops::cells::add_cell;
 
-    /// Returns a process-local fixture path inside the build tree.
+    /// Creates the build-tree fixture directory and returns a process-local path.
     ///
-    /// - Complexity: O(constructed path bytes) time and space.
+    /// - Complexity: O(constructed path bytes) time and space, plus directory creation.
     fn temp_path(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../target")
-            .join(format!("{}-{name}", std::process::id()))
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target");
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join(format!("{}-{name}", std::process::id()))
     }
 
     #[test]
