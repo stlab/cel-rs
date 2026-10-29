@@ -1,11 +1,11 @@
 ---
 title: "Architecture Overview"
 entity_type: concept
-confidence: 0.80
+confidence: 0.72
 created: 2026-10-08T18:51:41Z
-last_accessed: 2026-10-08T18:52:53Z
+last_accessed: 2026-10-28T20:36:05Z
 last_reinforced: 2026-10-08T18:51:41Z
-access_count: 2
+access_count: 3
 sources:
   - "cel-runtime/src/lib.rs:1-35"
   - "cel-parser/src/lib.rs:555-615"
