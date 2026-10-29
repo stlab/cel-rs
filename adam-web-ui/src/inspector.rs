@@ -300,12 +300,15 @@ fn sync_input(is_numeric: bool, input: &str, focused: bool, previous: &str, curr
     }
 }
 
-/// Reads a normalized numeric draft from a Spectrum field or a slider's editable field.
+/// Builds a normalized draft reader for a Spectrum number/text field or editable slider.
 ///
 /// Consumes the localized `adamNumericDraft` installed by [`SpSlider`] once, preserving blanks
 /// and partial edits. Slider dragging reads the canonical host value without locale normalization.
 /// The script sends `1|value` while the host is focused and `0|value` otherwise.
-/// - Complexity: O(n) in the field ID and edited text lengths.
+/// Text-valued numeric controls use inherited-language `Intl` normalization without numeric coercion.
+///
+/// - Complexity: O(field ID bytes) construction; O(draft bytes) JavaScript normalization,
+///   excluding standard `Intl` formatter construction for text fields.
 ///
 /// # Examples
 ///
@@ -388,7 +391,7 @@ fn write_and_propagate(
         Ok(()) => {
             let labels_r = labels.read();
             let clamped = labels_r.cells.get(&id).is_some_and(|m| {
-                if !m.is_numeric || m.range.is_none() {
+                if !m.is_numeric || parsed_w.filter_kind(id).is_none() {
                     return false;
                 }
                 let actual = (m.display)(&parsed_w);
@@ -551,6 +554,14 @@ fn CellRow(
             .unwrap_or(false)
     });
 
+    let number_input_safe = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .is_some_and(|meta| meta.number_input_safe)
+    });
+
     let forced = use_memo(move || parsed.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
@@ -607,7 +618,7 @@ fn CellRow(
     rsx! {
         div {
             style: "margin-bottom: 8px;",
-            if let Some((lo, hi)) = *range.read() {
+            if let Some((lo, hi)) = (*range.read()).filter(|_| *number_input_safe.read()) {
                 {
                     let slider_value = slider_field_value(&input.read(), &value.read()).to_string();
                     let (min, max) = slider_bounds(&slider_value, (lo, hi));
@@ -701,7 +712,7 @@ fn CellRow(
                 }
             } else {
                 SpFieldLabel { for_: field_id.clone(), "{label}" }
-                if *is_numeric.read() {
+                if *number_input_safe.read() {
                     SpNumberfield {
                         id: field_id,
                         value: number_field_value(&input.read()).to_string(),
@@ -801,7 +812,8 @@ fn CellRow(
                         id: field_id,
                         value: input.read().clone(),
                         invalid: flags.read().invalid,
-                        disabled: flags.read().disabled,
+                        disabled: flags.read().disabled && !flags.read().readonly,
+                        readonly: flags.read().readonly,
                         // Dioxus's event serializer only reads event.target.value for
                         // HTMLInputElement — custom elements (sp-textfield) always give "".
                         // Use dioxus.send() in JS and eval.recv() to read the live value.
@@ -811,19 +823,21 @@ fn CellRow(
                             let request_revision = revision.peek().checked_add(1).expect("input revision overflow");
                             revision.set(request_revision);
                             spawn(async move {
-                                let mut eval = document::eval(&format!(
-                                    r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value)"#
-                                ));
+                                let numeric = *is_numeric.peek();
+                                let field_id = format!("cell-{ns}-{id:?}");
+                                let script = text_input_script(&field_id, numeric);
+                                let mut eval = document::eval(&script);
                                 let Ok(val) = eval.recv::<String>().await else { return; };
                                 if !input_reply_is_current(&request_source, &source_owner.peek(), request_revision, *revision.peek()) { return; }
+                                let Some(val) = text_field_draft(&val, numeric) else { return; };
                                 // Discard the result if the user blurred while the round-trip was
                                 // in flight; blur already cleared the error and use_effect will
                                 // restore the last valid computed value.
                                 if !*is_focused.read() {
                                     return;
                                 }
-                                input.set(val.clone());
-                                write_and_propagate(parsed, labels, id, &val, has_error, errors);
+                                input.set(val.to_string());
+                                write_and_propagate(parsed, labels, id, val, has_error, errors);
                             });
                         },
                         onfocus: move |_| is_focused.set(true),
@@ -833,6 +847,9 @@ fn CellRow(
                             is_focused.set(false);
                             has_error.set(false);
                         },
+                        if let Some(names) = violated_requirement_names.read().clone() {
+                            SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
+                        }
                     }
                 }
             }
@@ -841,9 +858,58 @@ fn CellRow(
     }
 }
 
+/// Builds the live-value reader for normalized numeric text or literal string content.
+///
+/// - Complexity: O(field ID bytes) construction; numeric execution follows [`numeric_input_script`].
+fn text_input_script(field_id: &str, numeric: bool) -> String {
+    if numeric {
+        numeric_input_script(field_id, false)
+    } else {
+        format!(r#"dioxus.send(document.getElementById({field_id:?}).value)"#)
+    }
+}
+
+/// Returns literal text or a focused numeric text field's normalized draft.
+///
+/// Unfocused or malformed numeric wire replies do not authorize an edit.
+///
+/// - Complexity: O(payload.len()) worst-case numeric validation; O(1) for literal text.
+fn text_field_draft(payload: &str, numeric: bool) -> Option<&str> {
+    if numeric {
+        match payload.split_once('|') {
+            Some(("1", draft)) => Some(draft),
+            _ => None,
+        }
+    } else {
+        Some(payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only numeric text fields consume focus envelopes; literal strings stay unchanged.
+    #[test]
+    fn text_field_wire_preserves_strings_and_authorizes_focused_numeric_drafts() {
+        assert_eq!(
+            text_input_script("cell-123", true),
+            numeric_input_script("cell-123", false)
+        );
+        assert_eq!(
+            text_input_script("cell-123", false),
+            r#"dioxus.send(document.getElementById("cell-123").value)"#
+        );
+        assert_eq!(text_field_draft("1|001", false), Some("1|001"));
+        assert_eq!(text_field_draft("", false), Some(""));
+        assert_eq!(
+            text_field_draft("1|9007199254740997", true),
+            Some("9007199254740997")
+        );
+        assert_eq!(text_field_draft("1|", true), Some(""));
+        assert_eq!(text_field_draft("0|9007199254740997", true), None);
+        assert_eq!(text_field_draft("9007199254740997", true), None);
+    }
 
     /// Verifies blank numeric drafts stay blank through blur and unrelated recomputation.
     #[test]
@@ -1628,49 +1694,124 @@ mod tests {
         assert!(!clamped_away("not a number", "0"));
     }
 
+    /// Edits a real sheet and returns its stored display and field error flag.
+    ///
+    /// - Complexity: source build/propagation plus draft parsing and edited-sheet propagation.
+    fn edit(source: &str, value: &str) -> (String, bool) {
+        let source = source.to_string();
+        let value = value.to_string();
+        /// Observes an independently owned edit result.
+        type Outcome = std::rc::Rc<std::cell::RefCell<(String, bool)>>;
+        /// Runs one write through the framework-owned signals.
+        ///
+        /// - Complexity: source building, draft parsing, propagation and value formatting.
+        fn host((source, value, result): (String, String, Outcome)) -> Element {
+            let outcome = crate::build_sheet(&source, "test.adm2", &Renderer::plain());
+            let (sheet, labels) = outcome.sheet_labels.unwrap();
+            let id = sheet.cell_names["x"].0;
+            let parsed = use_signal(|| sheet);
+            let labels = use_signal(|| labels);
+            let flag = use_signal(|| false);
+            let source_text = use_memo(move || source.clone());
+            let source_name = use_memo(|| "test.adm2".to_string());
+            write_and_propagate(
+                parsed,
+                labels,
+                id,
+                &value,
+                flag,
+                ErrorContext {
+                    source_text,
+                    source_name,
+                    parsed,
+                },
+            );
+            let display = (labels.read().cells[&id].display)(&parsed.read());
+            *result.borrow_mut() = (display, *flag.read());
+            rsx! {}
+        }
+        let result = std::rc::Rc::new(std::cell::RefCell::new((String::new(), false)));
+        let mut dom = VirtualDom::new_with_props(host, (source, value, result.clone()));
+        dom.rebuild_in_place();
+        result.take()
+    }
+
     /// String and integer writes retain their exact semantics.
     #[test]
     fn successful_nonfloat_writes_do_not_look_clamped() {
-        /// Edits a real sheet and reports its field error flag.
-        ///
-        /// - Complexity: source build/propagation plus draft parsing and edited-sheet propagation.
-        fn edit(source: &str, value: &str) -> bool {
-            let source = source.to_string();
-            let value = value.to_string();
-            /// Runs one write through the framework-owned signals.
-            fn host(
-                (source, value, result): (String, String, std::rc::Rc<std::cell::Cell<bool>>),
-            ) -> Element {
-                let outcome = crate::build_sheet(&source, "test.adm2", &Renderer::plain());
-                let (sheet, labels) = outcome.sheet_labels.unwrap();
-                let id = sheet.cell_names["x"].0;
-                let parsed = use_signal(|| sheet);
-                let labels = use_signal(|| labels);
-                let flag = use_signal(|| false);
-                let source_text = use_memo(move || source.clone());
-                let source_name = use_memo(|| "test.adm2".to_string());
-                write_and_propagate(
-                    parsed,
-                    labels,
-                    id,
-                    &value,
-                    flag,
-                    ErrorContext {
-                        source_text,
-                        source_name,
-                        parsed,
-                    },
-                );
-                result.set(*flag.read());
-                rsx! {}
-            }
-            let result = std::rc::Rc::new(std::cell::Cell::new(false));
-            let mut dom = VirtualDom::new_with_props(host, (source, value, result.clone()));
-            dom.rebuild_in_place();
-            result.get()
+        assert_eq!(
+            edit("sheet s { cell x: String; }", "001"),
+            ("001".into(), false)
+        );
+        assert_eq!(
+            edit("sheet s { cell x: i64; }", "9007199254740993"),
+            ("9007199254740993".into(), false)
+        );
+    }
+
+    /// Opaque numeric filters report actual clamping after propagation.
+    #[test]
+    fn opaque_numeric_clamps_report_the_changed_value() {
+        assert_eq!(
+            edit(
+                "sheet s { cell x: i32 filter if _ < 0 { 0 } else { _ }; }",
+                "-1"
+            ),
+            ("0".into(), true)
+        );
+        assert_eq!(
+            edit(
+                "sheet s { cell x: f64 filter if _ < 0.0 { 0.0 } else { _ }; }",
+                "-1.0"
+            ),
+            ("0".into(), true)
+        );
+        assert!(
+            !edit(
+                "sheet s { cell x: f64 filter if _ < 0.0 { 0.0 } else { _ }; }",
+                "1.005"
+            )
+            .1
+        );
+    }
+
+    /// Range-filtered integers compare exact digits above binary64's integer domain.
+    #[test]
+    fn ranged_wide_integer_clamps_compare_exact_values() {
+        for ty in ["i64", "u64"] {
+            let source = format!(
+                "sheet s {{ cell x: {ty} filter 9007199254740992{ty}..=9007199254740994{ty}; }}"
+            );
+            assert_eq!(
+                edit(&source, "9007199254740993"),
+                ("9007199254740993".into(), false),
+                "{ty}"
+            );
+            assert_eq!(
+                edit(&source, "9007199254740999"),
+                ("9007199254740994".into(), true),
+                "{ty}"
+            );
         }
-        assert!(!edit("sheet s { cell x: String; }", "001"));
-        assert!(!edit("sheet s { cell x: i64; }", "9007199254740993"));
+        let negative =
+            "sheet s { cell x: i64 filter -9007199254740994i64..=-9007199254740992i64; }";
+        assert_eq!(
+            edit(negative, "-9007199254740993"),
+            ("-9007199254740993".into(), false)
+        );
+        assert_eq!(
+            edit(negative, "-9007199254740999"),
+            ("-9007199254740994".into(), true)
+        );
+        let unsigned = "sheet s { cell x: u128 filter 170141183460469231731687303715884105728u128..=170141183460469231731687303715884105730u128; }";
+        assert_eq!(
+            edit(unsigned, "170141183460469231731687303715884105729"),
+            ("170141183460469231731687303715884105729".into(), false)
+        );
+        assert_eq!(
+            edit(unsigned, "170141183460469231731687303715884105737"),
+            ("170141183460469231731687303715884105730".into(), true)
+        );
     }
 
     /// Old source owners and out-of-order replies cannot authorize writes.
@@ -1753,7 +1894,7 @@ mod tests {
             .next()
             .unwrap();
         assert_ne!(id_a, id_b);
-        assert!(a.contains("sp-number-field"));
+        assert!(a.contains("sp-textfield") && !a.contains("sp-number-field"));
     }
 
     #[test]

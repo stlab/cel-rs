@@ -1,9 +1,10 @@
 /**
- * Returns a focus-prefixed numeric input payload from a Spectrum field or editable slider.
+ * Returns a focus-prefixed numeric payload from a Spectrum number/text field or editable slider.
  * Consumes and deletes a slider's localized `adamNumericDraft`; otherwise reads its numeric handle.
  * Preserves canonical handle numbers across locales, and preserves blank and partial localized drafts.
  * Converts locale digits and signs to ASCII, removes bidi marks, and accepts space-grouping variants.
- * Runtime: O(n) in the draft text length.
+ * Text fields use their inherited language's standard Intl formatter without converting their value.
+ * Runtime: O(n) draft normalization, excluding standard Intl formatter construction for text fields.
  */
 function readNumericInput(host, slider, focused) {
     const draft = host.adamNumericDraft;
@@ -16,13 +17,16 @@ function readNumericInput(host, slider, focused) {
         ? draft
         : field.shadowRoot.querySelector("input").value;
     let group = "", decimal = ".", minus = "-";
-    for (const part of field.numberFormatter.formatToParts(-12345.6)) {
+    const formatter = field.numberFormatter ?? new Intl.NumberFormat(
+        field.closest?.("[lang]")?.lang || document.documentElement?.lang || undefined,
+    );
+    for (const part of formatter.formatToParts(-12345.6)) {
         if (part.type === "group") group = part.value;
         if (part.type === "decimal") decimal = part.value;
         if (part.type === "minusSign") minus = part.value;
     }
     for (let digit = 0; digit < 10; digit++) {
-        const native = field.numberFormatter.formatToParts(digit)
+        const native = formatter.formatToParts(digit)
             .find(part => part.type === "integer").value;
         if (native !== String(digit)) raw = raw.split(native).join(String(digit));
     }

@@ -103,9 +103,8 @@ pub(crate) fn build_cell_decl(cell: &Cell) -> Result<CellDecl, ExportError> {
 /// stores the sign separately from an *unsigned* literal token, and
 /// `i64::MIN`'s magnitude is out of range for one.
 ///
-/// - Precondition: the synthesized clamp-call text is always valid CEL —
-///   a parse failure here indicates a bug in this function, not bad user
-///   data, so it panics rather than returning a `Result`.
+/// The construction preserves valid CEL expression syntax after checking bound
+/// representability.
 ///
 /// - Complexity: O(cell_name.len() + emitted filter bytes) construction/parsing work.
 fn clamp_filter(cell_name: &str, ty: &CellType) -> Result<Option<CellFilter>, ExportError> {
@@ -274,8 +273,8 @@ pub(crate) fn build_conditional_decl(
 
 /// Builds one `conditional <match_expr> { <literal> => {...} ... _ => {...} }`
 /// declaration for a `cond` whose branches each match on exactly one
-/// value — a single-cell `Cells` condition, or a `Formula` condition with
-/// exactly one referenced cell.
+/// value: a single-cell `Cells` condition, or a scalar `Formula` condition
+/// independently of its dependency count.
 ///
 /// # Errors
 ///

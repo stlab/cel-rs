@@ -35,11 +35,37 @@ fn read_value_js(id: &str) -> String {
     format!(r#"dioxus.send(document.getElementById("{id}").value)"#)
 }
 
+/// Renders exact integer clamp text or a floating numeric field and forwards its input.
+///
+/// - Complexity: O(id.len() + value.len()) attribute construction.
+#[component]
+fn ClampField(
+    id: String,
+    value: String,
+    is_integer: bool,
+    oninput: EventHandler<FormEvent>,
+) -> Element {
+    if is_integer {
+        rsx! { SpTextfield {
+            id, value, invalid: false, disabled: false, oninput,
+            onfocus: |_| {}, onblur: |_| {},
+        } }
+    } else {
+        rsx! { SpNumberfield {
+            id, value, min: None, max: None, step: None,
+            invalid: false, disabled: false, readonly: false, oninput,
+            onfocus: |_| {}, onblur: |_| {},
+        } }
+    }
+}
+
 /// Decodes the shared numeric bridge without coercing drafts to JavaScript numbers.
 ///
 /// # Errors
 ///
 /// Returns an error when the focus-prefixed wire payload is malformed.
+///
+/// - Complexity: O(payload.len()) worst-case validation with borrowed output and no allocation.
 fn numeric_draft(payload: &str) -> Result<&str, &'static str> {
     match payload.split_once('|') {
         Some(("0" | "1", draft)) => Ok(draft),
@@ -193,15 +219,10 @@ pub fn CellPanel(
                 // otherwise fight the user's typing.
                 div {
                     SpFieldLabel { for_: "{clamp_min_id}", "Clamp min" }
-                    SpNumberfield {
+                    ClampField {
                         id: clamp_min_id.clone(),
                         value: min,
-                        min: None,
-                        max: None,
-                        step: is_integer.then(|| "1".to_string()),
-                        invalid: false,
-                        disabled: false,
-                        readonly: false,
+                        is_integer,
                         oninput: move |_| {
                             let id = clamp_min_id.clone();
                             let revision = next_input_revision(&mut input_revisions.write(), &id);
@@ -222,21 +243,14 @@ pub fn CellPanel(
                                 }
                             });
                         },
-                        onfocus: move |_| {},
-                        onblur: move |_| {},
                     }
                 }
                 div {
                     SpFieldLabel { for_: "{clamp_max_id}", "Clamp max" }
-                    SpNumberfield {
+                    ClampField {
                         id: clamp_max_id.clone(),
                         value: max,
-                        min: None,
-                        max: None,
-                        step: is_integer.then(|| "1".to_string()),
-                        invalid: false,
-                        disabled: false,
-                        readonly: false,
+                        is_integer,
                         oninput: move |_| {
                             let id = clamp_max_id.clone();
                             let revision = next_input_revision(&mut input_revisions.write(), &id);
@@ -257,8 +271,6 @@ pub fn CellPanel(
                                 }
                             });
                         },
-                        onfocus: move |_| {},
-                        onblur: move |_| {},
                     }
                 }
             }

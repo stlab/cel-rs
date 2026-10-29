@@ -24,7 +24,7 @@ pub type WriteStrFn = Box<dyn Fn(&mut Sheet, &str) -> Result<(), Error>>;
 ///
 /// # Examples
 ///
-/// Read `labels.cells[&id].is_integer` to select an integer number field, and
+/// Read `labels.cells[&id].number_input_safe` to select a binary64 numeric control, and
 /// invoke its `display` callback to obtain the exact current text.
 pub struct CellMeta {
     /// Human-readable cell name shown in the inspector.
@@ -32,15 +32,14 @@ pub struct CellMeta {
     /// `true` if the cell holds a `bool`, so [`crate::SheetInspector`] can render it as a
     /// checkbox instead of a text field.
     pub is_bool: bool,
-    /// `true` if the cell holds one of the 14 numeric primitive types, so
-    /// [`crate::SheetInspector`] can render it with [`crate::spectrum::SpNumberfield`]
-    /// instead of a plain text field.
+    /// `true` if the cell holds one of the 14 numeric primitive types.
+    /// Numeric draft and clamp semantics apply even when its editor is text-valued.
     pub is_numeric: bool,
-    /// `true` if the cell holds one of the 12 integer primitive types (as opposed to
-    /// `f32`/`f64`), so [`crate::SheetInspector`] can set its numeric widget's `step` to `1` —
-    /// [`crate::spectrum::SpNumberfield`]'s, or, for a range-filtered cell,
-    /// [`crate::spectrum::SpSlider`]'s — since an integer cell has no fractional steps to land
-    /// on.
+    /// Selects binary64 number/slider controls for floats and integer domains up to
+    /// 32 bits. Wider integer domains use exact text controls, including ranged cells.
+    pub number_input_safe: bool,
+    /// Identifies integer parsing/clamp semantics. Binary64-safe integer controls
+    /// use a unit step; wider domains retain exact text.
     pub is_integer: bool,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,
@@ -50,8 +49,9 @@ pub struct CellMeta {
     pub write_str: WriteStrFn,
     /// Live slider bounds, present only for a numeric cell whose filter is a
     /// [`adam_rs::FilterKind::Range`] — recomputed from the filter's current argument values on
-    /// every call, so a range driven by other cells or relationships stays live. Cast to `f64`
-    /// for display, matching [`format_rounded`]'s existing all-numeric-types-as-`f64` convention.
+    /// every call, so a range driven by other cells or relationships stays live.
+    /// These approximate `f64` bounds do not format cell values; wide-integer editors
+    /// do not use them to render or transport values.
     #[allow(clippy::type_complexity)]
     pub range: Option<Box<dyn Fn(&Sheet) -> (f64, f64)>>,
 }
@@ -112,6 +112,7 @@ impl Labels {
                 label: label.to_owned(),
                 is_bool: TypeId::of::<T>() == TypeId::of::<bool>(),
                 is_numeric: false,
+                number_input_safe: false,
                 is_integer: false,
                 display: Box::new(move |sheet| {
                     sheet
@@ -162,6 +163,7 @@ impl Labels {
                 label: label.to_owned(),
                 is_bool: false,
                 is_numeric: false,
+                number_input_safe: false,
                 is_integer: false,
                 display: Box::new(move |sheet| {
                     formatter
@@ -343,6 +345,7 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
     };
     meta.is_numeric = true;
     meta.is_integer = is_integer;
+    meta.number_input_safe = !is_integer || std::mem::size_of::<T>() <= 4;
     if matches!(
         sheet.filter_kind(id),
         Some(adam_rs::FilterKind::Range { .. })

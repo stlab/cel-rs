@@ -45,7 +45,8 @@ mod tests {
     #[test]
     fn root_retains_controls_on_propagation_failure() {
         let html = render("sheet s { cell x: i64 = 0i64; out result := 1i64 / x; }");
-        assert!(html.contains("sp-number-field"));
+        assert_eq!(html.matches("<sp-textfield").count(), 2);
+        assert!(!html.contains("sp-number-field"));
         assert!(html.contains("adam-live-error"));
         assert!(html.contains("division"));
         assert!(!html.contains('\u{1b}'));

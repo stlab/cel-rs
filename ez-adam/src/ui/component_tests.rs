@@ -38,11 +38,18 @@ fn fixture() -> Document {
 
 /// Mounts one editor adapter over a shared real document.
 fn host(mode: u8) -> Element {
-    let document = use_signal(fixture);
+    let document = use_signal(move || {
+        let mut document = fixture();
+        if mode == 6 {
+            let id = document.cell_order[0];
+            document.cells[id].ty = CellType::f64();
+        }
+        document
+    });
     let selection = use_signal(|| {
         let doc = document.peek();
         match mode {
-            0 | 4 => HashSet::from([NodeId::CellNode(doc.cell_nodes.keys().next().unwrap())]),
+            0 | 4 | 6 => HashSet::from([NodeId::CellNode(doc.cell_nodes.keys().next().unwrap())]),
             1 | 3 => HashSet::from([NodeId::RelationshipGroup(doc.relationship_group_order[0])]),
             2 => HashSet::from([NodeId::ConditionalGroup(doc.conditional_group_order[0])]),
             _ => HashSet::new(),
@@ -125,13 +132,14 @@ fn mouse_at(dom: &VirtualDom, name: &str, id: ElementId, point: Point) {
     );
 }
 
-/// The selected cell renders numeric controls and its checkbox edits the same underlying cell.
+/// The selected integer cell renders exact bound controls and edits its underlying output flag.
 #[test]
 fn cell_panel_dispatches_output_toggle() {
     let (mut dom, events, observed, _) = mount(0);
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("cell-panel") && html.contains("amount"));
-    assert_eq!(html.matches("<sp-number-field").count(), 2);
+    assert_eq!(html.matches("<sp-number-field").count(), 0);
+    assert_eq!(html.matches("<sp-textfield").count(), 4);
     let (_, id) = events.iter().find(|(name, _)| name == "click").unwrap();
     click(&dom, *id);
     dom.render_immediate_to_vec();
@@ -255,6 +263,109 @@ fn canvas_dispatches_connection_and_drag() {
         Point::new(50.0, 70.0)
     );
 }
+
+/// Replacement retires actual Canvas gestures even when the new document reuses its slot keys.
+#[test]
+fn workspace_replacement_retires_pending_drag_and_connection() {
+    /// Observes production replacement inputs without constructing a second editor composition.
+    type ReplacementObserver = Rc<RefCell<Option<(State, Signal<u64>)>>>;
+    /// Mounts the same workspace function as App with externally observable owner signals.
+    fn replacement_host((connecting, observed): (bool, ReplacementObserver)) -> Element {
+        let document = use_signal(fixture);
+        let selection = use_signal(HashSet::new);
+        let active_tool = use_signal(move || {
+            if connecting {
+                Tool::AddRelationship
+            } else {
+                Tool::Select
+            }
+        });
+        let transform = use_signal(|| ViewTransform {
+            x: 10.0,
+            y: 20.0,
+            k: 2.0,
+        });
+        let epoch = use_signal(|| 0u64);
+        *observed.borrow_mut() = Some(((document, selection, active_tool), epoch));
+        super::app::editor_workspace(
+            document,
+            transform,
+            selection,
+            active_tool,
+            *epoch.read(),
+            rsx! {},
+        )
+    }
+    for connecting in [false, true] {
+        let observed: ReplacementObserver = Rc::new(RefCell::new(None));
+        let mut dom = VirtualDom::new_with_props(replacement_host, (connecting, observed.clone()));
+        let initial = dom.rebuild_to_vec();
+        let event_id = |name| {
+            initial
+                .edits
+                .iter()
+                .find_map(|edit| match edit {
+                    Mutation::NewEventListener { name: event, id } if event == name => Some(*id),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        dom.render_immediate_to_vec();
+        mouse_at(
+            &dom,
+            "mousedown",
+            event_id("mousedown"),
+            Point::new(90.0, 140.0),
+        );
+        dom.render_immediate_to_vec();
+        let ((document, selection, mut active_tool), epoch) = observed.borrow().unwrap();
+        let replacement = fixture();
+        assert_eq!(document.peek().cell_order[0], replacement.cell_order[0]);
+        super::app::replace_editor_document(
+            document,
+            selection,
+            active_tool,
+            epoch,
+            replacement.clone(),
+        );
+        let changes = dom.render_immediate_to_vec();
+        let remounted = |name| {
+            changes.edits.iter().find_map(|edit| match edit {
+                Mutation::NewEventListener { name: event, id } if event == name => Some(*id),
+                _ => None,
+            })
+        };
+        if connecting {
+            active_tool.set(Tool::AddRelationship);
+            dom.render_immediate_to_vec();
+            mouse_at(
+                &dom,
+                "mousedown",
+                remounted("mousedown").unwrap_or(event_id("mousedown")),
+                Point::new(490.0, 140.0),
+            );
+        } else {
+            mouse_at(
+                &dom,
+                "mousemove",
+                remounted("mousemove").unwrap_or(event_id("mousemove")),
+                Point::new(110.0, 160.0),
+            );
+        }
+        assert_eq!(
+            *document.peek(),
+            replacement,
+            "old gesture mutated the replacement: connecting={connecting}"
+        );
+        assert!(
+            remounted("mousemove").is_some(),
+            "Canvas listeners must belong to a new scope"
+        );
+    }
+}
+
+#[path = "numeric_event_tests.rs"]
+mod numeric_events;
 
 /// An empty editor composes its toolbar and canvas without an input-blocking side panel.
 #[cfg(not(feature = "desktop"))]

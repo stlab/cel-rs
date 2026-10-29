@@ -49,6 +49,8 @@ pub fn SpTheme(color: String, scale: String, system: String, children: Element) 
 /// events. Setting `invalid` to `true` renders the SWC error state (red ring
 /// and `aria-invalid`). Setting `disabled` to `true` renders the SWC disabled
 /// state and blocks focus/input at the DOM level.
+/// `readonly` preserves selectable output text without permitting edits; `children`
+/// supplies supported help-text slots.
 ///
 /// - Complexity: O(id.len() + value.len()) attribute construction.
 ///
@@ -69,9 +71,11 @@ pub fn SpTextfield(
     value: String,
     invalid: bool,
     disabled: bool,
+    #[props(default)] readonly: bool,
     oninput: EventHandler<FormEvent>,
     onfocus: EventHandler<FocusEvent>,
     onblur: EventHandler<FocusEvent>,
+    #[props(default)] children: Element,
 ) -> Element {
     rsx! {
         sp-textfield {
@@ -80,9 +84,11 @@ pub fn SpTextfield(
             // Boolean attribute: omit entirely when false; presence = invalid.
             "invalid": if invalid { "true" },
             "disabled": if disabled { "true" },
+            "readonly": if readonly { "true" },
             oninput: move |e| oninput.call(e),
             onfocus: move |e| onfocus.call(e),
             onblur: move |e| onblur.call(e),
+            {children}
         }
     }
 }
@@ -333,9 +339,9 @@ pub fn SpDivider() -> Element {
     }
 }
 
-/// Section heading.
+/// Renders a level-two section heading with Spectrum's small heading typography.
 ///
-/// Maps to `<sp-heading>`.
+/// Uses native heading semantics and the enclosing [`SpTheme`]'s heading tokens.
 ///
 /// # Examples
 ///
@@ -347,7 +353,9 @@ pub fn SpDivider() -> Element {
 #[component]
 pub fn SpHeading(children: Element) -> Element {
     rsx! {
-        sp-heading {
+        h2 {
+            class: "spectrum-section-heading",
+            style: "font-family: var(--spectrum-sans-font-family-stack); font-size: var(--spectrum-heading-size-s); font-style: var(--spectrum-heading-sans-serif-font-style); font-weight: var(--spectrum-heading-sans-serif-font-weight); line-height: var(--spectrum-heading-line-height); color: var(--spectrum-heading-color); margin: 0;",
             {children}
         }
     }
@@ -644,7 +652,7 @@ mod tests {
                 SpHeading { "Contract heading" }
                 SpDivider {}
                 SpFieldLabel { for_: "text", "Text label" }
-                SpTextfield { id: "text", value: "draft", invalid: enabled, disabled: enabled, oninput: input, onfocus: focus, onblur: blur }
+                SpTextfield { id: "text", value: "draft", invalid: enabled, disabled: enabled, readonly: enabled, oninput: input, onfocus: focus, onblur: blur }
                 SpNumberfield { id: "number", value: "12", min: enabled.then(|| "-2".to_string()), max: enabled.then(|| "20".to_string()), step: enabled.then(|| "2".to_string()), format_options: Some(r#"{"maximumFractionDigits":0}"#), invalid: enabled, disabled: enabled, readonly: enabled, oninput: input, onfocus: focus, onblur: blur,
                     SpHelpText { slot: "negative-help-text", variant: "negative", "Bound violated" }
                 }
@@ -684,10 +692,13 @@ mod tests {
             assert!(tag(&html, "sp-theme").contains(r#"color="dark""#));
             assert!(tag(&html, "sp-theme").contains(r#"scale="large""#));
             assert!(tag(&html, "sp-theme").contains(r#"system="spectrum-two""#));
-            assert!(html.contains("<sp-heading>Contract heading</sp-heading>"));
+            assert!(html.contains("Contract heading</h2>"));
+            assert!(tag(&html, "h2").contains("spectrum-section-heading"));
+            assert!(tag(&html, "h2").contains("font-size:"));
             assert!(tag(&html, "sp-divider").contains(r#"size="s""#));
             assert!(tag(&html, "sp-field-label").contains(r#"for="text""#));
             assert!(tag(&html, "sp-textfield").contains(r#"value="draft""#));
+            assert_eq!(tag(&html, "sp-textfield").contains("readonly="), enabled);
             assert!(tag(&html, "sp-number-field").contains(r#"value="12""#));
             assert!(tag(&html, "sp-number-field").contains("format-options="));
             assert_eq!(tag(&html, "sp-number-field").contains("min="), enabled);

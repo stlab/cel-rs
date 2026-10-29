@@ -4,12 +4,13 @@
 // browsers/embedders that expose it but then refuse to honor it (see
 // `_openViaInput`'s doc comment).
 //
-// open()/refresh() resolve to one of three shapes, matching Rust's
-// `Option<OpenResult>`:
+// open()/refresh() resolve cancellation, successful file text, or a read error.
+// OPEN_SCRIPT strips the candidate's commit callback for Rust's `Option<OpenResult>`:
 // - `null` if the user cancelled — a silent no-op, never an error.
-// - `{ id, name, text }` on success. `id` is a number (a re-readable handle
-//   exists; pass it to refresh()) or `null` (the input-fallback path:
-//   one-shot only, nothing to refresh).
+// - `{ id, name, text, commit }` on Open success; Refresh returns `{ id, name, text }`.
+//   `id` is a number (a re-readable handle exists after commitment) or `null` (fallback:
+//   one-shot only, nothing to refresh). `commit()` installs the candidate only
+//   after Rust authorizes it; reading a candidate does not retire any handle.
 // - `{ error }` if a read genuinely failed after the picker/refresh started
 //   (permission revoked, file deleted mid-flow) — distinct from `null` so
 //   Rust can still report a real failure to stderr instead of treating it
@@ -17,12 +18,17 @@
 window.beginOpenFile = {
   handles: {},
   nextId: 0,
+  committedId: -1,
 
-  /** Opens a file; only a successful read retires the previous handle.
+  /** Reads a candidate without changing the accepted file's refresh handle.
    * Reading uses O(file bytes) time and space, excluding unbounded user/I/O latency.
    * Cancellation resolves null; read failures resolve an explicit error.
    */
   open() {
+    if (this.nextId > 0xffffffff) {
+      return Promise.resolve({ error: "file request ID space exhausted" });
+    }
+    const request = this.nextId++;
     if (window.showOpenFilePicker) {
       return (async () => {
         let handle;
@@ -44,7 +50,7 @@ window.beginOpenFile = {
           if (e && e.name === "AbortError") {
             return null;
           }
-          return this._openViaInput();
+          return this._openViaInput(request);
         }
         // A failure past this point is a genuine read failure, not a
         // cancellation, so it gets its own try/catch resolving `{ error }`
@@ -57,19 +63,7 @@ window.beginOpenFile = {
         try {
           const file = await handle.getFile();
           const text = await file.text();
-          // At most one file is ever "open" in this app's UI at a time, so
-          // any handle from a previously opened file is now stale — drop it
-          // rather than letting the map grow unbounded across a session.
-          // Cleared only here, once the read has actually succeeded — not
-          // right after the picker resolves (before getFile()/text() ran):
-          // clearing it earlier would drop the *previous* file's still-valid
-          // handle before knowing whether the new one can even be read,
-          // silently turning that still-visible Refresh button into a
-          // permanent no-op if this read then failed.
-          const id = this.nextId++;
-          this.handles = {};
-          this.handles[id] = handle;
-          return { id, name: handle.name, text };
+          return this._candidate(request, handle, handle.name, text);
         } catch (e) {
           // Some embedders expose `showOpenFilePicker` and let it resolve with
           // a real handle, but then refuse `getFile()` itself with a
@@ -81,14 +75,31 @@ window.beginOpenFile = {
           // the universally-supported `<input type="file">` path instead of
           // surfacing this as a hard failure.
           if (e && e.name === "NotAllowedError") {
-            return this._openViaInput();
+            return this._openViaInput(request);
           }
           return { error: String((e && e.message) || e) };
         }
       })();
     }
 
-    return this._openViaInput();
+    return this._openViaInput(request);
+  },
+
+  /** Returns a uniquely owned candidate whose commit installs only a newer accepted request.
+   * Pending candidates retain their own handles; discarding one releases that ownership.
+   * Commit takes O(1) time and never retires a newer accepted handle.
+   */
+  _candidate(request, handle, name, text) {
+    return {
+      id: handle ? request : null,
+      name,
+      text,
+      commit: () => {
+        if (request <= this.committedId) return;
+        this.committedId = request;
+        this.handles = handle ? { [request]: handle } : {};
+      },
+    };
   },
 
   // Fallback: one-shot <input type="file">, no handle survives to refresh
@@ -96,7 +107,7 @@ window.beginOpenFile = {
   // it exists but the embedding context refuses to actually honor it (see
   // callers above) — `<input type="file">` has no equivalent "outermost
   // browsing context" restriction.
-  _openViaInput() {
+  _openViaInput(request) {
     return new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";
@@ -109,8 +120,7 @@ window.beginOpenFile = {
         }
         try {
           const text = await file.text();
-          this.handles = {};
-          resolve({ id: null, name: file.name, text });
+          resolve(this._candidate(request, null, file.name, text));
         } catch (e) {
           resolve({ error: String((e && e.message) || e) });
         }

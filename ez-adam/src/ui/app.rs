@@ -40,7 +40,7 @@ fn has_unsaved_changes(document: &Document, saved_document: &Document) -> bool {
 ///
 /// - Complexity: O(d + s) destruction cost for the previous document and selection.
 #[cfg(any(feature = "desktop", test))]
-fn replace_editor_document(
+pub(super) fn replace_editor_document(
     mut document: Signal<Document>,
     mut selection: Signal<HashSet<NodeId>>,
     mut active_tool: Signal<Tool>,
@@ -55,6 +55,37 @@ fn replace_editor_document(
     active_tool.set(Tool::Select);
     epoch.set(next);
     document.set(replacement);
+}
+
+/// Keys the document-local workspace so each epoch owns fresh Canvas and panel scopes.
+///
+/// - Complexity: O(selection.capacity()) worst-case selection lookup; descendants render separately.
+pub(super) fn editor_workspace(
+    document: Signal<Document>,
+    view_transform: Signal<ViewTransform>,
+    selection: Signal<HashSet<NodeId>>,
+    active_tool: Signal<Tool>,
+    epoch: u64,
+    unsaved_open_dialog: Element,
+) -> Element {
+    rsx! {
+        // A keyed fragment reconciles the epoch even when this is the caller's root VNode.
+        for (epoch, dialog) in [(epoch, unsaved_open_dialog)] {
+            div {
+                key: "{epoch}",
+                class: "workspace",
+                style: "position: absolute; top: 0; left: 0; width: 100%; height: 100%;",
+                Canvas { document, view_transform, selection, active_tool }
+                if panel_target(&selection.read()).is_some() {
+                    div {
+                        style: "position: absolute; top: 0; right: 0; bottom: 0; z-index: 10; background: white; border-left: 1px solid #ccc; width: 420px; max-width: 40vw; overflow: auto; padding: 12px; box-sizing: border-box;",
+                        SidePanel { document, selection }
+                    }
+                }
+                {dialog}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -451,25 +482,9 @@ pub fn App() -> Element {
                     style: "position: absolute; top: 12px; left: 12px; z-index: 10; background: white; border-radius: 8px; padding: 4px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);",
                     Toolbar { active_tool, document, selection }
                 }
-                div {
-                    class: "workspace",
-                    style: "position: absolute; top: 0; left: 0; width: 100%; height: 100%;",
-                    Canvas { key: "{epoch}", document, view_transform, selection, active_tool }
-                    // Only occupies (and intercepts clicks/drags over) screen
-                    // space when there's actually something to show — an
-                    // always-present strip here, even showing nothing but "No
-                    // selection" text, would permanently block canvas
-                    // interaction underneath it (e.g. dragging a relationship
-                    // group onto a conditional that happens to fall under it).
-                    if panel_target(&selection.read()).is_some() {
-                        div {
-                            style: "position: absolute; top: 0; right: 0; bottom: 0; z-index: 10; background: white; border-left: 1px solid #ccc; width: 420px; max-width: 40vw; overflow: auto; padding: 12px; box-sizing: border-box;",
-                            SidePanel { key: "{epoch}", document, selection }
-                        }
-                    }
-                    {unsaved_open_dialog}
-                }
+                {editor_workspace(document, view_transform, selection, active_tool, epoch, unsaved_open_dialog)}
             }
+
         }
     }
 }

@@ -635,9 +635,11 @@ fn OpenFileControls(
                         let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
                         let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
                         if !file_reply_is_current(&owner, &source_owner.peek(), revision, *request_revision.peek()) {
+                            let _ = eval.send(false);
                             return;
                         }
                         let Ok(result) = result else {
+                            let _ = eval.send(false);
                             adam_web_ui::diagnostics::report_error(&format!(
                                 "failed to open file: eval channel error: {result:?}"
                             ));
@@ -653,6 +655,12 @@ fn OpenFileControls(
                                 return;
                             }
                         };
+                        if let Err(error) = eval.send(true) {
+                            adam_web_ui::diagnostics::report_error(&format!(
+                                "failed to authorize opened file: {error}"
+                            ));
+                            return;
+                        }
                         refresh_handle.set(payload.id);
                         let (new_sheet_labels, new_active) = load_from_payload(payload);
                         install_loaded_source(parsed, labels, active_source, displayed_source, new_sheet_labels, new_active);

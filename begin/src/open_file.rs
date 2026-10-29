@@ -139,9 +139,20 @@ pub enum OpenResult {
 /// type="file">` fallback) and sends the result back via `dioxus.send()`.
 /// Resolves to `null` on JS's side (received as `None`) if the user
 /// cancelled; otherwise sends an [`OpenResult`].
+///
+/// A successful read waits for Rust's Boolean authorization before installing
+/// the candidate's refresh handle. Rejected candidates leave the accepted handle intact.
 #[cfg(not(feature = "desktop"))]
-pub const OPEN_SCRIPT: &str =
-    "(async () => { dioxus.send(await window.beginOpenFile.open()); })();";
+pub const OPEN_SCRIPT: &str = r#"(async () => {
+    const candidate = await window.beginOpenFile.open();
+    if (!candidate || candidate.error) {
+        dioxus.send(candidate);
+        return;
+    }
+    const { id, name, text } = candidate;
+    dioxus.send({ id, name, text });
+    if (await dioxus.recv()) candidate.commit();
+})();"#;
 
 /// `document::eval` script that re-reads the file behind handle `id` and
 /// sends the refreshed `{id, name, text}` back via `dioxus.send()`.

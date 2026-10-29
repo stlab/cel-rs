@@ -34,6 +34,16 @@ mod identifier_contract_tests {
             let mut doc = Document::new("demo");
             let _ = add_cell(&mut doc, name, CellType::i64());
             assert!(generate_adm2(&doc).is_err(), "{name:?}");
+        }
+        for name in [
+            "",
+            "two words",
+            "a-b",
+            "true",
+            "false",
+            "42",
+            "x; cell injected: i64",
+        ] {
             let mut doc = Document::new(name);
             let _ = add_cell(&mut doc, "x", CellType::i64());
             assert!(generate_adm2(&doc).is_err(), "sheet {name:?}");
@@ -56,7 +66,7 @@ mod identifier_contract_tests {
 pub enum ExportError {
     /// The document has invalid references, declaration order, or numeric data.
     InvalidDocument(String),
-    /// A sheet or cell name is not a single non-reserved expression identifier.
+    /// A sheet or cell identifier violates its declaration's grammar.
     InvalidIdentifier {
         /// Identifies the named declaration.
         kind: &'static str,
@@ -249,7 +259,12 @@ fn validate_export_names(doc: &Document) -> Result<(), ExportError> {
             })
         }
     }
-    identifier(&doc.sheet_name, "sheet")?;
+    if doc.sheet_name.contains("::") || doc.sheet_name.parse::<adam_lang::ModulePath>().is_err() {
+        return Err(ExportError::InvalidIdentifier {
+            kind: "sheet",
+            name: doc.sheet_name.clone(),
+        });
+    }
     let mut names = HashSet::with_capacity(doc.cells.len());
     for cell in doc.cells.values() {
         identifier(&cell.name, "cell")?;
@@ -334,6 +349,38 @@ fn groups_owned_by_conditionals(doc: &Document) -> HashSet<RelationshipGroupId> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sheet names follow Adam module identifiers without restricting cell identifiers.
+    #[test]
+    fn sheet_names_use_adam_module_identifier_rules() {
+        for name in [
+            "sheet", "use", "as", "_", "true", "false", "r#name", "a::b", " name",
+        ] {
+            assert!(
+                matches!(
+                    generate_adm2(&Document::new(name)),
+                    Err(ExportError::InvalidIdentifier { kind: "sheet", .. })
+                ),
+                "{name}"
+            );
+        }
+        for name in ["resize", "Δ", "if", "else"] {
+            let mut document = Document::new(name);
+            let _ = crate::ops::cells::add_cell(
+                &mut document,
+                "sheet",
+                crate::model::cell::CellType::i64(),
+            );
+            let source = generate_adm2(&document).unwrap();
+            let parsed = adam_lang::AdamParser::new(
+                adam_lang::TypeRegistry::new(),
+                cel_parser::OpLookup::new(),
+            )
+            .parse_str(&source)
+            .unwrap();
+            assert!(parsed.cell_names.contains_key("sheet"));
+        }
+    }
 
     /// Multi-cell selectors support integer/text equality without tuple branch syntax or panics.
     #[test]
