@@ -37,7 +37,8 @@ impl ModuleSources {
     /// Only initialization permits an absent snapshot; subsequent configuration
     /// refreshes must explicitly supply `moduleSources` or `moduleSourcesError`.
     /// Invalid supplied snapshots retain a visible configuration error.
-    /// - Complexity: O(n + t) expected time and space for n records and t text bytes.
+    /// - Complexity: expected O(n + b) time and space for n records and b
+    ///   combined path, URI and source bytes, plus module-path validation.
     pub(crate) fn from_initialization(options: &Value) -> Self {
         let mut sources = Self::default();
         if !options.is_null()
@@ -55,7 +56,8 @@ impl ModuleSources {
     /// Requires an explicit `moduleSources` array, including for removal. A
     /// `moduleSourcesError` string reports a caller-side configuration/read failure.
     /// Missing/incomplete refresh data retains ownership and reports an error.
-    /// - Complexity: O(n + t) expected time and space for n records and t text bytes.
+    /// - Complexity: expected O(n + b) time and space for n records and b
+    ///   combined path, URI and source bytes, plus module-path validation.
     pub(crate) fn configure(&mut self, options: &Value) {
         match parse_sources(options) {
             Ok(sources) => {
@@ -73,7 +75,8 @@ impl ModuleSources {
     /// successfully inserted sources in failed groups receive an incomplete-check
     /// status rather than a false clean result.
     /// - Complexity: structural parsing, grouped checker work and label projection,
-    ///   O(f log f) map construction and O(fm) URI selection for f files and m modules.
+    ///   plus O(f log(f + 1) * u + fm * u) time for f files, m modules and
+    ///   maximum URI bytes u; space for output, parsed sources and dependency groups.
     pub(crate) fn diagnostics(
         &self,
         documents: &HashMap<String, String>,
@@ -107,7 +110,9 @@ impl ModuleSources {
     ///
     /// Syntax errors do not gate analysis of the remaining registered modules.
     /// Any failed group retains concrete errors and marks inserted files incomplete.
-    /// - Complexity: source insertion, core analysis and owning-label projection.
+    /// - Complexity: source insertion, core analysis and owning-label projection,
+    ///   plus O(g log(g + 1) * u) map time for g group files of maximum u URI
+    ///   bytes; space for inserted sources, diagnostics and the output map.
     fn group_diagnostics(
         &self,
         group: &[usize],
@@ -267,7 +272,8 @@ fn add_dependency(dependencies: &mut HashSet<String>, path: &[(String, ast::Expr
 
 /// Parses the explicit wire schema and rejects malformed/ambiguous ownership.
 ///
-/// - Complexity: O(n + t) expected time and space for n records and t text bytes.
+/// - Complexity: expected O(n + b) time and space for n records and b
+///   combined path, URI and source bytes, plus module-path validation.
 /// # Errors
 /// Returns a visible configuration/read error rather than an empty success.
 fn parse_sources(options: &Value) -> Result<Vec<ModuleSource>, String> {
@@ -316,6 +322,8 @@ fn parse_sources(options: &Value) -> Result<Vec<ModuleSource>, String> {
 }
 
 /// Creates an error-severity configuration diagnostic without an invented source span.
+///
+/// - Complexity: O(n) time and space for n message bytes.
 fn configuration_diagnostic(message: &str) -> Diagnostic {
     Diagnostic {
         range: Range::default(),
@@ -389,6 +397,7 @@ fn location_range(location: &SourceLocation) -> Range {
     source_range(location.source.text(), location.span)
 }
 
+/// Verifies snapshot ownership, grouped checking and diagnostic source projection.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,7 +526,12 @@ mod tests {
         registry.configure(&snapshot());
         assert!(!registry.diagnostics(&documents)["file:///app.adm2"].is_empty());
         documents.remove(&definition);
-        assert!(registry.diagnostics(&documents).values().all(Vec::is_empty));
+        let closed = registry.diagnostics(&documents);
+        assert_eq!(
+            closed.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["file:///app.adm2", "file:///lib.adm2"]
+        );
+        assert!(closed.values().all(Vec::is_empty));
         registry.configure(&json!({"moduleSourcesError":"deleted"}));
         assert!(
             registry
@@ -526,7 +540,12 @@ mod tests {
                 .all(|d| d[0].message.contains("deleted"))
         );
         registry.configure(&snapshot());
-        assert!(registry.diagnostics(&documents).values().all(Vec::is_empty));
+        let recovered = registry.diagnostics(&documents);
+        assert_eq!(
+            recovered.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["file:///app.adm2", "file:///lib.adm2"]
+        );
+        assert!(recovered.values().all(Vec::is_empty));
         registry.configure(&json!({"moduleSources":[]}));
         assert!(registry.diagnostics(&documents).is_empty());
     }

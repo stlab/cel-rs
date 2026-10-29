@@ -1,14 +1,15 @@
-//! `prepare-live-book-assets` and `prepare-live-slides-assets` assemble live-example assets
-//! before `mdbook build` runs — the per-example source manifest, the vendored Spectrum Web
-//! Components bundle, the D3/graph JS+CSS assets, and the compiled
-//! `adam-lang-book-live` wasm/js bundle — into
-//! `adam-lang-book/book-src/theme/`, where mdBook's theme-directory mechanism copies it
-//! verbatim into `book-dist/theme/` (see `adam-live-bootstrap.js` for how those files are
-//! then fetched at runtime).
+//! Stages shared live-example assets for mdBook and standalone slides.
 //!
-//! This must run after both `cargo install --path adam-lang-book-preprocessor` (so `mdbook
-//! build` can find the `mdbook-live-examples` binary on `PATH`) and `wasm-pack build --target
-//! web --release` inside `adam-lang-book-live/` (so its `pkg/` output exists to copy from).
+//! Both commands assemble the example-source manifest, Spectrum bundle,
+//! inspector/graph assets and existing `adam-lang-book-live/pkg/` WASM/JS output.
+//! The book command writes `adam-lang-book/book-src/theme/`; the slides command
+//! accepts an output directory and defaults to `adam-slides/dist/theme`.
+//! Neither command compiles the WASM bundle.
+//!
+//! ```text
+//! cargo xtask prepare-live-book-assets
+//! cargo xtask prepare-live-slides-assets staging/theme
+//! ```
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -24,7 +25,10 @@ use crate::project_root;
 /// up in by its mount div's `data-example` attribute.
 ///
 /// - Postcondition: no key in the returned map is present in [`NO_LIVE_MOUNT`].
-/// - Complexity: O(n) in the total size of every `.adm2` file under `examples_dir`.
+/// - Complexity: O(1 + e + b + p + k log(f + 1)) time and O(b + k + p) space
+///   for e directory entries, b included source bytes, p total visited path
+///   bytes, k included key bytes and f included files. Empty chapters and
+///   excluded entries contribute traversal/path work.
 ///
 /// # Errors
 /// Returns `Err` if `examples_dir` (or a chapter subdirectory within it) can't be read, or if
@@ -74,7 +78,9 @@ fn build_manifest(
 /// bootstrap script expects `theme/adam_lang_book_live.js`, not `theme/pkg/adam_lang_book_live.js`.
 ///
 /// - Postcondition: an existing file at a destination path is overwritten.
-/// - Complexity: O(n) in the total size of every file under `src`.
+/// - Complexity: O(1 + e + b + p) time and O(d + p) auxiliary space for e entries,
+///   b copied bytes, depth d and total visited path bytes p, including root paths.
+///   Empty directories also contribute entries and are recreated.
 ///
 /// # Errors
 /// Returns `Err` if `src` cannot be read, or if `dst` (or any nested destination directory or
@@ -98,13 +104,20 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> io::Result<()> {
 /// `adam-lang-book-live` wasm/js output into `adam-lang-book/book-src/theme/`, so a subsequent
 /// `mdbook build adam-lang-book` has everything the live examples need.
 ///
-/// - Precondition: `wasm-pack build --target web --release` has already been run inside
-///   `adam-lang-book-live/`, producing its `pkg/` output directory.
+/// Requires the compiled `adam-lang-book-live/pkg/` input at runtime.
+///
+/// - Complexity: manifest construction, serialization and recursive copying costs;
+///   space for the manifest, its serialized form and traversal paths.
 ///
 /// # Errors
 /// Returns `Err` if the examples directory can't be walked, the manifest can't be serialized
 /// or written, `begin/assets/swc.js`/`inspector.css` are missing, or `adam-lang-book-live/pkg/`
 /// doesn't exist.
+///
+/// # Examples
+/// ```text
+/// cargo xtask prepare-live-book-assets
+/// ```
 pub fn prepare_live_book_assets() -> Result<(), Box<dyn std::error::Error>> {
     let root = project_root();
     prepare_live_assets(&root, &root.join("adam-lang-book/book-src/theme"))
@@ -114,7 +127,8 @@ pub fn prepare_live_book_assets() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Uses `destination` when provided, otherwise `adam-slides/dist/theme`.
 ///
-/// - Complexity: O(n) in the total example and runtime asset bytes.
+/// - Complexity: manifest construction, serialization and recursive copying costs;
+///   space for the manifest, its serialized form and traversal paths.
 ///
 /// # Errors
 /// Returns an error if a required input is missing or staging fails.
@@ -136,8 +150,10 @@ pub fn prepare_live_slides_assets(
 
 /// Stages the live-example manifest and runtime assets into `destination`.
 ///
-/// - Postcondition: required inputs are checked before output is written.
-/// - Complexity: O(n) in the total example and runtime asset bytes.
+/// Checks required top-level files and constructs the complete manifest before
+/// writing output. Later IO errors can leave partial output.
+/// - Complexity: manifest construction, serialization and recursive copying costs;
+///   space for the manifest, its serialized form and traversal paths.
 ///
 /// # Errors
 /// Returns an error for missing or unreadable inputs, serialization failure,
@@ -202,23 +218,22 @@ fn prepare_live_assets(root: &Path, destination: &Path) -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// Verifies source manifests, recursive copying and independent asset staging.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Creates an owned staging fixture with all required inputs.
     ///
-    /// - Complexity: O(n) in fixture source and asset bytes.
+    /// - Complexity: O(n + p) time and space for fixture bytes n and path bytes p.
     fn staging_fixture() -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "adam-slides-staging-{}-{}-{}",
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-fixtures");
+        fs::create_dir_all(&fixtures).unwrap();
+        let root = fixtures.join(format!(
+            "adam-slides-staging-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
             NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir(&root).unwrap();
@@ -309,15 +324,138 @@ mod tests {
         }
     }
 
+    /// Rejects invalid UTF-8 before replacing an existing manifest.
+    #[test]
+    fn prepare_live_assets_rejects_invalid_utf8_without_writing() {
+        let root = staging_fixture();
+        fs::write(
+            root.join("adam-lang-book/book-src/examples/tutorial/first_sheet.adm2"),
+            [0xff],
+        )
+        .unwrap();
+        let destination = root.join("output");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("adam-live-examples.json"), "original").unwrap();
+        assert!(prepare_live_assets(&root, &destination).is_err());
+        assert_eq!(
+            fs::read_to_string(destination.join("adam-live-examples.json")).unwrap(),
+            "original"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Reports destination file and nested-directory conflicts as staging errors.
+    #[test]
+    fn prepare_live_assets_reports_destination_conflicts() {
+        for conflict in ["", "adam-live-examples.json", "swc.js", "snippets"] {
+            let root = staging_fixture();
+            let destination = root.join("output");
+            if conflict.is_empty() {
+                fs::write(&destination, "not a directory").unwrap();
+            } else {
+                fs::create_dir(&destination).unwrap();
+                if conflict == "snippets" {
+                    fs::write(destination.join(conflict), "not a directory").unwrap();
+                } else {
+                    fs::create_dir(destination.join(conflict)).unwrap();
+                }
+            }
+            assert!(
+                prepare_live_assets(&root, &destination).is_err(),
+                "{conflict}"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Replaces stale manifest and asset contents with current input bytes.
+    #[test]
+    fn prepare_live_assets_overwrites_previous_output() {
+        let root = staging_fixture();
+        let destination = root.join("output");
+        prepare_live_assets(&root, &destination).unwrap();
+        fs::write(root.join("begin/assets/swc.js"), "updated bundle").unwrap();
+        write_example(
+            &root.join("adam-lang-book/book-src/examples"),
+            "tutorial",
+            "first_sheet",
+            "sheet updated {}",
+        );
+        prepare_live_assets(&root, &destination).unwrap();
+        assert_eq!(
+            fs::read_to_string(destination.join("swc.js")).unwrap(),
+            "updated bundle"
+        );
+        let manifest: BTreeMap<String, String> = serde_json::from_str(
+            &fs::read_to_string(destination.join("adam-live-examples.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["tutorial/first_sheet"], "sheet updated {}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Ignores non-example entries and empty chapters while rejecting source IO failures.
+    #[test]
+    fn manifest_handles_empty_chapters_invalid_utf8_and_unreadable_sources() {
+        let root = staging_fixture();
+        let examples = root.join("examples");
+        fs::create_dir_all(examples.join("empty")).unwrap();
+        fs::write(examples.join("not-a-chapter"), "ignored").unwrap();
+        fs::write(examples.join("empty/notes.txt"), "ignored").unwrap();
+        assert!(build_manifest(&examples).unwrap().is_empty());
+        assert!(build_manifest(&root.join("missing")).is_err());
+        fs::write(examples.join("empty/invalid.adm2"), [0xff]).unwrap();
+        assert!(build_manifest(&examples).is_err());
+        fs::remove_file(examples.join("empty/invalid.adm2")).unwrap();
+        fs::create_dir(examples.join("empty/directory.adm2")).unwrap();
+        assert!(build_manifest(&examples).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Copies empty directories, overwrites files and reports source/destination IO failures.
+    #[test]
+    fn copy_handles_empty_directories_overwrite_and_conflicts() {
+        let root = staging_fixture();
+        let source = root.join("copy-source");
+        let destination = root.join("copy-destination");
+        fs::create_dir_all(source.join("empty")).unwrap();
+        fs::write(source.join("file"), [1, 2, 255]).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("file"), "stale").unwrap();
+        copy_dir_contents(&source, &destination).unwrap();
+        assert!(destination.join("empty").is_dir());
+        assert_eq!(fs::read(destination.join("file")).unwrap(), [1, 2, 255]);
+        fs::write(destination.join("file"), "destination change").unwrap();
+        assert_eq!(fs::read(source.join("file")).unwrap(), [1, 2, 255]);
+        fs::write(source.join("file"), "source change").unwrap();
+        assert_eq!(
+            fs::read(destination.join("file")).unwrap(),
+            b"destination change"
+        );
+        assert!(copy_dir_contents(&root.join("missing"), &destination).is_err());
+        assert!(copy_dir_contents(&source.join("file"), &destination).is_err());
+        fs::remove_file(destination.join("file")).unwrap();
+        fs::create_dir(destination.join("file")).unwrap();
+        assert!(copy_dir_contents(&source, &destination).is_err());
+        assert!(copy_dir_contents(&source, &source.join("file")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Writes one UTF-8 example into its chapter directory.
+    ///
+    /// - Complexity: O(p + n) time and O(p) space for p path and n source bytes.
     fn write_example(dir: &Path, chapter: &str, name: &str, source: &str) {
         let chapter_dir = dir.join(chapter);
         fs::create_dir_all(&chapter_dir).unwrap();
         fs::write(chapter_dir.join(format!("{name}.adm2")), source).unwrap();
     }
 
+    /// Maps a chapter and file stem to the complete example source.
     #[test]
     fn build_manifest_maps_chapter_slash_name_to_source() {
-        let tmp = std::env::temp_dir().join(format!("xtask-live-book-test-{}", std::process::id()));
+        let tmp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/test-fixtures")
+            .join(format!("xtask-live-book-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         write_example(&tmp, "cells", "tuple_typed_cell", "cell x: Int = 1;");
 
@@ -330,10 +468,12 @@ mod tests {
         fs::remove_dir_all(&tmp).unwrap();
     }
 
+    /// Omits excluded configurations while retaining neighboring examples.
     #[test]
     fn build_manifest_skips_excluded_examples() {
-        let tmp =
-            std::env::temp_dir().join(format!("xtask-live-book-test-excl-{}", std::process::id()));
+        let tmp = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/test-fixtures")
+            .join(format!("xtask-live-book-test-excl-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         write_example(&tmp, "expressions", "no_standard_library", "cell x = 1;");
         write_example(
@@ -350,10 +490,12 @@ mod tests {
         fs::remove_dir_all(&tmp).unwrap();
     }
 
+    /// Recreates nested directories and preserves every copied file's bytes.
     #[test]
     fn copy_dir_contents_recreates_nested_structure() {
-        let base =
-            std::env::temp_dir().join(format!("xtask-live-book-copy-test-{}", std::process::id()));
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/test-fixtures")
+            .join(format!("xtask-live-book-copy-test-{}", std::process::id()));
         let src = base.join("src");
         let dst = base.join("dst");
         let _ = fs::remove_dir_all(&base);

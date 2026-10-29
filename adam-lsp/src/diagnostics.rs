@@ -1,7 +1,11 @@
-//! Computes LSP diagnostics for adam-lang source text. No LSP transport knowledge lives here —
-//! see `crate::dispatch` for that — so this module's tests exercise the diagnostic logic
-//! directly, per the design doc's testing strategy (handler-level unit tests over full protocol
-//! round-trips where possible).
+//! Checks Adam source text without executing it or opening an LSP transport.
+//!
+//! ```rust
+//! let diagnostics = adam_lsp::diagnostics::diagnostics_for_source(
+//!     "sheet example { cell x: i32 = true; }",
+//! );
+//! assert!(!diagnostics.is_empty());
+//! ```
 
 use adam_lang::{
     AdamAstParser, ModuleDiagnostic, ModulePath, ModuleSet, TypeRegistry, check_module, check_sheet,
@@ -21,8 +25,9 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 /// matching the executing web/book hosts. Unresolved call-result shapes remain best-effort.
 /// Diagnostic columns count UTF-16 code units in the supplied text.
 ///
-/// - Complexity: O((e + 1)n + s²) in source length n, diagnostic count e and installed
-///   library signatures s, with no caching.
+/// - Complexity: parsing, environment setup and sheet checking costs plus O(en + b)
+///   diagnostic projection time for source bytes n, e errors and b message bytes;
+///   space for parsed/checker state and returned diagnostics, with no caching.
 ///
 /// # Examples
 ///
@@ -84,7 +89,8 @@ fn configured_environment() -> (TypeRegistry, cel_parser::OpLookup) {
 
 /// Converts a [`CELError`] against its original text into an LSP diagnostic.
 ///
-/// - Complexity: O(n) for the source prefix ending at the error.
+/// - Complexity: O(n + m) time for source-prefix bytes n and message bytes m;
+///   O(m) additional space.
 fn to_diagnostic(error: CELError, source: &str) -> Diagnostic {
     Diagnostic {
         range: source_range(source, error.span()),
@@ -97,8 +103,9 @@ fn to_diagnostic(error: CELError, source: &str) -> Diagnostic {
 /// Converts character columns in the original text to UTF-16 LSP positions.
 ///
 /// - Precondition: `span` refers to `source`.
-/// - Complexity: O(n) for the source prefix ending at the span.
+/// - Complexity: O(n) time for the source prefix ending at the span; O(1) space.
 pub(crate) fn source_range(source: &str, span: SourceSpan) -> Range {
+    debug_assert!((span.start.line, span.start.column) <= (span.end.line, span.end.column));
     let position = |line: usize, column: usize| {
         let character = source
             .lines()
@@ -116,6 +123,7 @@ pub(crate) fn source_range(source: &str, span: SourceSpan) -> Range {
     )
 }
 
+/// Verifies syntax/type diagnostic content and original-source UTF-16 projection.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,11 +196,13 @@ mod tests {
         assert!(diagnostics.iter().any(|d| d.message.contains("operand")));
     }
 
+    /// Accepts a clean typed initializer.
     #[test]
     fn clean_sheet_has_no_diagnostics() {
         assert!(diagnostics_for_source("sheet s { cell x: i32 = 1; }").is_empty());
     }
 
+    /// Reports a mismatched initializer with error severity.
     #[test]
     fn type_mismatched_cell_initializer_is_a_diagnostic() {
         // Unsuffixed float literal defaults to f64, not the declared i32 — same fixture used by
@@ -202,6 +212,7 @@ mod tests {
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
     }
 
+    /// Publishes a recovered declaration error.
     #[test]
     fn recovered_syntax_error_is_a_diagnostic() {
         // Malformed cell declaration; AdamAstParser recovers it as one `Sheet.errors` entry
@@ -212,6 +223,7 @@ mod tests {
         );
     }
 
+    /// Publishes one error for an unrecoverable source.
     #[test]
     fn unrecoverable_parse_failure_is_a_single_diagnostic() {
         // Missing the `sheet` keyword entirely is a structural error outside any item —
@@ -219,11 +231,13 @@ mod tests {
         assert_eq!(diagnostics_for_source("not a sheet at all").len(), 1);
     }
 
+    /// Accepts a correctly typed placeholder filter.
     #[test]
     fn filter_clause_with_matching_types_has_no_diagnostics() {
         assert!(diagnostics_for_source("sheet s { cell a: i32 = 1 filter _; }").is_empty());
     }
 
+    /// Rejects a filter that omits its placeholder.
     #[test]
     fn filter_clause_without_underscore_is_a_diagnostic() {
         let diags = diagnostics_for_source("sheet s { cell a: i32 = 1 filter 1; }");
