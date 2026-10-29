@@ -18,6 +18,10 @@ window.beginOpenFile = {
   handles: {},
   nextId: 0,
 
+  /** Opens a file; only a successful read retires the previous handle.
+   * Reading uses O(file bytes) time and space, excluding unbounded user/I/O latency.
+   * Cancellation resolves null; read failures resolve an explicit error.
+   */
   open() {
     if (window.showOpenFilePicker) {
       return (async () => {
@@ -105,6 +109,7 @@ window.beginOpenFile = {
         }
         try {
           const text = await file.text();
+          this.handles = {};
           resolve({ id: null, name: file.name, text });
         } catch (e) {
           resolve({ error: String((e && e.message) || e) });
@@ -115,6 +120,10 @@ window.beginOpenFile = {
     });
   },
 
+  /** Re-reads the current handle or resolves null for a retired ID.
+   * Reading uses O(file bytes) time and space, excluding unbounded I/O latency.
+   * Failures resolve an explicit error without discarding the handle.
+   */
   refresh(id) {
     const handle = this.handles[id];
     if (!handle) return Promise.resolve(null); // stale/unknown id — no-op, not a failure

@@ -24,7 +24,11 @@ use crate::model::relationship_group::RelationshipGroupId;
 /// - Postcondition: the returned group has exactly `2.pow(cells.len())`
 ///   branches and an empty `default`.
 ///
-/// - Complexity: O(2^n) in `cells.len()`.
+/// - Complexity: O(n·2^n) time and space in `cells.len()`.
+/// # Examples
+///
+/// `add_conditional_from_bool_cells(&mut document, vec![flag], group, position)`
+/// creates false/true branches and enables `group` only on the true branch.
 #[must_use]
 pub fn add_conditional_from_bool_cells(
     doc: &mut Document,
@@ -86,6 +90,12 @@ pub fn add_conditional_from_bool_cells(
 ///
 /// - Precondition: every cell in `referenced_cells` is a valid key in
 ///   `doc.cells`.
+/// - Complexity: O(expression bytes) when converting borrowed expression text.
+///
+/// # Examples
+///
+/// `add_conditional_with_formula(&mut document, vec![], "true", position)`
+/// creates a scalar constant condition without dependencies.
 #[must_use]
 pub fn add_conditional_with_formula(
     doc: &mut Document,
@@ -117,10 +127,14 @@ pub fn add_conditional_with_formula(
 ///
 /// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
 /// - Precondition: `values.len()` matches `conditional`'s condition arity
-///   (the number of cells in [`ConditionExpr::Cells`] or
-///   [`ConditionExpr::Formula`]'s `referenced_cells`).
+///   (the number of cells in [`ConditionExpr::Cells`], or one scalar
+///   result for [`ConditionExpr::Formula`], regardless of dependency count).
 /// - Postcondition: returns the new branch's index within
 ///   `conditional.branches`.
+/// # Examples
+///
+/// `add_branch(&mut document, scalar_condition, vec![CellValueLiteral::Bool(true)])`
+/// adds a scalar key independently of the expression's dependency count.
 pub fn add_branch(
     doc: &mut Document,
     conditional: ConditionalGroupId,
@@ -133,9 +147,7 @@ pub fn add_branch(
     let group = &mut doc.conditional_groups[conditional];
     let arity = match &group.condition {
         ConditionExpr::Cells(cells) => cells.len(),
-        ConditionExpr::Formula {
-            referenced_cells, ..
-        } => referenced_cells.len(),
+        ConditionExpr::Formula { .. } => 1,
     };
     debug_assert_eq!(
         values.len(),
@@ -154,11 +166,21 @@ pub fn add_branch(
 /// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
 /// - Precondition: `conditional`'s condition is `ConditionExpr::Formula` (not
 ///   `Cells`).
+/// - Complexity: O(expression bytes) when converting borrowed expression text.
+///
+/// # Examples
+///
+/// `set_condition_formula(&mut document, formula_condition, "width > height")`
+/// updates the draft while preserving its dependency metadata.
 pub fn set_condition_formula(
     doc: &mut Document,
     conditional: ConditionalGroupId,
     expr: impl Into<String>,
 ) {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
     let group = &mut doc.conditional_groups[conditional];
     let ConditionExpr::Formula {
         expr: current_expr, ..
@@ -177,6 +199,11 @@ pub fn set_condition_formula(
 /// to `.adm2`.
 ///
 /// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+/// - Complexity: O(name bytes) when converting borrowed text.
+///
+/// # Examples
+///
+/// `set_display_name(&mut document, conditional, "Landscape")` updates its canvas label.
 pub fn set_display_name(
     doc: &mut Document,
     conditional: ConditionalGroupId,
@@ -198,6 +225,9 @@ pub fn set_display_name(
 ///
 /// - Complexity: O(n) in the branch's `enabled_groups` length (it scans for
 ///   `group` to toggle it).
+/// # Examples
+///
+/// `toggle_enabled_group(&mut document, conditional, 0, group)` toggles the first row.
 pub fn toggle_enabled_group(
     doc: &mut Document,
     conditional: ConditionalGroupId,
@@ -228,6 +258,12 @@ pub fn toggle_enabled_group(
 /// references a [`ConditionalGroupId`], so no further cleanup is needed.
 ///
 /// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+///
+/// - Complexity: O(order entries + deleted group contents) time and O(1) auxiliary space.
+///
+/// # Examples
+///
+/// `delete_conditional_group(&mut document, conditional)` removes the group and its order entry.
 pub fn delete_conditional_group(doc: &mut Document, conditional: ConditionalGroupId) {
     debug_assert!(
         doc.conditional_groups.contains_key(conditional),
@@ -244,6 +280,7 @@ mod tests {
     use crate::ops::cells::{add_cell, add_cell_node};
     use crate::ops::relationships::create_relationship;
 
+    /// Adds a Boolean selector and a two-member integer relationship to `doc`.
     fn setup_group_over_two_bool_cells(doc: &mut Document) -> (CellId, RelationshipGroupId) {
         let condition_cell = add_cell(doc, "constrain_proportions", CellType::Bool);
         let a = add_cell(doc, "width_pixels", CellType::i64());
@@ -255,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    /// One Boolean dependency produces false and true branches.
     fn one_bool_cell_creates_two_branches() {
         let mut doc = Document::new("demo");
         let (condition_cell, group) = setup_group_over_two_bool_cells(&mut doc);
@@ -268,6 +306,7 @@ mod tests {
     }
 
     #[test]
+    /// Two Boolean dependencies produce all four combinations.
     fn two_bool_cells_creates_four_branches() {
         let mut doc = Document::new("demo");
         let (condition_cell, group) = setup_group_over_two_bool_cells(&mut doc);
@@ -282,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    /// A one-cell truth table enables its relationship only for true.
     fn group_is_enabled_only_on_the_all_true_branch() {
         let mut doc = Document::new("demo");
         let (condition_cell, group) = setup_group_over_two_bool_cells(&mut doc);
@@ -307,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    /// A two-cell truth table enables its relationship only when both values are true.
     fn with_two_cells_only_the_all_true_branch_is_enabled() {
         let mut doc = Document::new("demo");
         let (condition_cell, group) = setup_group_over_two_bool_cells(&mut doc);
@@ -329,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    /// A newly enumerated conditional starts without default relationships.
     fn default_starts_empty() {
         let mut doc = Document::new("demo");
         let (condition_cell, group) = setup_group_over_two_bool_cells(&mut doc);
@@ -350,6 +392,7 @@ mod formula_tests {
     use crate::ops::relationships::create_relationship;
 
     #[test]
+    /// Formula conditions retain their expression and start without branches.
     fn add_conditional_with_formula_starts_with_no_branches() {
         let mut doc = Document::new("demo");
         let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -364,6 +407,7 @@ mod formula_tests {
     }
 
     #[test]
+    /// Branch insertion preserves its key and starts without enabled groups.
     fn add_branch_appends_a_branch_with_no_enabled_groups() {
         let mut doc = Document::new("demo");
         let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -383,6 +427,7 @@ mod formula_tests {
     }
 
     #[test]
+    /// Branch insertion returns the appended row's index.
     fn add_branch_returns_the_new_branchs_index() {
         let mut doc = Document::new("demo");
         let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -399,6 +444,7 @@ mod formula_tests {
     }
 
     #[test]
+    /// Formula edits replace the stored expression draft.
     fn set_condition_formula_updates_the_formula_expr() {
         let mut doc = Document::new("demo");
         let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -413,6 +459,7 @@ mod formula_tests {
     }
 
     #[test]
+    /// Display-name edits replace the conditional's canvas label.
     fn set_display_name_updates_the_conditionals_display_name() {
         let mut doc = Document::new("demo");
         let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -424,6 +471,7 @@ mod formula_tests {
     }
 
     #[test]
+    /// Toggling a relationship twice restores the branch's original enabled set.
     fn toggle_enabled_group_enables_then_disables() {
         let mut doc = Document::new("demo");
         let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -458,6 +506,7 @@ mod formula_tests {
     }
 
     #[test]
+    /// Conditional deletion removes its value and declaration-order entry.
     fn delete_conditional_group_removes_it_from_the_document() {
         let mut doc = Document::new("demo");
         let x = add_cell(&mut doc, "x", CellType::f64());

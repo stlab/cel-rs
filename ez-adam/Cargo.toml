@@ -26,6 +26,8 @@ dioxus = { version = "0.7.10", features = [] }
 rfd = { version = "0.17.2", optional = true }
 
 [dev-dependencies]
+dioxus-ssr = "0.7"
+dioxus-html = { version = "0.7", features = ["serialize"] }
 
 [lints]
 workspace = true

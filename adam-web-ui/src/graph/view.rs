@@ -79,6 +79,8 @@ fn graph_channel_script(container_id: &str, data: &GraphData, external_container
 }
 
 /// Reports a terminal channel failure and requests JS resource disposal.
+///
+/// - Complexity: O(message.len()) diagnostic reporting work.
 fn channel_failed(eval: document::Eval, mut failure: Signal<Option<String>>, message: String) {
     crate::diagnostics::report_error(&message);
     failure.set(Some(message.clone()));
@@ -86,6 +88,9 @@ fn channel_failed(eval: document::Eval, mut failure: Signal<Option<String>>, mes
 }
 
 /// Processes typed messages sequentially through the generation's cached model.
+///
+/// - Complexity: each received frame adds deserialization, layout-constraint evaluation,
+///   and reply serialization work; total work follows frames received until closure/cancellation.
 async fn receive_views(mut eval: document::Eval, failure: Signal<Option<String>>) {
     let mut bridge = BridgeState::default();
     let mut ended = std::pin::pin!(eval.join::<serde_json::Value>());
@@ -114,6 +119,11 @@ async fn receive_views(mut eval: document::Eval, failure: Signal<Option<String>>
 
 /// Which `window.beginGraph` driver method a [`graph_drive_script`] invokes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// # Examples
+///
+/// Pass `GraphDrive::Init` for a new container and `GraphDrive::Update` for its
+/// subsequent snapshots to `graph_drive_script`.
 pub enum GraphDrive {
     /// `window.beginGraph.init` — build a fresh D3 instance for the container, replacing any
     /// existing one (a new sheet, or the first mount).
@@ -143,6 +153,11 @@ impl GraphDrive {
 /// never be an arbitrary (injecting) value.
 ///
 /// - Complexity: O(n) in the size of `data` (serialization plus string formatting).
+///
+/// # Examples
+///
+/// `graph_drive_script("graph", &data, GraphDrive::Update)` creates an update for
+/// an existing graph container; execute the returned script through the renderer.
 pub fn graph_drive_script(container_id: &str, data: &GraphData, call: GraphDrive) -> String {
     let id = serde_json::to_string(container_id).unwrap_or_else(|_| "\"\"".to_string());
     // Fall back to a valid JS literal (`null`), never an empty string, so the emitted assignment
@@ -334,6 +349,7 @@ mod tests {
         assert!(script.contains("async function runGraphChannel"));
         assert!(script.contains(r#"await runGraphChannel(window, "a\"b""#));
     }
+    /// Returns an empty graph snapshot for bridge protocol tests.
     fn empty_graph_data() -> GraphData {
         GraphData {
             nodes: vec![],
@@ -345,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    /// Initialization scripts invoke the graph initializer.
     fn graph_drive_script_init_calls_begin_graph_init() {
         let script = graph_drive_script("g1", &empty_graph_data(), GraphDrive::Init);
         // The id is embedded as a JSON string literal (double-quoted).
@@ -353,12 +370,14 @@ mod tests {
     }
 
     #[test]
+    /// Update scripts invoke the graph updater.
     fn graph_drive_script_update_calls_begin_graph_update() {
         let script = graph_drive_script("g1", &empty_graph_data(), GraphDrive::Update);
         assert!(script.contains("window.beginGraph.update(\"g1\""));
     }
 
     #[test]
+    /// Drive scripts tolerate an unavailable browser graph runtime.
     fn graph_drive_script_guards_on_begin_graph_being_defined() {
         let script = graph_drive_script("g1", &empty_graph_data(), GraphDrive::Init);
         assert!(script.contains("typeof window.beginGraph !== 'undefined'"));
@@ -372,6 +391,7 @@ mod tests {
     }
 
     #[test]
+    /// Drive scripts embed the supplied graph snapshot.
     fn graph_drive_script_embeds_the_serialized_data() {
         let script = graph_drive_script("g1", &empty_graph_data(), GraphDrive::Init);
         // GraphData serializes its fields; `nodes` is always present.
@@ -379,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    /// Container IDs preserve single quotes without script injection.
     fn graph_drive_script_escapes_a_quote_in_the_container_id() {
         // A container id containing a single quote must not break out of the JS string or
         // inject: JSON-encoding turns `'` into a plain character inside a double-quoted literal,
@@ -389,6 +410,7 @@ mod tests {
     }
 
     #[test]
+    /// Container IDs escape double quotes and backslashes as JSON strings.
     fn graph_drive_script_escapes_a_double_quote_and_backslash_in_the_container_id() {
         // JSON-encoding escapes `"` and `\`, so the emitted literal stays a single well-formed
         // JS string rather than terminating early.

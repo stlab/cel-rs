@@ -15,6 +15,8 @@ use ez_adam::persistence::{from_json, to_json};
 
 /// Asserts that `adm2_text` parses successfully as `.adm2` source, via
 /// `adam-lang`'s real parser with `cel-std` installed.
+///
+/// - Complexity: parser/type-checker and sheet-construction work for the supplied source.
 fn parses_as_adm2(adm2_text: &str) {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);
@@ -70,6 +72,7 @@ fn build_resize_sheet() -> Document {
 }
 
 #[test]
+/// The authored resize document exports a type-checkable Adam sheet.
 fn the_resize_sheet_generates_valid_adm2() {
     let doc = build_resize_sheet();
     let adm2_text = generate_adm2(&doc).expect("document should export cleanly");
@@ -77,6 +80,7 @@ fn the_resize_sheet_generates_valid_adm2() {
 }
 
 #[test]
+/// The authored resize document survives complete JSON persistence.
 fn the_resize_sheet_survives_a_save_and_load_round_trip() {
     let doc = build_resize_sheet();
     let reloaded = from_json(&to_json(&doc).unwrap()).unwrap();

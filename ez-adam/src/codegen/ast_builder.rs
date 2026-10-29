@@ -63,6 +63,7 @@ fn type_expr_for(ty: &CellType) -> adam_lang::ast::TypeExpr {
 ///
 /// - Postcondition: `filter` is `None` iff `cell.ty` is `Bool`/`Text` or
 ///   has no clamp bounds.
+/// - Complexity: O(cell name bytes + emitted filter bytes) construction/parsing work.
 pub(crate) fn build_cell_decl(cell: &Cell) -> Result<CellDecl, ExportError> {
     Ok(CellDecl {
         name: cell.name.clone(),
@@ -105,6 +106,8 @@ pub(crate) fn build_cell_decl(cell: &Cell) -> Result<CellDecl, ExportError> {
 /// - Precondition: the synthesized clamp-call text is always valid CEL —
 ///   a parse failure here indicates a bug in this function, not bad user
 ///   data, so it panics rather than returning a `Result`.
+///
+/// - Complexity: O(cell_name.len() + emitted filter bytes) construction/parsing work.
 fn clamp_filter(cell_name: &str, ty: &CellType) -> Result<Option<CellFilter>, ExportError> {
     let body_text = match ty {
         CellType::F64 { clamp } => {
@@ -159,7 +162,7 @@ fn clamp_filter(cell_name: &str, ty: &CellType) -> Result<Option<CellFilter>, Ex
 /// Returns [`ExportError::InvalidFormula`] for the first member whose
 /// formula text isn't valid CEL.
 ///
-/// - Complexity: O(n) in `group.members.len()`.
+/// - Complexity: O(m + t) time and space for members m and their name/formula bytes t.
 pub(crate) fn build_relationship_decl(
     doc: &Document,
     group: &RelationshipGroup,
@@ -223,13 +226,13 @@ pub(crate) fn build_relationship_decl(
 /// `Formula`-mode condition's branches don't match on exactly one value
 /// (no codegen strategy exists yet for that case — see
 /// <https://github.com/stlab/cel-rs/issues/173>), or if a multi-cell
-/// `Cells` condition has a non-empty `default` (unreachable in practice,
-/// since `ops::conditionals::add_conditional_from_bool_cells` never
-/// populates it, but not representable under the decomposed encoding if it
-/// were).
+/// `Cells` condition has a non-empty `default`, which the decomposed encoding
+/// cannot represent.
+/// Returns [`ExportError::UnrepresentableBranchLiteral`] for an emitted `i64::MIN`
+/// key, including a key in a decomposed multi-cell match.
 ///
-/// - Complexity: O(n) in the total number of branches, their enabled
-///   groups' members, and the default's members.
+/// - Complexity: branch traversal plus condition parsing, branch-key formatting,
+///   and nested relationship construction at every emitted occurrence.
 pub(crate) fn build_conditional_decl(
     doc: &Document,
     conditional_id: ConditionalGroupId,
@@ -248,11 +251,8 @@ pub(crate) fn build_conditional_decl(
                 match_expr,
             )?])
         }
-        ConditionExpr::Formula {
-            expr,
-            referenced_cells,
-        } => {
-            if referenced_cells.len() != 1 {
+        ConditionExpr::Formula { expr, .. } => {
+            if cond.branches.iter().any(|branch| branch.values.len() != 1) {
                 return Err(ExportError::UnsupportedMultiValueCondition {
                     conditional: conditional_id,
                 });
@@ -284,8 +284,8 @@ pub(crate) fn build_conditional_decl(
 /// [`ExportError::UnrepresentableBranchLiteral`] if a branch is keyed on
 /// `i64::MIN`, which `adam_lang`'s branch grammar can't spell.
 ///
-/// - Complexity: O(n) in the total number of branches, their enabled
-///   groups' members, and the default's members.
+/// - Complexity: branch traversal/key formatting plus nested relationship
+///   construction at every enabled/default group occurrence.
 fn build_single_conditional_decl(
     doc: &Document,
     conditional_id: ConditionalGroupId,
@@ -348,10 +348,13 @@ fn build_single_conditional_decl(
     })
 }
 
-/// Builds one top-level `conditional <cellA> && !<cellB> && ... { true => {...} _ => {} }`
-/// declaration per branch of a multi-cell `Cells` condition whose
-/// `enabled_groups` is non-empty — see [`build_conditional_decl`]'s doc
-/// comment for why a single tuple-keyed conditional can't express this.
+/// Builds one top-level Boolean conditional per enabled multi-cell match row.
+///
+/// Boolean keys use the cell or its negation; integer/text keys compare the cell
+/// with the corresponding escaped literal. The conjunction avoids tuple branch syntax.
+///
+/// See [`build_conditional_decl`] for why a single tuple-keyed conditional
+/// cannot express this table.
 /// Branches with no enabled groups contribute nothing and are skipped.
 ///
 /// # Errors
@@ -359,15 +362,11 @@ fn build_single_conditional_decl(
 /// Propagates [`ExportError::InvalidFormula`] from any nested relationship
 /// group's members. Returns [`ExportError::UnsupportedMultiValueCondition`]
 /// if `cond.default` is non-empty (see [`build_conditional_decl`]'s doc
-/// comment).
+/// comment), or [`ExportError::UnrepresentableBranchLiteral`] for an emitted
+/// `i64::MIN` key.
 ///
-/// - Precondition: every value in every branch of `cond` is
-///   [`CellValueLiteral::Bool`] (guaranteed by
-///   `ops::conditionals::add_conditional_from_bool_cells`, the only way to
-///   construct a multi-cell `Cells` condition).
-///
-/// - Complexity: O(n) in the total number of branches and their enabled
-///   groups' members.
+/// - Complexity: branch traversal plus synthesized predicate bytes, predicate parsing,
+///   and nested relationship construction at each enabled-group occurrence.
 fn build_decomposed_multi_cell_conditionals(
     doc: &Document,
     conditional_id: ConditionalGroupId,
@@ -393,20 +392,21 @@ fn build_decomposed_multi_cell_conditionals(
             .iter()
             .zip(&branch.values)
             .map(|(cell_id, value)| {
-                let CellValueLiteral::Bool(is_true) = value else {
-                    unreachable!(
-                        "multi-cell Cells conditions only ever hold Bool values (enforced by \
-                         ops::conditionals::add_conditional_from_bool_cells)"
-                    );
-                };
                 let name = &doc.cells[*cell_id].name;
-                if *is_true {
-                    name.clone()
-                } else {
-                    format!("!{name}")
+                match value {
+                    CellValueLiteral::Bool(true) => Ok(name.clone()),
+                    CellValueLiteral::Bool(false) => Ok(format!("!{name}")),
+                    CellValueLiteral::I64(i64::MIN) => {
+                        Err(ExportError::UnrepresentableBranchLiteral {
+                            conditional: conditional_id,
+                            value: i64::MIN,
+                        })
+                    }
+                    CellValueLiteral::I64(value) => Ok(format!("{name} == {value}i64")),
+                    CellValueLiteral::Text(value) => Ok(format!("{name} == {value:?}")),
                 }
             })
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>, ExportError>>()?
             .join(" && ");
         let match_expr = parse_expr_text(&conjunction_text).unwrap_or_else(|e| {
             panic!("synthesized condition expression {conjunction_text:?} failed to parse: {e:?}")
@@ -457,8 +457,8 @@ fn build_decomposed_multi_cell_conditionals(
 /// Returns [`ExportError::InvalidFormula`] for the first member of any
 /// referenced group whose formula text isn't valid CEL.
 ///
-/// - Complexity: O(n) in the total number of members across every group in
-///   `group_ids`.
+/// - Complexity: O(group_ids.len()) traversal plus each referenced relationship's
+///   member/name/formula construction and parsing, repeated per occurrence.
 fn build_branch_relationships(
     doc: &Document,
     group_ids: &[RelationshipGroupId],
@@ -478,12 +478,9 @@ fn build_branch_relationships(
 ///
 /// - Precondition: `cells` is non-empty (an empty tuple `()` is neither a
 ///   bare identifier nor a valid match subject here).
-/// - Precondition: the synthesized text is always valid CEL (a bare
-///   identifier, or a parenthesized comma-list of them) — a parse failure
-///   here indicates a bug in this function, not bad user data, so it
-///   panics rather than returning a `Result`.
+/// - Precondition: referenced cells have valid identifier names.
 ///
-/// - Complexity: O(n) in `cells.len()`.
+/// - Complexity: O(cells.len() + referenced name bytes) synthesis/parsing work.
 fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
     debug_assert!(!cells.is_empty(), "cells must be non-empty");
     let text = if cells.len() == 1 {
@@ -504,15 +501,13 @@ fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
 /// sign. `literal`/`literal_span` always hold the *unsigned* spelling;
 /// `negated` is `true` only for a negative [`CellValueLiteral::I64`].
 ///
-/// - Precondition: `value`'s synthesized text always lexes to exactly one
-///   literal token — a lex failure or non-literal token here indicates a
-///   bug in this function, not bad user data, so it panics rather than
-///   returning a `Result`.
 /// - Precondition: `value` is not `CellValueLiteral::I64(i64::MIN)`. Its
 ///   magnitude (`9223372036854775808`) lexes fine here but is out of range
 ///   for the `i64` literal token `adam_lang` re-validates on parse; the
 ///   caller ([`build_single_conditional_decl`]) rejects it up front with
 ///   [`ExportError::UnrepresentableBranchLiteral`].
+///
+/// - Complexity: O(literal text bytes) formatting, lexing, and token storage.
 fn literal_and_sign(value: &CellValueLiteral) -> (bool, cel_parser::lex_lexer::Literal, ExprSpan) {
     let (negated, text) = match value {
         CellValueLiteral::Bool(b) => (false, b.to_string()),
@@ -536,9 +531,9 @@ fn literal_and_sign(value: &CellValueLiteral) -> (bool, cel_parser::lex_lexer::L
 /// extracting one from the other would mean hand-mapping every variant
 /// rather than re-lexing the same text once.
 ///
-/// - Precondition: `text` lexes to exactly one literal token — a lex
-///   failure or non-literal token here indicates a bug in the caller, not
-///   bad user data, so it panics rather than returning a `Result`.
+/// - Precondition: `text` lexes to exactly one literal token.
+///
+/// - Complexity: O(text.len()) lexing work and token storage.
 fn lex_single_literal(text: &str) -> cel_parser::lex_lexer::Literal {
     let tokens: proc_macro2::TokenStream = text
         .parse()
@@ -561,6 +556,7 @@ mod tests {
     use crate::model::cell::{Cell, ClampRange};
 
     #[test]
+    /// Plain cells export without a filter clause.
     fn build_cell_decl_for_a_plain_cell_has_no_filter() {
         let cell = Cell::new("width_pixels", CellType::i64());
         let decl = build_cell_decl(&cell).expect("plain cell should build");
@@ -569,6 +565,7 @@ mod tests {
     }
 
     #[test]
+    /// Integer clamp bounds export a filter clause.
     fn build_cell_decl_for_a_clamped_i64_cell_has_a_filter_clause() {
         let cell = Cell::new(
             "width_pixels",
@@ -589,6 +586,7 @@ mod tests {
     }
 
     #[test]
+    /// Nonfinite numeric bounds return an export error.
     fn build_cell_decl_rejects_a_non_finite_f64_clamp_bound() {
         let cell = Cell::new(
             "ratio",
@@ -606,6 +604,7 @@ mod tests {
     }
 
     #[test]
+    /// Unrepresentable minimum-integer bounds fail rather than emit invalid CEL.
     fn build_cell_decl_rejects_an_i64_min_clamp_bound() {
         let cell = Cell::new(
             "offset",
@@ -626,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    /// Maximum-integer bounds remain exportable.
     fn build_cell_decl_accepts_an_i64_max_clamp_bound() {
         let cell = Cell::new(
             "offset",
@@ -645,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    /// Valid CEL expression text lowers to an AST.
     fn parse_expr_text_accepts_valid_cel() {
         assert!(parse_expr_text("width_pixels / height_pixels").is_ok());
     }
@@ -663,11 +664,13 @@ mod tests {
     }
 
     #[test]
+    /// Invalid CEL expression text returns an export diagnostic.
     fn parse_expr_text_rejects_invalid_cel() {
         assert!(parse_expr_text("width_pixels / ").is_err());
     }
 
     #[test]
+    /// Integer cell types export the language's i64 spelling.
     fn type_expr_for_i64_has_the_right_source_text() {
         let type_expr = type_expr_for(&CellType::i64());
         match type_expr {
@@ -680,6 +683,7 @@ mod tests {
     }
 
     #[test]
+    /// Exported relationships retain every member binding.
     fn build_relationship_decl_produces_one_binding_per_member() {
         use crate::model::document::Document;
         use crate::model::geometry::Point;
@@ -702,6 +706,7 @@ mod tests {
     }
 
     #[test]
+    /// Invalid member formulas return an export error.
     fn build_relationship_decl_reports_an_invalid_formula() {
         use crate::model::document::Document;
         use crate::model::geometry::Point;
@@ -725,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    /// Single-Boolean conditionals export both truth branches.
     fn build_conditional_decl_for_a_single_bool_condition_has_two_branches() {
         use crate::model::geometry::Point;
         use crate::ops::cells::{add_cell, add_cell_node};
@@ -751,6 +757,7 @@ mod tests {
     }
 
     #[test]
+    /// Multi-cell truth tables export their enabled combinations.
     fn build_conditional_decl_for_a_multi_cell_condition_emits_one_decl_per_enabled_branch() {
         use crate::model::geometry::Point;
         use crate::ops::cells::{add_cell, add_cell_node};
@@ -797,6 +804,7 @@ mod tests {
     }
 
     #[test]
+    /// Entirely disabled truth tables emit no conditional declarations.
     fn build_conditional_decl_for_a_multi_cell_condition_with_no_enabled_branches_emits_no_decls() {
         use crate::model::geometry::Point;
         use crate::ops::cells::add_cell;

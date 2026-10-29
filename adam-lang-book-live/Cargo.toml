@@ -13,5 +13,8 @@ adam-rs = { path = "../adam-rs" }
 dioxus = { version = "0.7.10", features = ["web"] }
 wasm-bindgen = "0.2"
 
+[dev-dependencies]
+dioxus-ssr = "0.7"
+
 [lints]
 workspace = true

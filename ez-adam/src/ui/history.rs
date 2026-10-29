@@ -31,7 +31,8 @@ pub(crate) fn redo_target(current_index: usize, history_len: usize) -> Option<us
 /// - Postcondition: the returned index is `history.len() - 1`, and
 ///   `history[returned index] == current`.
 ///
-/// - Complexity: O(n) in `history.len()` (the truncation).
+/// - Complexity: O(discarded document contents) destruction time, plus amortized
+///   O(1) insertion time and space; reallocation moves the retained snapshots.
 pub(crate) fn record_history(
     history: &mut Vec<Document>,
     current_index: usize,
@@ -47,26 +48,31 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Undo cannot move before the initial snapshot.
     fn undo_target_at_the_start_of_history_returns_none() {
         assert_eq!(undo_target(0), None);
     }
 
     #[test]
+    /// Undo selects the immediately preceding snapshot.
     fn undo_target_mid_history_returns_the_prior_index() {
         assert_eq!(undo_target(3), Some(2));
     }
 
     #[test]
+    /// Redo cannot move beyond the latest snapshot.
     fn redo_target_at_the_end_of_history_returns_none() {
         assert_eq!(redo_target(2, 3), None);
     }
 
     #[test]
+    /// Redo selects the immediately following snapshot.
     fn redo_target_mid_history_returns_the_next_index() {
         assert_eq!(redo_target(1, 3), Some(2));
     }
 
     #[test]
+    /// Recording a new document adds an undoable snapshot.
     fn record_history_appends_to_a_fresh_history() {
         let mut history = vec![Document::new("d0")];
         let new_index = record_history(&mut history, 0, Document::new("d1"));
@@ -76,6 +82,7 @@ mod tests {
     }
 
     #[test]
+    /// Editing after undo discards the obsolete redo branch.
     fn record_history_truncates_the_redo_branch_before_appending() {
         let mut history = vec![
             Document::new("d0"),

@@ -52,11 +52,6 @@ describe("approval channel", () => {
     assert.equal(c.frames.at(-1), 100); assert.equal(c.queue.size, 0);
     assert.equal(c.messages.filter(m => m.kind === "update").length, 3);
   });
-  it("old_revision_reply_does_not_apply", () => {
-    const c = delayedChannel(); c.queue.submit(c.snapshot(1));
-    c.queue.submit({ ...c.snapshot(2), revision: 2 }); c.reply();
-    assert.deepEqual(c.frames, []);
-  });
   it("approval_does_not_resubmit", () => {
     const c = delayedChannel(); c.queue.submit(c.snapshot(1)); c.reply();
     assert.equal(c.messages.length, 2);

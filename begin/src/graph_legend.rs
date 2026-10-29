@@ -1,14 +1,47 @@
 //! [`GraphLegend`] — `begin`'s legend overlay for the constraint graph.
 //!
 //! Rendered by `App` as an absolutely-positioned overlay on top of the shared
-//! [`adam_web_ui::GraphView`], not by `GraphView` itself: the legend is `begin`
+//! [`adam_web_ui::GraphView()`], not by `GraphView` itself: the legend is `begin`
 //! chrome, and the book's live graphs deliberately render without it.
 
 use dioxus::prelude::*;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every graph semantic has a rendered legend label paired with its shape or edge glyph.
+    #[test]
+    fn legend_renders_symbol_and_label_inventory() {
+        let mut dom = VirtualDom::new(GraphLegend);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        for label in [
+            "Cell (value)",
+            "Relationship (constraint)",
+            "Conditional (branch)",
+            "Depends on",
+            "Activates when matched",
+            "Forced (not directly editable)",
+            "Inactive (branch not selected)",
+        ] {
+            assert!(html.contains(label), "missing {label}");
+        }
+        for shape in ["cell", "relationship", "conditional", "forced", "inactive"] {
+            assert!(html.contains(&format!("graph-legend-shape {shape}")));
+        }
+        assert!(html.contains("<path") && html.contains("<circle"));
+        assert!(html.contains("stroke-dasharray=\"4 3\""));
+    }
+}
+
 /// Explains the graph's shapes, line styles, and outline colors. A static
 /// key, not tied to any sheet — every symbol it documents is fixed by
 /// `graph.css`/`graph.js`, not by which sheet happens to be loaded.
+///
+/// # Examples
+///
+/// Inside a Dioxus scope, `rsx! { GraphLegend {} }` mounts the graph-symbol legend.
 #[component]
 pub fn GraphLegend() -> Element {
     rsx! {
@@ -54,6 +87,7 @@ pub fn GraphLegend() -> Element {
                         path { d: "M16,3.5 L21,7 L16,10.5 Z", fill: "#444" }
                     }
                 }
+
                 "Depends on"
             }
             div {

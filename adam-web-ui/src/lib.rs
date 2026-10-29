@@ -16,7 +16,7 @@ pub use graph::{
     GraphData, GraphDrive, GraphView, LinkData, LinkKind, NodeData, NodeKind, graph_drive_script,
     to_graph_data,
 };
-pub use inspector::SheetInspector;
+pub use inspector::{SheetInspector, numeric_input_script};
 pub use labels::{
     CellMeta, Labels, Renderer, WriteStrFn, format_adam_error, format_module_diagnostic,
     format_parse_error, format_rounded, labels_from_cell_names,

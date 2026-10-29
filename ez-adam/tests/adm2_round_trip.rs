@@ -16,6 +16,8 @@ use ez_adam::ops::relationships::{create_relationship, set_member_formula};
 
 /// Asserts that `adm2_text` parses successfully as `.adm2` source, via
 /// `adam-lang`'s real parser with `cel-std` installed.
+///
+/// - Complexity: parser/type-checker and sheet-construction work for the supplied source.
 fn assert_parses(adm2_text: &str) {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);
@@ -29,6 +31,7 @@ fn assert_parses(adm2_text: &str) {
 }
 
 #[test]
+/// A document combining supported constructs exports parseable Adam source.
 fn a_document_with_every_construct_generates_valid_adm2() {
     let mut doc = Document::new("resize");
 
@@ -86,6 +89,7 @@ fn a_document_with_every_construct_generates_valid_adm2() {
 }
 
 #[test]
+/// Cell-only documents export parseable source.
 fn a_bare_cell_only_document_generates_valid_adm2() {
     let mut doc = Document::new("empty_ish");
     let _ = add_cell(&mut doc, "a", CellType::f64());
@@ -94,6 +98,7 @@ fn a_bare_cell_only_document_generates_valid_adm2() {
 }
 
 #[test]
+/// Multi-cell truth tables export parseable conditional source.
 fn a_multi_cell_cells_mode_conditional_group_generates_valid_adm2() {
     let mut doc = Document::new("resize");
 
@@ -137,6 +142,7 @@ fn doc_with_i64_branch_key(key: i64) -> Document {
 }
 
 #[test]
+/// Unrepresentable minimum-integer keys fail explicitly instead of emitting invalid source.
 fn an_i64_min_branch_key_reports_an_unrepresentable_error_rather_than_emitting_unparsable_adm2() {
     // `adam_lang`'s branch grammar stores the sign separately from an
     // *unsigned* literal token, and `i64::MIN`'s magnitude is out of range
@@ -160,6 +166,7 @@ fn an_i64_min_branch_key_reports_an_unrepresentable_error_rather_than_emitting_u
 }
 
 #[test]
+/// Maximum-integer keys export and parse successfully.
 fn an_i64_max_branch_key_still_exports_and_parses() {
     // The boundary just inside the representable range: `i64::MAX`'s
     // magnitude equals `i64::MAX`, so it is a valid literal token and must
@@ -170,6 +177,7 @@ fn an_i64_max_branch_key_still_exports_and_parses() {
 }
 
 #[test]
+/// Formula selectors export parseable conditional source.
 fn a_formula_mode_conditional_group_generates_valid_adm2() {
     let mut doc = Document::new("resize");
 

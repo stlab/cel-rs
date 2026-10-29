@@ -9,6 +9,16 @@ use crate::model::geometry::Point;
 ///
 /// - Postcondition: the returned id resolves to a [`Cell`] with `output ==
 ///   false` and `restrict == None`.
+/// - Complexity: amortized O(1) insertion, plus conversion of the supplied name.
+///
+/// # Examples
+///
+/// ```
+/// use ez_adam::{model::{document::Document, cell::CellType}, ops::cells::add_cell};
+/// let mut doc = Document::new("example");
+/// let cell = add_cell(&mut doc, "width", CellType::i64());
+/// assert_eq!(doc.cells[cell].name, "width");
+/// ```
 #[must_use]
 pub fn add_cell(doc: &mut Document, name: impl Into<String>, ty: CellType) -> CellId {
     let id = doc.cells.insert(Cell::new(name, ty));
@@ -19,6 +29,9 @@ pub fn add_cell(doc: &mut Document, name: impl Into<String>, ty: CellType) -> Ce
 /// Places a new visual instance of `cell` at `position`.
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
+/// # Examples
+///
+/// `add_cell_node(&mut document, cell, Point::new(10.0, 20.0))` adds another placement.
 #[must_use]
 pub fn add_cell_node(doc: &mut Document, cell: CellId, position: Point) -> CellNodeId {
     debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
@@ -29,6 +42,9 @@ pub fn add_cell_node(doc: &mut Document, cell: CellId, position: Point) -> CellN
 /// `.adm2` codegen — see <https://github.com/stlab/cel-rs/issues/147>.
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
+/// # Examples
+///
+/// `set_output(&mut document, cell, true)` marks the shared cell as an output.
 pub fn set_output(doc: &mut Document, cell: CellId, output: bool) {
     debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
     doc.cells[cell].output = output;
@@ -37,6 +53,9 @@ pub fn set_output(doc: &mut Document, cell: CellId, output: bool) {
 /// Sets `cell`'s restrict-expression text (or clears it with `None`).
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
+/// # Examples
+///
+/// `set_restrict(&mut document, cell, None)` clears its restriction draft.
 pub fn set_restrict(doc: &mut Document, cell: CellId, restrict: Option<String>) {
     debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
     doc.cells[cell].restrict = restrict;
@@ -49,6 +68,11 @@ pub fn set_restrict(doc: &mut Document, cell: CellId, restrict: Option<String>) 
 ///   `cell` reflects the new name, since a `Cell`'s data is shared by all
 ///   of its placements (see [`Cell`]'s own doc comment) — this does not,
 ///   however, rewrite any formula text that referenced the old name.
+/// - Complexity: O(name bytes) when converting borrowed text.
+///
+/// # Examples
+///
+/// `set_name(&mut document, cell, "renamed")` changes the name used by all its placements.
 pub fn set_name(doc: &mut Document, cell: CellId, name: impl Into<String>) {
     debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
     doc.cells[cell].name = name.into();
@@ -62,6 +86,7 @@ pub fn set_name(doc: &mut Document, cell: CellId, name: impl Into<String>) {
 ///   else — an in-progress or malformed number (e.g. a lone `"-"` while
 ///   typing a negative value) shouldn't silently erase an already-valid
 ///   bound.
+/// - Complexity: O(text.len()) for numeric parsers; a generic parser's cost is additional.
 fn parse_clamp_bound<T: std::str::FromStr>(text: &str) -> Option<Option<T>> {
     if text.is_empty() {
         return Some(None);
@@ -75,6 +100,12 @@ fn parse_clamp_bound<T: std::str::FromStr>(text: &str) -> Option<Option<T>> {
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
 /// - Precondition: `cell`'s type is `F64` or `I64` (has a clamp to set).
+/// - Complexity: O(text.len()) time and O(1) auxiliary space.
+///
+/// # Examples
+///
+/// `set_clamp_min(&mut document, numeric_cell, "-12")` installs a lower bound;
+/// passing `""` clears it and `"-"` preserves the previous bound.
 pub fn set_clamp_min(doc: &mut Document, cell: CellId, text: &str) {
     debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
     match &mut doc.cells[cell].ty {
@@ -100,6 +131,11 @@ pub fn set_clamp_min(doc: &mut Document, cell: CellId, text: &str) {
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
 /// - Precondition: `cell`'s type is `F64` or `I64` (has a clamp to set).
+/// - Complexity: O(text.len()) time and O(1) auxiliary space.
+///
+/// # Examples
+///
+/// `set_clamp_max(&mut document, numeric_cell, "100")` installs an upper bound.
 pub fn set_clamp_max(doc: &mut Document, cell: CellId, text: &str) {
     debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
     match &mut doc.cells[cell].ty {
@@ -138,6 +174,9 @@ pub fn set_clamp_max(doc: &mut Document, cell: CellId, text: &str) {
 ///
 /// - Complexity: O(n) in the total size of `doc` (relationship-group
 ///   members, conditional-group branches, and cell nodes).
+/// # Examples
+///
+/// `delete_cell_node(&mut document, placement)` removes one placement and any orphaned dependants.
 pub fn delete_cell_node(doc: &mut Document, node: CellNodeId) {
     debug_assert!(doc.cell_nodes.contains_key(node), "node is not a valid key");
     let cell = doc.cell_nodes[node].cell;
@@ -176,6 +215,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Adding a cell preserves its name/type and starts without output or restriction flags.
     fn add_cell_inserts_a_non_output_cell_with_no_restrict() {
         let mut doc = Document::new("demo");
         let id = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -186,6 +226,7 @@ mod tests {
     }
 
     #[test]
+    /// Placements retain the supplied underlying cell and position.
     fn add_cell_node_places_the_cell_at_the_position() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -195,6 +236,7 @@ mod tests {
     }
 
     #[test]
+    /// Output edits update the shared cell's output flag.
     fn set_output_updates_the_cells_output_flag() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -203,6 +245,7 @@ mod tests {
     }
 
     #[test]
+    /// Restriction edits retain the supplied draft.
     fn set_restrict_updates_the_cells_restrict_text() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -211,14 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn set_name_updates_the_cells_name() {
-        let mut doc = Document::new("demo");
-        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
-        set_name(&mut doc, cell, "w");
-        assert_eq!(doc.cells[cell].name, "w");
-    }
-
-    #[test]
+    /// Renaming is visible through every placement of the shared cell.
     fn set_name_is_visible_through_every_node_placing_the_shared_cell() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -232,6 +268,7 @@ mod tests {
     }
 
     #[test]
+    /// Fractional lower-bound text preserves floating-point values.
     fn set_clamp_min_parses_and_sets_an_f64_bound() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -243,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    /// Integer lower-bound text preserves integer values.
     fn set_clamp_min_parses_and_sets_an_i64_bound() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -254,6 +292,7 @@ mod tests {
     }
 
     #[test]
+    /// Empty lower-bound text clears rather than zeroes the bound.
     fn set_clamp_min_with_empty_text_clears_the_bound() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -266,6 +305,7 @@ mod tests {
     }
 
     #[test]
+    /// An incomplete lower-bound draft preserves the previous bound.
     fn set_clamp_min_with_unparseable_text_leaves_the_bound_unchanged() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -278,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    /// Fractional upper-bound text preserves floating-point values.
     fn set_clamp_max_parses_and_sets_an_f64_bound() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -289,6 +330,7 @@ mod tests {
     }
 
     #[test]
+    /// Empty upper-bound text clears rather than zeroes the bound.
     fn set_clamp_max_with_empty_text_clears_the_bound() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -301,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    /// An incomplete upper-bound draft preserves the previous bound.
     fn set_clamp_max_with_unparseable_text_leaves_the_bound_unchanged() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -313,6 +356,7 @@ mod tests {
     }
 
     #[test]
+    /// Deleting one placement preserves a still-placed shared cell.
     fn delete_cell_node_removes_just_the_node_when_another_node_shares_the_cell() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -327,6 +371,7 @@ mod tests {
     }
 
     #[test]
+    /// Deleting the final placement also removes its orphaned cell.
     fn delete_cell_node_removes_the_cell_too_when_it_was_the_last_node() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -339,6 +384,7 @@ mod tests {
     }
 
     #[test]
+    /// Placement deletion removes its relationship membership.
     fn delete_cell_node_removes_it_from_a_relationship_groups_members() {
         use crate::ops::relationships::create_relationship;
 
@@ -358,6 +404,7 @@ mod tests {
     }
 
     #[test]
+    /// Placement deletion removes a relationship left without members.
     fn delete_cell_node_cascades_to_delete_a_relationship_group_left_with_no_members() {
         use crate::ops::relationships::create_relationship;
 
@@ -376,6 +423,7 @@ mod tests {
     }
 
     #[test]
+    /// Deleting the final placement removes conditions depending on its cell.
     fn delete_cell_node_cascades_to_delete_a_dependent_conditional_group() {
         use crate::model::conditional_group::ConditionExpr;
         use crate::ops::conditionals::add_conditional_with_formula;

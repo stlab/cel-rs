@@ -10,6 +10,11 @@ use adam_lang::{AdamParser, ParsedSheet, TypeRegistry};
 /// then fails to propagate still returns the built sheet and labels alongside
 /// the formatted error, matching how [`crate::SheetInspector`] already tolerates
 /// propagate failures during cell edits.
+///
+/// # Examples
+///
+/// Inspect `build_sheet(source, name, &Renderer::plain()).sheet_labels` to retain
+/// an inspectable sheet even when the outcome also contains a propagation error.
 pub struct BuildOutcome {
     /// The built [`ParsedSheet`] and its UI labels, if parsing succeeded.
     pub sheet_labels: Option<(ParsedSheet, Labels)>,
@@ -62,6 +67,17 @@ pub fn type_registry() -> TypeRegistry {
 /// for a context that can't display ANSI colors (e.g. a browser `<pre>` element).
 ///
 /// - Complexity: O(n) in the length of `source` plus the cost of one `propagate()`.
+///
+/// # Examples
+///
+/// ```
+/// let outcome = adam_web_ui::build_sheet(
+///     "sheet example { cell width: i64 = 10i64; }", "example.adm2",
+///     &annotate_snippets::Renderer::plain(),
+/// );
+/// assert!(outcome.sheet_labels.is_some());
+/// assert!(outcome.error.is_none());
+/// ```
 pub fn build_sheet(source: &str, file_name: &str, renderer: &Renderer) -> BuildOutcome {
     let mut parser = AdamParser::new(type_registry(), op_lookup());
     let mut parsed = match parser.parse_str(source) {
@@ -131,6 +147,7 @@ mod tests {
     "#;
 
     #[test]
+    /// Valid source builds and propagates without a diagnostic.
     fn build_sheet_valid_source_succeeds_with_no_error() {
         let outcome = build_sheet(VALID_SOURCE, "test.adm2", &Renderer::styled());
         assert!(outcome.sheet_labels.is_some());
@@ -138,6 +155,7 @@ mod tests {
     }
 
     #[test]
+    /// Parse failures return no sheet and a source-located diagnostic.
     fn build_sheet_parse_error_has_no_sheet_and_formatted_message() {
         let outcome = build_sheet("sheet s { cell x }", "test.adm2", &Renderer::styled());
         assert!(outcome.sheet_labels.is_none());
@@ -146,6 +164,7 @@ mod tests {
     }
 
     #[test]
+    /// Propagation failures retain an inspectable sheet with a diagnostic.
     fn build_sheet_runtime_error_still_returns_sheet_and_message() {
         let source = "sheet s { cell x: i32 = 0; cell y: i32; relationship { y := 10i32 / x; } }";
         let outcome = build_sheet(source, "test.adm2", &Renderer::styled());
@@ -157,6 +176,7 @@ mod tests {
     }
 
     #[test]
+    /// Plain parse diagnostics contain no terminal escape sequences.
     fn build_sheet_plain_renderer_parse_error_has_no_ansi_escape_codes() {
         let outcome = build_sheet("sheet s { cell x }", "test.adm2", &Renderer::plain());
         let msg = outcome.error.expect("expected a parse error message");
@@ -167,6 +187,7 @@ mod tests {
     }
 
     #[test]
+    /// Plain runtime diagnostics contain no terminal escape sequences.
     fn build_sheet_plain_renderer_runtime_error_has_no_ansi_escape_codes() {
         let source = "sheet s { cell x: i32 = 0; cell y: i32; relationship { y := 10i32 / x; } }";
         let outcome = build_sheet(source, "test.adm2", &Renderer::plain());
@@ -178,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    /// Cycle diagnostics identify both relationships' binding spans.
     fn build_sheet_cycle_names_both_relationships_bindings_in_the_backtrace() {
         // Two relationships forming an algebraic loop with no external source for
         // either cell: `x` needs `y` and `y` needs `x`, so `propagate` can't pick a

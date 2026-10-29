@@ -12,11 +12,21 @@ use crate::model::relationship_group::RelationshipGroupId;
 new_key_type! {
     /// A stable handle to a [`ConditionalGroup`] in a
     /// [`crate::model::document::Document`].
+    ///
+    /// # Examples
+    ///
+    /// Pass the ID returned by conditional creation to `toggle_enabled_group`
+    /// to edit that conditional's truth table.
     pub struct ConditionalGroupId;
 }
 
 /// A literal value matched against a conditional group's branch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// `CellValueLiteral::Bool(true)` matches a Boolean selector; it is distinct
+/// from an integer or text literal with a similar display.
 pub enum CellValueLiteral {
     /// A boolean literal value.
     Bool(bool),
@@ -28,8 +38,13 @@ pub enum CellValueLiteral {
 
 /// The expression a [`ConditionalGroup`] branches on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// `ConditionExpr::Formula { referenced_cells: vec![], expr: "true".into() }`
+/// is a constant scalar condition with one branch key per row.
 pub enum ConditionExpr {
-    /// Implicit tuple of the dragged-in cells' own values. Auto-enumerable
+    /// Nonempty implicit tuple of the dragged-in cells' own values. Auto-enumerable
     /// into a full branch table only when every cell is `Bool`.
     Cells(Vec<CellId>),
     /// A user-authored CEL expression referencing `referenced_cells` (e.g.
@@ -45,6 +60,14 @@ pub enum ConditionExpr {
 impl ConditionExpr {
     /// Returns the cells this condition depends on: the auto-enumerated
     /// cells for `Cells`, or the referenced cells for `Formula`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ez_adam::model::conditional_group::ConditionExpr;
+    /// let condition = ConditionExpr::Formula { referenced_cells: vec![], expr: "true".into() };
+    /// assert!(condition.referenced_cells().is_empty());
+    /// ```
     #[must_use]
     pub fn referenced_cells(&self) -> &[CellId] {
         match self {
@@ -58,8 +81,13 @@ impl ConditionExpr {
 
 /// One row of a conditional group's enable-table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// A Boolean truth-table row has one `CellValueLiteral::Bool` per selector cell
+/// and lists the relationship groups enabled by that combination.
 pub struct ConditionalBranch {
-    /// One literal per [`ConditionExpr`] cell, aligned by index.
+    /// One literal per `Cells` entry, or one literal for a scalar `Formula` result.
     pub values: Vec<CellValueLiteral>,
     /// The relationship groups active (checked) on this branch.
     pub enabled_groups: Vec<RelationshipGroupId>,
@@ -68,6 +96,11 @@ pub struct ConditionalBranch {
 /// A set of alternative relationship-group activations selected by
 /// [`ConditionExpr`]'s current value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// `add_conditional_from_bool_cells` creates a truth-table group whose rows
+/// can enable the referenced relationship independently.
 pub struct ConditionalGroup {
     /// The display name of this conditional group.
     pub display_name: String,
@@ -90,12 +123,17 @@ mod tests {
     use slotmap::SlotMap;
 
     #[test]
+    /// Distinct literal types remain unequal even when their displayed values coincide.
     fn cell_value_literals_of_different_variants_are_unequal() {
-        assert_ne!(CellValueLiteral::Bool(true), CellValueLiteral::Bool(false));
-        assert_ne!(CellValueLiteral::I64(1), CellValueLiteral::I64(2));
+        assert_ne!(CellValueLiteral::Bool(true), CellValueLiteral::I64(1));
+        assert_ne!(
+            CellValueLiteral::I64(1),
+            CellValueLiteral::Text("1".to_string())
+        );
     }
 
     #[test]
+    /// Cell conditions preserve their ordered dependencies.
     fn condition_expr_cells_stores_the_given_cell_ids() {
         let mut cells: SlotMap<CellId, ()> = SlotMap::with_key();
         let a = cells.insert(());
@@ -105,6 +143,7 @@ mod tests {
     }
 
     #[test]
+    /// Cell-mode dependency views borrow the original ordered list.
     fn referenced_cells_returns_cells_variants_own_list() {
         let mut cells: SlotMap<CellId, ()> = SlotMap::with_key();
         let a = cells.insert(());
@@ -113,6 +152,7 @@ mod tests {
     }
 
     #[test]
+    /// Formula conditions retain their declared dependency IDs.
     fn referenced_cells_returns_formulas_referenced_cells() {
         let mut cells: SlotMap<CellId, ()> = SlotMap::with_key();
         let a = cells.insert(());
@@ -124,6 +164,7 @@ mod tests {
     }
 
     #[test]
+    /// Branch metadata retains match values and enabled relationship IDs.
     fn conditional_branch_stores_values_and_enabled_groups() {
         let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
         let group = groups.insert(());

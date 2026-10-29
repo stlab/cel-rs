@@ -35,12 +35,36 @@ fn empty_parsed_sheet() -> ParsedSheet {
 /// project's existing default before `cycle.adm2` was added.
 const DEFAULT_EXAMPLE_NAME: &str = "diamond";
 
+/// Installs a built sheet with its provenance, or retains both on parse/read failure.
+///
+/// The recovery target always advances, including failed opens; diagnostics and graph
+/// identity continue to use the displayed source until a replacement sheet exists.
+///
+/// - Complexity: O(d + t) destruction/clone cost for old sheet data and source text.
+fn install_loaded_source(
+    mut parsed: Signal<ParsedSheet>,
+    mut labels: Signal<Labels>,
+    mut active_source: Signal<ActiveSource>,
+    mut displayed_source: Signal<ActiveSource>,
+    sheet_labels: Option<(ParsedSheet, Labels)>,
+    candidate: ActiveSource,
+) {
+    if let Some((sheet, metadata)) = sheet_labels {
+        parsed.set(sheet);
+        labels.set(metadata);
+        displayed_source.set(candidate.clone());
+    }
+    active_source.set(candidate);
+}
+
 /// Chooses which of `names` (`available_examples()`'s sorted output) [`App`] should load on
 /// launch: [`DEFAULT_EXAMPLE_NAME`] when it's present among `names`, else `names`'s
 /// alphabetically-first entry, so a stripped-down build missing the designated default still
 /// launches into *something* rather than an empty sheet.
 ///
 /// - Postcondition: returns `String::new()` only when `names` is empty.
+///
+/// - Complexity: O(names.len() + selected name bytes) time and O(selected name bytes) space.
 fn pick_default_example_name(names: &[String]) -> String {
     if names.iter().any(|n| n == DEFAULT_EXAMPLE_NAME) {
         DEFAULT_EXAMPLE_NAME.to_string()
@@ -55,14 +79,24 @@ fn pick_default_example_name(names: &[String]) -> String {
 /// [`crate::example_source::available_examples`]); [`ExamplesPicker`] switches
 /// which one is loaded. On desktop, editing the *currently selected* example's
 /// file, or adding/removing a file under `begin/examples/`, live-updates this
-/// running app via [`crate::example_source::spawn_examples_watch`], exactly as
+/// running app via `crate::example_source::spawn_examples_watch`, exactly as
 /// if the old Apply button had been pressed.
 ///
 /// A read or parse failure loading an example does not prevent the app from
 /// launching or switching: it prints the diagnostic to stderr and falls back
 /// to an empty sheet instead, so a syntax error can be fixed and
 /// hot-reloaded in without restarting.
+///
+/// Opened-file failures retain the last good sheet and its displayed provenance,
+/// while the recovery source remains the newly selected file.
+///
+/// - Complexity: initialization loads, parses, and propagates once; subsequent
+///   renders incur the child components' rendering and graph-projection costs.
 #[component]
+///
+/// # Examples
+///
+/// The application entry point uses `dioxus::launch(App)` with the selected renderer.
 pub fn App() -> Element {
     // The webview always probes `/favicon.ico` at the origin root regardless of the
     // `document::Link` below (standard Chromium behavior). That literal path can't be
@@ -79,12 +113,16 @@ pub fn App() -> Element {
         responder.respond(response);
     });
 
-    let initial_example_name = pick_default_example_name(&available_examples());
-    let (initial_parsed, initial_labels, initial_active_source) =
-        load_example(&initial_example_name);
-    let parsed = use_signal(|| initial_parsed);
-    let labels = use_signal(|| initial_labels);
-    let active_source = use_signal(|| initial_active_source);
+    let (parsed, labels, active_source, displayed_source) = use_hook(|| {
+        let name = pick_default_example_name(&available_examples());
+        let (parsed, labels, source) = load_example(&name);
+        (
+            Signal::new(parsed),
+            Signal::new(labels),
+            Signal::new(source.clone()),
+            Signal::new(source),
+        )
+    });
     let example_names = use_signal(available_examples);
 
     // Holds the `notify` watcher on `begin/examples/` established in the
@@ -112,9 +150,6 @@ pub fn App() -> Element {
     // `T` (it compares by the underlying slot's identity, not `T`'s value).
     #[cfg(feature = "desktop")]
     let reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>> = {
-        let mut parsed = parsed;
-        let mut labels = labels;
-        let mut active_source = active_source;
         let mut example_names = example_names;
         let mut examples_watcher_slot = examples_watcher_slot;
         use_hook(move || {
@@ -151,14 +186,17 @@ pub fn App() -> Element {
                         }
                     };
                     let outcome = build_sheet(&source, &current.file_name(), &Renderer::styled());
-                    if let Some((new_parsed, new_labels)) = outcome.sheet_labels {
-                        parsed.set(new_parsed);
-                        labels.set(new_labels);
-                        active_source.set(ActiveSource {
+                    install_loaded_source(
+                        parsed,
+                        labels,
+                        active_source,
+                        displayed_source,
+                        outcome.sheet_labels,
+                        ActiveSource {
                             text: source,
                             ..current
-                        });
-                    }
+                        },
+                    );
                     if let Some(msg) = outcome.error {
                         eprintln!("{msg}");
                     }
@@ -223,9 +261,9 @@ pub fn App() -> Element {
     // example switch can silently recycle an old id for an unrelated node and
     // carry over its stale layout position (and previously, its stale box
     // width — see the graph.js fix this follows).
-    let source_id = use_memo(move || active_source.read().file_name());
-    let source_text = use_memo(move || active_source.read().text.clone());
-    let source_name = use_memo(move || active_source.read().file_name());
+    let source_id = use_memo(move || displayed_source.read().file_name());
+    let source_text = use_memo(move || displayed_source.read().text.clone());
+    let source_name = use_memo(move || displayed_source.read().file_name());
     let graph_id = use_signal(|| "graph-container".to_string());
 
     // Drives graph.js's show/hide-inactive-branches mode via
@@ -268,6 +306,7 @@ pub fn App() -> Element {
             parsed,
             labels,
             active_source,
+            displayed_source,
             reload_tx,
             watcher_slot,
         }
@@ -278,6 +317,7 @@ pub fn App() -> Element {
             parsed,
             labels,
             active_source,
+            displayed_source,
             refresh_handle,
         }
     };
@@ -342,7 +382,7 @@ pub fn App() -> Element {
                 }
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
-                    ExamplesPicker { parsed, labels, active_source, example_names, on_select: on_example_selected }
+                    ExamplesPicker { parsed, labels, active_source, displayed_source, example_names, on_select: on_example_selected }
                     // Positioned wrapper so `GraphLegend` (position: absolute) overlays the
                     // graph. The legend lives here in `begin`, not inside the shared
                     // `GraphView`, so the book's live graphs render without it.
@@ -472,6 +512,7 @@ fn OpenFileControls(
     parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
     active_source: Signal<ActiveSource>,
+    displayed_source: Signal<ActiveSource>,
     reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>>,
     mut watcher_slot: Signal<Option<notify::RecommendedWatcher>>,
 ) -> Element {
@@ -480,20 +521,13 @@ fn OpenFileControls(
             compact: true,
             SpActionButton {
                 onclick: move |_| {
-                    let mut parsed = parsed;
-                    let mut labels = labels;
-                    let mut active_source = active_source;
                     let reload_tx = reload_tx.read().clone();
                     spawn(async move {
                         let Some(path) = crate::open_file::pick_file().await else {
                             return;
                         };
                         let (new_sheet_labels, new_active) = load_opened(path.clone());
-                        if let Some((new_parsed, new_labels)) = new_sheet_labels {
-                            parsed.set(new_parsed);
-                            labels.set(new_labels);
-                        }
-                        active_source.set(new_active);
+                        install_loaded_source(parsed, labels, active_source, displayed_source, new_sheet_labels, new_active);
                         match crate::open_file::spawn_watch(path, move || {
                             let _ = reload_tx.unbounded_send(());
                         }) {
@@ -525,7 +559,7 @@ fn OpenFileControls(
 /// A read or parse failure prints the diagnostic to stderr and returns `None`
 /// in place of a sheet/labels pair, leaving the caller's last-good sheet and
 /// labels in place instead of replacing them with an empty one (see
-/// [`load_opened`]'s doc comment for why this differs from [`load_example`]).
+/// the desktop `load_opened` contract for why this differs from [`load_example`]).
 ///
 /// - Complexity: O(n) in the length of `payload.text`, plus the cost of one
 ///   `build_sheet` parse/propagate.
@@ -545,6 +579,30 @@ fn load_from_payload(
     (outcome.sheet_labels, active_source)
 }
 
+/// Retains the unique source allocation that owns a pending browser file response.
+#[cfg(not(feature = "desktop"))]
+#[derive(Clone)]
+struct FileSourceOwner(std::rc::Rc<()>);
+
+#[cfg(not(feature = "desktop"))]
+impl PartialEq for FileSourceOwner {
+    /// Compares live source identity rather than diagnostic names or source contents.
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Accepts only the newest response still owned by the active source.
+#[cfg(not(feature = "desktop"))]
+fn file_reply_is_current(
+    captured: &FileSourceOwner,
+    current: &FileSourceOwner,
+    revision: u64,
+    current_revision: u64,
+) -> bool {
+    captured == current && revision == current_revision
+}
+
 /// "Open…"/"Refresh" controls for the web build: "Open…" always calls
 /// `window.beginOpenFile.open()`; "Refresh" (rendered only once a
 /// re-readable handle exists) re-reads that same handle. Neither watches for
@@ -556,20 +614,29 @@ fn OpenFileControls(
     parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
     active_source: Signal<ActiveSource>,
+    displayed_source: Signal<ActiveSource>,
     mut refresh_handle: Signal<Option<u32>>,
 ) -> Element {
+    let source_owner = use_memo(move || {
+        let _source = active_source.read();
+        FileSourceOwner(std::rc::Rc::new(()))
+    });
+    let mut request_revision = use_signal(|| 0u64);
     rsx! {
         SpActionGroup {
             compact: true,
             SpActionButton {
                 onclick: move |_| {
-                    let mut parsed = parsed;
-                    let mut labels = labels;
-                    let mut active_source = active_source;
                     let mut refresh_handle = refresh_handle;
+                    let revision = request_revision.peek().checked_add(1).expect("file request revision overflow");
+                    request_revision.set(revision);
+                    let owner = source_owner.peek().clone();
                     spawn(async move {
                         let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
                         let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
+                        if !file_reply_is_current(&owner, &source_owner.peek(), revision, *request_revision.peek()) {
+                            return;
+                        }
                         let Ok(result) = result else {
                             adam_web_ui::diagnostics::report_error(&format!(
                                 "failed to open file: eval channel error: {result:?}"
@@ -588,11 +655,7 @@ fn OpenFileControls(
                         };
                         refresh_handle.set(payload.id);
                         let (new_sheet_labels, new_active) = load_from_payload(payload);
-                        if let Some((new_parsed, new_labels)) = new_sheet_labels {
-                            parsed.set(new_parsed);
-                            labels.set(new_labels);
-                        }
-                        active_source.set(new_active);
+                        install_loaded_source(parsed, labels, active_source, displayed_source, new_sheet_labels, new_active);
                     });
                 },
                 "Open…"
@@ -600,13 +663,16 @@ fn OpenFileControls(
             if let Some(id) = *refresh_handle.read() {
                 SpActionButton {
                     onclick: move |_| {
-                        let mut parsed = parsed;
-                        let mut labels = labels;
-                        let mut active_source = active_source;
+                        let revision = request_revision.peek().checked_add(1).expect("file request revision overflow");
+                        request_revision.set(revision);
+                        let owner = source_owner.peek().clone();
                         spawn(async move {
                             let script = crate::open_file::refresh_script(id);
                             let mut eval = document::eval(&script);
                             let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
+                            if !file_reply_is_current(&owner, &source_owner.peek(), revision, *request_revision.peek()) {
+                                return;
+                            }
                             let Ok(result) = result else {
                                 adam_web_ui::diagnostics::report_error(&format!(
                                     "failed to refresh file: eval channel error: {result:?}"
@@ -624,11 +690,7 @@ fn OpenFileControls(
                                 }
                             };
                             let (new_sheet_labels, new_active) = load_from_payload(payload);
-                            if let Some((new_parsed, new_labels)) = new_sheet_labels {
-                                parsed.set(new_parsed);
-                                labels.set(new_labels);
-                            }
-                            active_source.set(new_active);
+                            install_loaded_source(parsed, labels, active_source, displayed_source, new_sheet_labels, new_active);
                         });
                     },
                     "Refresh"
@@ -653,6 +715,7 @@ fn ExamplesPicker(
     parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
     active_source: Signal<ActiveSource>,
+    displayed_source: Signal<ActiveSource>,
     example_names: Signal<Vec<String>>,
     on_select: Callback<()>,
 ) -> Element {
@@ -681,15 +744,10 @@ fn ExamplesPicker(
                         value: name.clone(),
                         selected: is_example_active && name == current,
                         onclick: {
-                            let mut parsed = parsed;
-                            let mut labels = labels;
-                            let mut active_source = active_source;
                             let name = name.clone();
                             move |_| {
                                 let (new_parsed, new_labels, new_active_source) = load_example(&name);
-                                parsed.set(new_parsed);
-                                labels.set(new_labels);
-                                active_source.set(new_active_source);
+                                install_loaded_source(parsed, labels, active_source, displayed_source, Some((new_parsed, new_labels)), new_active_source);
                                 on_select.call(());
                             }
                         },
@@ -701,9 +759,60 @@ fn ExamplesPicker(
 }
 
 #[cfg(test)]
+#[path = "app_tests.rs"]
+mod component_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Failed opens change the recovery target without relabelling the retained sheet.
+    #[test]
+    fn failed_open_retains_displayed_source_until_recovery() {
+        /// Exercises the production load transition with real parsed sheets and labels.
+        fn host() -> Element {
+            let (initial, initial_labels, initial_source) = load_example("diamond");
+            let parsed = use_signal(|| initial);
+            let labels = use_signal(|| initial_labels);
+            let active = use_signal(|| initial_source.clone());
+            let displayed = use_signal(|| initial_source);
+            let original = displayed.read().file_name();
+            let broken = ActiveSource {
+                name: "broken".to_string(),
+                text: "bad".to_string(),
+                origin: SourceOrigin::Example,
+            };
+            install_loaded_source(parsed, labels, active, displayed, None, broken.clone());
+            assert_eq!(displayed.read().file_name(), original);
+            assert_eq!(active.read().name, "broken");
+            let outcome = build_sheet(
+                "sheet repaired { cell x: i64; }",
+                "broken.adm2",
+                &Renderer::plain(),
+            );
+            let repaired = ActiveSource {
+                text: "sheet repaired { cell x: i64; }".to_string(),
+                ..broken
+            };
+            install_loaded_source(
+                parsed,
+                labels,
+                active,
+                displayed,
+                outcome.sheet_labels,
+                repaired,
+            );
+            assert_eq!(displayed.read().name, "broken");
+            assert_eq!(displayed.read().text, "sheet repaired { cell x: i64; }");
+            assert!(parsed.read().cell_names.contains_key("x"));
+            rsx! {}
+        }
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    /// Finds the embedded toy sheet used by the conditional-force regressions.
+    ///
+    /// - Complexity: O(number of embedded examples) name comparisons.
     fn toy_example_source() -> &'static str {
         crate::example_source::EXAMPLES_WITH_SOURCE
             .iter()
@@ -713,6 +822,7 @@ mod tests {
     }
 
     #[test]
+    /// The zero-selector branch leaves the toy sheet's g cell editable.
     fn toy_example_g_not_forced_when_p_is_zero() {
         let outcome = build_sheet(
             toy_example_source(),
@@ -728,6 +838,7 @@ mod tests {
     }
 
     #[test]
+    /// Selecting the one branch forces the toy sheet's g cell.
     fn toy_example_g_forced_when_p_is_one() {
         let outcome = build_sheet(
             toy_example_source(),
@@ -751,6 +862,7 @@ mod tests {
     }
 
     #[test]
+    /// Returning to the zero branch restores g's editability.
     fn toy_example_g_unforced_again_after_p_returns_to_zero() {
         let outcome = build_sheet(
             toy_example_source(),
@@ -779,6 +891,7 @@ mod tests {
     }
 
     #[test]
+    /// Missing example names produce the documented empty-sheet fallback.
     fn load_example_unknown_name_falls_back_to_empty_sheet() {
         let (parsed, labels, active) = load_example("does_not_exist");
         assert_eq!(parsed.cells().count(), 0);
@@ -790,6 +903,7 @@ mod tests {
     }
 
     #[test]
+    /// Startup prefers the designated default when it exists.
     fn pick_default_example_name_prefers_the_designated_default_when_present() {
         let names = vec![
             "cycle".to_string(),
@@ -800,18 +914,21 @@ mod tests {
     }
 
     #[test]
+    /// Startup falls back to the first available example.
     fn pick_default_example_name_falls_back_to_the_first_name_when_default_absent() {
         let names = vec!["cycle".to_string(), "toy_example".to_string()];
         assert_eq!(pick_default_example_name(&names), "cycle");
     }
 
     #[test]
+    /// An empty example catalogue yields no default name.
     fn pick_default_example_name_is_empty_when_names_is_empty() {
         assert_eq!(pick_default_example_name(&[]), "");
     }
 
     #[test]
     #[cfg(feature = "desktop")]
+    /// Missing opened files produce no replacement sheet.
     fn load_opened_missing_file_returns_none_sheet_labels() {
         let path = std::path::PathBuf::from("/definitely/does/not/exist/nope.adm2");
 
@@ -826,8 +943,12 @@ mod tests {
 
     #[test]
     #[cfg(feature = "desktop")]
+    /// Invalid opened files produce no replacement sheet.
     fn load_opened_parse_error_returns_none_sheet_labels() {
-        let path = std::env::temp_dir().join("begin_app_test_load_opened_parse_error.adm2");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../target/{}-begin_app_test_load_opened_parse_error.adm2",
+            std::process::id()
+        ));
         std::fs::write(&path, "sheet s { cell x }").unwrap();
 
         let (sheet_labels, active) = load_opened(path.clone());
@@ -837,11 +958,12 @@ mod tests {
             sheet_labels.is_none(),
             "a parse failure must return None, not an empty sheet, so the caller can leave its last-good sheet/labels in place"
         );
-        assert_eq!(active.name, "begin_app_test_load_opened_parse_error.adm2");
+        assert_eq!(active.name, path.file_name().unwrap().to_string_lossy());
     }
 
     #[test]
     #[cfg(not(feature = "desktop"))]
+    /// Invalid browser file payloads produce no replacement sheet.
     fn load_from_payload_parse_error_returns_none_sheet_labels() {
         let payload = crate::open_file::OpenedFilePayload {
             id: None,

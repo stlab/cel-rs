@@ -27,8 +27,34 @@ use crate::ui::toolbar::{Tool, Toolbar};
 /// Returns whether opening another document must first preserve or discard
 /// the current document's changes.
 #[cfg(any(feature = "desktop", test))]
+///
+/// - Complexity: O(combined snapshot slots, references, and text bytes) worst-case comparison.
 fn has_unsaved_changes(document: &Document, saved_document: &Document) -> bool {
     document != saved_document
+}
+
+/// Installs a replacement document and retires all document-local presentation state.
+///
+/// The changed epoch remounts Canvas and SidePanel, cancelling their scoped tasks
+/// and clearing pending gestures even if the replacement reuses old slot keys.
+///
+/// - Complexity: O(d + s) destruction cost for the previous document and selection.
+#[cfg(any(feature = "desktop", test))]
+fn replace_editor_document(
+    mut document: Signal<Document>,
+    mut selection: Signal<HashSet<NodeId>>,
+    mut active_tool: Signal<Tool>,
+    mut epoch: Signal<u64>,
+    replacement: Document,
+) {
+    let next = epoch
+        .peek()
+        .checked_add(1)
+        .expect("document replacement epoch overflow");
+    selection.write().clear();
+    active_tool.set(Tool::Select);
+    epoch.set(next);
+    document.set(replacement);
 }
 
 #[cfg(test)]
@@ -37,7 +63,34 @@ mod tests {
     use crate::model::cell::CellType;
     use crate::ops::cells::add_cell;
 
+    /// Replacement clears IDs even when the new document reuses the same slots.
     #[test]
+    fn replacement_resets_selection_tool_and_component_generation() {
+        /// Exercises the production replacement transition within its signal owner.
+        fn host() -> Element {
+            let mut initial = Document::new("old");
+            let cell = add_cell(&mut initial, "old", CellType::i64());
+            let node = crate::ops::cells::add_cell_node(
+                &mut initial,
+                cell,
+                crate::model::geometry::Point::new(0.0, 0.0),
+            );
+            let document = use_signal(|| initial);
+            let selection = use_signal(|| HashSet::from([NodeId::CellNode(node)]));
+            let tool = use_signal(|| Tool::AddRelationship);
+            let epoch = use_signal(|| 4);
+            replace_editor_document(document, selection, tool, epoch, Document::new("new"));
+            assert!(selection.read().is_empty());
+            assert_eq!(*tool.read(), Tool::Select);
+            assert_eq!(*epoch.read(), 5);
+            assert_eq!(document.read().sheet_name, "new");
+            rsx! {}
+        }
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// Saved snapshots do not show unsaved changes.
     fn has_unsaved_changes_is_false_for_the_saved_snapshot() {
         let document = Document::new("untitled");
 
@@ -45,6 +98,7 @@ mod tests {
     }
 
     #[test]
+    /// Model edits mark the editor dirty.
     fn has_unsaved_changes_is_true_after_an_edit() {
         let saved_document = Document::new("untitled");
         let mut document = saved_document.clone();
@@ -79,6 +133,10 @@ mod tests {
 /// entry — is never re-recorded as a fresh edit, with no separate
 /// "am I currently restoring" flag needed).
 #[component]
+///
+/// # Examples
+///
+/// Launch the editor with `dioxus::launch(App)` after installing the renderer's assets.
 pub fn App() -> Element {
     let document = use_signal(|| Document::new("untitled"));
     #[cfg(feature = "desktop")]
@@ -94,6 +152,7 @@ pub fn App() -> Element {
 
     let history: Signal<Vec<Document>> = use_signal(|| vec![Document::new("untitled")]);
     let history_index: Signal<usize> = use_signal(|| 0);
+    let replacement_epoch = use_signal(|| 0u64);
 
     {
         let mut history = history;
@@ -111,7 +170,7 @@ pub fn App() -> Element {
 
     #[cfg(feature = "desktop")]
     let open_from_picker = {
-        let mut document_for_open = document;
+        let document_for_open = document;
         let mut document_path_for_open = document_path;
         let mut saved_document_for_open = saved_document;
         let mut error_message_for_open = error_message;
@@ -130,7 +189,13 @@ pub fn App() -> Element {
                             history_for_open.set(vec![doc.clone()]);
                             history_index_for_open.set(0);
                             saved_document_for_open.set(doc.clone());
-                            document_for_open.set(doc);
+                            replace_editor_document(
+                                document_for_open,
+                                selection,
+                                active_tool,
+                                replacement_epoch,
+                                doc,
+                            );
                             document_path_for_open.set(Some(path));
                             error_message_for_open.set(None);
                         }
@@ -232,7 +297,7 @@ pub fn App() -> Element {
                             Ok(()) => error_message_for_export.set(None),
                             Err(e) => error_message_for_export.set(Some(e)),
                         },
-                        Err(e) => error_message_for_export.set(Some(format!("{e:?}"))),
+                        Err(e) => error_message_for_export.set(Some(e.to_string())),
                     }
                 }
             });
@@ -241,21 +306,27 @@ pub fn App() -> Element {
 
     #[cfg(feature = "desktop")]
     let mut undo = {
-        let mut document_for_undo = document;
+        let document_for_undo = document;
         let mut history_index_for_undo = history_index;
         move || {
             let idx = *history_index_for_undo.read();
             if let Some(target) = undo_target(idx) {
                 let snapshot = history.read()[target].clone();
                 history_index_for_undo.set(target);
-                document_for_undo.set(snapshot);
+                replace_editor_document(
+                    document_for_undo,
+                    selection,
+                    active_tool,
+                    replacement_epoch,
+                    snapshot,
+                );
             }
         }
     };
 
     #[cfg(feature = "desktop")]
     let mut redo = {
-        let mut document_for_redo = document;
+        let document_for_redo = document;
         let mut history_index_for_redo = history_index;
         move || {
             let idx = *history_index_for_redo.read();
@@ -263,7 +334,13 @@ pub fn App() -> Element {
             if let Some(target) = redo_target(idx, len) {
                 let snapshot = history.read()[target].clone();
                 history_index_for_redo.set(target);
-                document_for_redo.set(snapshot);
+                replace_editor_document(
+                    document_for_redo,
+                    selection,
+                    active_tool,
+                    replacement_epoch,
+                    snapshot,
+                );
             }
         }
     };
@@ -322,6 +399,7 @@ pub fn App() -> Element {
     #[cfg(not(feature = "desktop"))]
     let unsaved_open_dialog = rsx! {};
 
+    let epoch = *replacement_epoch.read();
     rsx! {
         // Bundled via `cargo xtask build-js` (ez-adam/package.json +
         // ez-adam/js/spectrum-entry.js) into one esbuild module, mirroring
@@ -376,7 +454,7 @@ pub fn App() -> Element {
                 div {
                     class: "workspace",
                     style: "position: absolute; top: 0; left: 0; width: 100%; height: 100%;",
-                    Canvas { document, view_transform, selection, active_tool }
+                    Canvas { key: "{epoch}", document, view_transform, selection, active_tool }
                     // Only occupies (and intercepts clicks/drags over) screen
                     // space when there's actually something to show — an
                     // always-present strip here, even showing nothing but "No
@@ -386,7 +464,7 @@ pub fn App() -> Element {
                     if panel_target(&selection.read()).is_some() {
                         div {
                             style: "position: absolute; top: 0; right: 0; bottom: 0; z-index: 10; background: white; border-left: 1px solid #ccc; width: 420px; max-width: 40vw; overflow: auto; padding: 12px; box-sizing: border-box;",
-                            SidePanel { document, selection }
+                            SidePanel { key: "{epoch}", document, selection }
                         }
                     }
                     {unsaved_open_dialog}

@@ -5,6 +5,8 @@
 
 mod app;
 mod canvas;
+#[cfg(test)]
+mod component_tests;
 #[cfg(feature = "desktop")]
 mod file_io;
 mod history;

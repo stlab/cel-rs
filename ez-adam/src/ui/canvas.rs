@@ -16,10 +16,108 @@ use crate::ops::relationships::{
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
+#[cfg(test)]
+mod ownership_geometry_tests {
+    use super::*;
+    use crate::ops::cells::{add_cell, add_cell_node};
+
+    /// Reconnecting a live member is a no-op, not a precondition violation.
+    #[test]
+    fn repeated_connection_is_noop() {
+        let mut doc = Document::new("s");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let an = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let bn = add_cell_node(&mut doc, b, Point::new(100.0, 0.0));
+        let group = create_relationship(&mut doc, an, bn, Point::new(50.0, 0.0));
+        let before = doc.clone();
+        assert_eq!(
+            add_relationship_click(
+                &mut doc,
+                Some(NodeId::CellNode(an)),
+                NodeId::RelationshipGroup(group)
+            ),
+            ClickSequenceOutcome::NoOp
+        );
+        assert_eq!(doc, before);
+    }
+
+    /// Hit regions follow fixed screen dimensions, painter order, and diamond tips.
+    #[test]
+    fn hit_geometry_matches_screen_shapes() {
+        let mut doc = Document::new("s");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let an = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        for k in [0.5, 2.0] {
+            let transform = ViewTransform { x: 0.0, y: 0.0, k };
+            assert_eq!(
+                hit_test(&doc, &transform, Point::new(39.0, 0.0)),
+                Some(NodeId::CellNode(an))
+            );
+            assert_eq!(hit_test(&doc, &transform, Point::new(41.0, 0.0)), None);
+        }
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let bn = add_cell_node(&mut doc, b, Point::new(100.0, 0.0));
+        let group = create_relationship(&mut doc, an, bn, Point::new(0.0, 0.0));
+        let transform = ViewTransform::identity();
+        assert_eq!(
+            hit_test(&doc, &transform, Point::new(0.0, 0.0)),
+            Some(NodeId::RelationshipGroup(group))
+        );
+        let conditional = conditionals::add_conditional_with_formula(
+            &mut doc,
+            vec![],
+            "true",
+            Point::new(0.0, 0.0),
+        );
+        assert_eq!(
+            hit_test(&doc, &transform, Point::new(0.0, 0.0)),
+            Some(NodeId::ConditionalGroup(conditional))
+        );
+        assert_eq!(
+            hit_test(&doc, &transform, Point::new(16.0, 0.0)),
+            Some(NodeId::ConditionalGroup(conditional))
+        );
+        assert_eq!(
+            hit_test(&doc, &transform, Point::new(10.0, 10.0)),
+            Some(NodeId::CellNode(an))
+        );
+    }
+
+    /// A target error never completes an Add Conditional gesture.
+    #[test]
+    fn failed_conditional_click_is_not_completed() {
+        let mut doc = Document::new("s");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let an = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let bn = add_cell_node(&mut doc, b, Point::new(100.0, 0.0));
+        let group = create_relationship(&mut doc, an, bn, Point::new(50.0, 0.0));
+        let conditional = conditionals::add_conditional_with_formula(
+            &mut doc,
+            vec![],
+            "true",
+            Point::new(0.0, 0.0),
+        );
+        let outcome = add_conditional_click(
+            &mut doc,
+            Some(group),
+            NodeId::ConditionalGroup(conditional),
+            Point::new(0.0, 0.0),
+        );
+        assert_ne!(outcome, ClickSequenceOutcome::Completed);
+    }
+}
+
 /// Identifies a canvas node of any of the three kinds `ez-adam` places on
 /// the canvas, for selection and drag-target tracking. UI-only — not part
 /// of the Phase 1 `Document` model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// # Examples
+///
+/// `NodeId::CellNode(placement)` selects one placement rather than every placement
+/// sharing its underlying cell.
 pub enum NodeId {
     CellNode(CellNodeId),
     RelationshipGroup(RelationshipGroupId),
@@ -30,6 +128,11 @@ pub enum NodeId {
 /// UI-only state — `Document`'s stored positions are always canvas/world
 /// space, unaffected by this transform.
 #[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// # Examples
+///
+/// `ViewTransform { x: 10.0, y: 20.0, k: 2.0 }` maps the canvas origin to
+/// screen point `(10, 20)` at double scale.
 pub struct ViewTransform {
     pub x: f64,
     pub y: f64,
@@ -39,6 +142,10 @@ pub struct ViewTransform {
 impl ViewTransform {
     /// Returns the identity transform: no pan, 1:1 zoom.
     #[must_use]
+    ///
+    /// # Examples
+    ///
+    /// `ViewTransform::identity()` leaves canvas and screen coordinates equal.
     pub fn identity() -> Self {
         ViewTransform {
             x: 0.0,
@@ -54,6 +161,11 @@ impl ViewTransform {
 /// - Postcondition: `canvas_to_screen(transform, screen_to_canvas(transform, p)) == p`
 ///   (up to floating-point rounding).
 #[must_use]
+///
+/// # Examples
+///
+/// `screen_to_canvas(&ViewTransform::identity(), Point::new(4.0, 5.0))`
+/// returns the point unchanged.
 pub fn screen_to_canvas(transform: &ViewTransform, screen: Point) -> Point {
     Point::new(
         (screen.x - transform.x) / transform.k,
@@ -64,6 +176,11 @@ pub fn screen_to_canvas(transform: &ViewTransform, screen: Point) -> Point {
 /// Converts a canvas/world-space point into screen space, applying
 /// `transform`.
 #[must_use]
+///
+/// # Examples
+///
+/// Convert each stored node position with `canvas_to_screen(&transform, position)`
+/// before placing its fixed-screen-size shape.
 pub fn canvas_to_screen(transform: &ViewTransform, canvas: Point) -> Point {
     Point::new(
         canvas.x * transform.k + transform.x,
@@ -74,6 +191,10 @@ pub fn canvas_to_screen(transform: &ViewTransform, canvas: Point) -> Point {
 /// Returns `transform` shifted by `(dx, dy)` in screen-space pixels — a
 /// plain pan, unaffected by the current zoom level.
 #[must_use]
+///
+/// # Examples
+///
+/// `pan_by(&ViewTransform::identity(), 10.0, 20.0)` translates the view without zooming.
 pub fn pan_by(transform: &ViewTransform, dx: f64, dy: f64) -> ViewTransform {
     ViewTransform {
         x: transform.x + dx,
@@ -88,6 +209,10 @@ pub fn pan_by(transform: &ViewTransform, dx: f64, dy: f64) -> ViewTransform {
 ///
 /// - Precondition: `delta > 0.0`.
 #[must_use]
+///
+/// # Examples
+///
+/// `zoom_at(&transform, cursor, 2.0)` doubles scale while keeping the cursor's canvas point fixed.
 pub fn zoom_at(transform: &ViewTransform, cursor_screen: Point, delta: f64) -> ViewTransform {
     debug_assert!(transform.k != 0.0, "transform scale must not be zero");
     debug_assert!(delta > 0.0, "zoom delta must be positive");
@@ -107,6 +232,10 @@ pub fn zoom_at(transform: &ViewTransform, cursor_screen: Point, delta: f64) -> V
 /// - Precondition: `node` is a valid id in `doc` (a `CellNode`,
 ///   `RelationshipGroup`, or `ConditionalGroup` that actually exists).
 #[must_use]
+///
+/// # Examples
+///
+/// `node_position(&document, NodeId::CellNode(id))` reads a live placement's stored position.
 pub fn node_position(doc: &Document, node: NodeId) -> Point {
     match node {
         NodeId::CellNode(id) => doc.cell_nodes[id].position,
@@ -121,6 +250,11 @@ pub fn node_position(doc: &Document, node: NodeId) -> Point {
 ///
 /// - Complexity: O(n) in the total number of nodes in `doc`.
 #[must_use]
+///
+/// # Examples
+///
+/// Pass the two canvas-space drag endpoints to `nodes_in_rect(&document, start, end)`
+/// to select enclosed node centers in either drag direction.
 pub fn nodes_in_rect(doc: &Document, corner_a: Point, corner_b: Point) -> Vec<NodeId> {
     let min_x = corner_a.x.min(corner_b.x);
     let max_x = corner_a.x.max(corner_b.x);
@@ -149,6 +283,11 @@ pub fn nodes_in_rect(doc: &Document, corner_a: Point, corner_b: Point) -> Vec<No
 
 /// The visual line style of an [`Edge`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// # Examples
+///
+/// Inspect each `compute_edges(&document)` edge's style to distinguish membership
+/// lines from conditional-control dependencies.
 pub enum EdgeStyle {
     /// A relationship-group ↔ cell edge, or a conditional ↔ condition-cell
     /// edge.
@@ -162,6 +301,11 @@ pub enum EdgeStyle {
 /// One edge to render: a line from `from` to `to` in canvas/world space,
 /// drawn per `style`.
 #[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// # Examples
+///
+/// `compute_edges(&document)` supplies the endpoint positions and styles consumed
+/// by the canvas's line layer.
 pub struct Edge {
     pub from: Point,
     pub to: Point,
@@ -174,9 +318,15 @@ pub struct Edge {
 /// its `default`/branch `enabled_groups`, deduplicated), and one solid edge
 /// per conditional-group's condition cell(s).
 ///
-/// - Complexity: O(n) in the total number of relationship-group members
-///   plus conditional-group branch/default entries.
+/// - Complexity: expected O(m + g + d·p) time and O(m + g + d) space for
+///   relationship members m, enabled-group references g, condition dependencies d,
+///   and cell placements p.
 #[must_use]
+///
+/// # Examples
+///
+/// Render `compute_edges(&document)` before the node layer so membership and
+/// conditional dependency lines remain behind their endpoints.
 pub fn compute_edges(doc: &Document) -> Vec<Edge> {
     let mut edges = Vec::new();
     for (_, group) in &doc.relationship_groups {
@@ -192,11 +342,11 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
     // `cond_id` is available directly — no need to recover it separately.
     let mut seen = HashSet::new();
     for (cond_id, cond) in &doc.conditional_groups {
-        let mut linked_groups: Vec<_> = cond.default.to_vec();
-        for branch in &cond.branches {
-            linked_groups.extend(branch.enabled_groups.iter().copied());
-        }
-        for group_id in linked_groups {
+        for &group_id in cond.default.iter().chain(
+            cond.branches
+                .iter()
+                .flat_map(|branch| &branch.enabled_groups),
+        ) {
             if seen.insert((cond_id, group_id)) {
                 edges.push(Edge {
                     from: cond.position,
@@ -344,7 +494,15 @@ fn rubber_band_rect(
 /// cursor happens to be over the same-origin `<svg>` background and wrong
 /// over any shape. Left as `client_coordinates()` pending a real
 /// display-based check (see #177) rather than guessing further.
+///
+/// - Complexity: expected O(p + t) node construction per render for p placement slots
+///   and t label bytes, plus [`compute_edges`] and child rendering.
 #[component]
+///
+/// # Examples
+///
+/// Inside a Dioxus scope, `rsx! { Canvas { document, selection, active_tool, view_transform } }`
+/// binds the canvas to editor state and its independent view transform.
 pub fn Canvas(
     document: Signal<Document>,
     view_transform: Signal<ViewTransform>,
@@ -354,6 +512,7 @@ pub fn Canvas(
     let mut drag_mode = use_signal(|| None::<DragMode>);
     let mut pending_first_click = use_signal(|| None::<NodeId>);
     let mut pending_conditional_source = use_signal(|| None::<RelationshipGroupId>);
+    let mut gesture_error = use_signal(|| None::<&'static str>);
 
     // Both Add-Relationship's and Add-Conditional's click-sequence state
     // span two separate mousedown events (click A, then later click B).
@@ -380,6 +539,9 @@ pub fn Canvas(
     let band = rubber_band_rect(*drag_mode.read(), &transform);
 
     rsx! {
+        if let Some(error) = *gesture_error.read() {
+            div { role: "alert", style: "position:absolute;bottom:12px;left:12px;z-index:2;", "{error}" }
+        }
         svg {
             class: "canvas",
             // Fills its containing block exactly, with no `viewBox` — so 1
@@ -398,6 +560,7 @@ pub fn Canvas(
             height: "100%",
             style: "position: absolute; top: 0; left: 0; display: block;",
             onmousedown: move |evt: Event<MouseData>| {
+                gesture_error.set(None);
                 let data = evt.data();
                 let client_pt = data.client_coordinates();
                 let screen_point = Point::new(client_pt.x, client_pt.y);
@@ -435,6 +598,10 @@ pub fn Canvas(
                                 ClickSequenceOutcome::NoOp => {
                                     pending_first_click.set(None);
                                 }
+                                ClickSequenceOutcome::Failed(error) => {
+                                    gesture_error.set(Some(error));
+                                    pending_first_click.set(None);
+                                }
                             }
                         }
                     }
@@ -458,6 +625,10 @@ pub fn Canvas(
                                     active_tool.set(crate::ui::toolbar::Tool::Select);
                                 }
                                 ClickSequenceOutcome::NoOp => {
+                                    pending_conditional_source.set(None);
+                                }
+                                ClickSequenceOutcome::Failed(error) => {
+                                    gesture_error.set(Some(error));
                                     pending_conditional_source.set(None);
                                 }
                             }
@@ -653,7 +824,7 @@ pub fn Canvas(
     }
 }
 
-/// The half-height (in canvas units) treated as "on" a cell node for hit
+/// The half-height (in screen pixels) treated as "on" a cell node for hit
 /// testing — matches [`Canvas`]'s rendered cell box height. The half-width
 /// varies per cell (see [`cell_label_half_width`]) since the box widens to
 /// fit longer names. Relationship/conditional groups use a fixed
@@ -679,37 +850,51 @@ fn cell_label_half_width(name: &str) -> f64 {
     estimated.max(MIN_HALF_WIDTH)
 }
 
-/// Returns the topmost node under `screen_point` (converted to canvas
-/// space via `transform`), or `None` if no node is there. Checks cell
-/// nodes, then relationship groups, then conditional groups, matching
-/// [`Canvas`]'s draw order (later-drawn shapes are checked first only in
-/// that sense — ties within a kind are broken by `SlotMap` iteration
-/// order, which is unspecified but acceptable since nodes don't overlap
-/// in practice).
+/// Returns the last-painted shape under a screen-space point, or `None`.
 ///
-/// - Complexity: O(n) in the total number of nodes in `doc`.
+/// Shape sizes stay fixed in screen pixels at every zoom, matching [`Canvas`].
+///
+/// - Complexity: O(n + t) time for nodes n and cell-label characters t; O(1) space.
 #[must_use]
+///
+/// # Examples
+///
+/// `hit_test(&document, &transform, cursor)` returns the topmost visible node
+/// whose screen-space shape contains the cursor.
 pub fn hit_test(doc: &Document, transform: &ViewTransform, screen_point: Point) -> Option<NodeId> {
-    let canvas_point = screen_to_canvas(transform, screen_point);
-    for (id, node) in &doc.cell_nodes {
-        let dx = (canvas_point.x - node.position.x).abs();
-        let dy = (canvas_point.y - node.position.y).abs();
-        let half_width = cell_label_half_width(&doc.cells[node.cell].name);
-        if dx <= half_width && dy <= CELL_HALF_HEIGHT {
-            return Some(NodeId::CellNode(id));
-        }
-    }
-    for (id, group) in &doc.relationship_groups {
-        if distance(canvas_point, group.position) <= GROUP_HIT_RADIUS {
-            return Some(NodeId::RelationshipGroup(id));
-        }
-    }
-    for (id, group) in &doc.conditional_groups {
-        if distance(canvas_point, group.position) <= GROUP_HIT_RADIUS {
-            return Some(NodeId::ConditionalGroup(id));
-        }
-    }
-    None
+    let conditional = doc
+        .conditional_groups
+        .iter()
+        .filter(|(_, group)| {
+            let p = canvas_to_screen(transform, group.position);
+            (screen_point.x - p.x).abs() + (screen_point.y - p.y).abs()
+                <= GROUP_HIT_RADIUS * std::f64::consts::SQRT_2
+        })
+        .map(|(id, _)| NodeId::ConditionalGroup(id))
+        .last();
+    conditional
+        .or_else(|| {
+            doc.relationship_groups
+                .iter()
+                .filter(|(_, group)| {
+                    distance(screen_point, canvas_to_screen(transform, group.position))
+                        <= GROUP_HIT_RADIUS
+                })
+                .map(|(id, _)| NodeId::RelationshipGroup(id))
+                .last()
+        })
+        .or_else(|| {
+            doc.cell_nodes
+                .iter()
+                .filter(|(_, node)| {
+                    let p = canvas_to_screen(transform, node.position);
+                    (screen_point.x - p.x).abs()
+                        <= cell_label_half_width(&doc.cells[node.cell].name)
+                        && (screen_point.y - p.y).abs() <= CELL_HALF_HEIGHT
+                })
+                .map(|(id, _)| NodeId::CellNode(id))
+                .last()
+        })
 }
 
 /// Returns the Euclidean distance between `a` and `b`.
@@ -730,6 +915,11 @@ fn wheel_zoom_delta(delta_y: f64) -> f64 {
 /// document changed) apart from a first click or a mismatched click that
 /// merely happens to also leave nothing pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// # Examples
+///
+/// Keep the pending node from `Pending(node)`, return to selection on `Completed`,
+/// and display `Failed(message)` without claiming that the connection succeeded.
 pub enum ClickSequenceOutcome<T> {
     /// This was the first click of the sequence; `T` is the pending state
     /// to remember for the next click.
@@ -741,6 +931,8 @@ pub enum ClickSequenceOutcome<T> {
     /// or a first click on something that can't start one) — any prior
     /// pending state should be discarded.
     NoOp,
+    /// The target rejected the gesture; the tool remains active and displays the error.
+    Failed(&'static str),
 }
 
 /// Advances the Add-Relationship tool's click sequence: given whatever was
@@ -757,6 +949,11 @@ pub enum ClickSequenceOutcome<T> {
 ///   member of `group`, returns `Completed`.
 /// - Any other combination (e.g. a bare first click on a group, or two
 ///   groups) → `NoOp` with no mutation — not a meaningful gesture.
+///
+/// # Examples
+///
+/// Start with `pending = None`; pass the first clicked cell to obtain a pending
+/// connection, then pass the second cell or existing group to complete it.
 pub fn add_relationship_click(
     doc: &mut Document,
     pending_first_click: Option<NodeId>,
@@ -766,6 +963,9 @@ pub fn add_relationship_click(
         (None, NodeId::CellNode(_)) => ClickSequenceOutcome::Pending(clicked),
         (None, _) => ClickSequenceOutcome::NoOp,
         (Some(NodeId::CellNode(a)), NodeId::CellNode(b)) => {
+            if a == b || doc.cell_nodes[a].cell == doc.cell_nodes[b].cell {
+                return ClickSequenceOutcome::NoOp;
+            }
             let pa = doc.cell_nodes[a].position;
             let pb = doc.cell_nodes[b].position;
             let midpoint = Point::new((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0);
@@ -774,6 +974,13 @@ pub fn add_relationship_click(
         }
         (Some(NodeId::CellNode(cell)), NodeId::RelationshipGroup(group))
         | (Some(NodeId::RelationshipGroup(group)), NodeId::CellNode(cell)) => {
+            if doc.relationship_groups[group]
+                .members
+                .iter()
+                .any(|(node, _)| *node == cell)
+            {
+                return ClickSequenceOutcome::NoOp;
+            }
             add_member(doc, group, cell);
             ClickSequenceOutcome::Completed
         }
@@ -789,14 +996,15 @@ pub fn add_relationship_click(
 ///
 /// - `(None, RelationshipGroup(g))` → `Pending(g)`.
 /// - `(Some(g), CellNode(_))` or `(Some(g), ConditionalGroup(_))` →
-///   completes the gesture (see [`add_conditional_target`]; any error it
-///   returns — e.g. an existing conditional with no branches yet — is
-///   swallowed here the same way [`add_relationship_click`] never surfaces
-///   one, since neither tool has an error-reporting UI path today), returns
-///   `Completed`.
+///   returns `Completed` on success or `Failed` with the target error.
 /// - Any other combination (e.g. a bare first click on a cell, or two
 ///   relationship groups) → `NoOp` with no mutation — not a meaningful
 ///   gesture.
+///
+/// # Examples
+///
+/// First click a relationship group, then click a Boolean cell or existing
+/// conditional; only a `Completed` outcome finishes the connection tool.
 pub fn add_conditional_click(
     doc: &mut Document,
     pending_source: Option<RelationshipGroupId>,
@@ -807,8 +1015,10 @@ pub fn add_conditional_click(
         (None, NodeId::RelationshipGroup(g)) => ClickSequenceOutcome::Pending(g),
         (None, _) => ClickSequenceOutcome::NoOp,
         (Some(g), NodeId::CellNode(_)) | (Some(g), NodeId::ConditionalGroup(_)) => {
-            let _ = add_conditional_target(doc, g, clicked, position);
-            ClickSequenceOutcome::Completed
+            match add_conditional_target(doc, g, clicked, position) {
+                Ok(()) => ClickSequenceOutcome::Completed,
+                Err(error) => ClickSequenceOutcome::Failed(error),
+            }
         }
         _ => ClickSequenceOutcome::NoOp,
     }
@@ -841,6 +1051,11 @@ pub fn add_conditional_click(
 /// Returns `Err` if `target` is not a cell node or an existing conditional
 /// group (e.g. targeting another relationship group is not a meaningful
 /// gesture for this tool).
+///
+/// # Examples
+///
+/// Connect a pending relationship to a Boolean placement to create a two-row
+/// truth table; a non-Boolean placement instead starts a scalar formula draft.
 pub fn add_conditional_target(
     doc: &mut Document,
     group: RelationshipGroupId,
@@ -907,6 +1122,11 @@ fn attach_group_to_conditional(
 /// `ops::canvas::move_node` in Phase 1 to call).
 ///
 /// - Precondition: `node` is a valid id in `doc`.
+///
+/// # Examples
+///
+/// After converting two cursor positions to canvas space, call
+/// `apply_drag_delta(&mut document, selected, delta)` with their displacement.
 pub fn apply_drag_delta(doc: &mut Document, node: NodeId, delta: Point) {
     let apply = |p: &mut Point| {
         p.x += delta.x;
@@ -923,7 +1143,14 @@ pub fn apply_drag_delta(doc: &mut Document, node: NodeId, delta: Point) {
 /// selected cell/conditional nodes, which this tool doesn't act on),
 /// offsetting each duplicate by `offset`. Returns the new groups' ids.
 ///
-/// - Complexity: O(n) in `selection.len()`.
+/// - Precondition: selected relationship IDs are live in `doc`.
+/// - Complexity: O(s + m + t) time and space for selected IDs, copied member
+///   placements, and copied display-name/formula text.
+///
+/// # Examples
+///
+/// Select several relationship groups and invoke this one-shot action to copy
+/// each of them; selected cell and conditional nodes remain unchanged.
 pub fn duplicate_selection(
     doc: &mut Document,
     selection: &HashSet<NodeId>,
@@ -952,6 +1179,11 @@ pub fn duplicate_selection(
 ///
 /// - Complexity: O(n·m) — O(n) selected nodes, each triggering an O(m)
 ///   cascade through the rest of `doc`.
+///
+/// # Examples
+///
+/// `delete_selection(&mut document, &selection)` removes the selected objects
+/// while tolerating cascading removal of other selected IDs.
 pub fn delete_selection(doc: &mut Document, selection: &HashSet<NodeId>) {
     for node in selection {
         match node {
@@ -984,6 +1216,7 @@ mod tests {
     use crate::ops::relationships::create_relationship;
 
     #[test]
+    /// Dropping a conditional connection onto a Boolean creates a truth-table selector.
     fn add_conditional_target_onto_a_bool_cell_creates_a_cells_mode_conditional() {
         let mut doc = Document::new("demo");
         let flag = add_cell(&mut doc, "flag", CT::Bool);
@@ -1006,6 +1239,7 @@ mod tests {
     }
 
     #[test]
+    /// Non-Boolean conditional targets start an editable scalar formula.
     fn add_conditional_target_onto_a_non_bool_cell_starts_formula_mode() {
         let mut doc = Document::new("demo");
         let threshold = add_cell(&mut doc, "threshold", CT::f64());
@@ -1034,6 +1268,7 @@ mod tests {
     }
 
     #[test]
+    /// Unsupported conditional targets return an error.
     fn add_conditional_target_onto_a_non_cell_target_errors() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CT::i64());
@@ -1053,6 +1288,7 @@ mod tests {
     }
 
     #[test]
+    /// Existing conditional targets gain the connected relationship.
     fn add_conditional_target_onto_an_existing_conditional_attaches_the_group() {
         let mut doc = Document::new("demo");
         let flag = add_cell(&mut doc, "flag", CT::Bool);
@@ -1095,6 +1331,7 @@ mod tests {
     }
 
     #[test]
+    /// Empty conditional tables fail attachment explicitly.
     fn add_conditional_target_onto_a_conditional_with_no_branches_errors() {
         use crate::ops::conditionals::add_conditional_with_formula;
 
@@ -1118,6 +1355,7 @@ mod tests {
     }
 
     #[test]
+    /// The first relationship click begins a conditional connection.
     fn add_conditional_click_first_click_on_a_relationship_group_sets_pending() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CT::i64());
@@ -1138,6 +1376,7 @@ mod tests {
     }
 
     #[test]
+    /// Conditional connections ignore an unsupported first click.
     fn add_conditional_click_first_click_on_a_non_group_is_a_no_op() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CT::i64());
@@ -1154,6 +1393,7 @@ mod tests {
     }
 
     #[test]
+    /// Completing a connection onto a Boolean creates its conditional group.
     fn add_conditional_click_second_click_on_a_bool_cell_creates_a_conditional() {
         let mut doc = Document::new("demo");
         let flag = add_cell(&mut doc, "flag", CT::Bool);
@@ -1176,6 +1416,7 @@ mod tests {
     }
 
     #[test]
+    /// Completing a connection onto a conditional attaches the pending relationship.
     fn add_conditional_click_second_click_on_an_existing_conditional_attaches_the_group() {
         let mut doc = Document::new("demo");
         let flag = add_cell(&mut doc, "flag", CT::Bool);
@@ -1216,6 +1457,7 @@ mod tests {
     }
 
     #[test]
+    /// An invalid second target cancels the gesture without document edits.
     fn add_conditional_click_mismatched_second_click_clears_pending_with_no_mutation() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CT::i64());
@@ -1241,6 +1483,7 @@ mod tests {
     }
 
     #[test]
+    /// The first cell click begins a relationship connection.
     fn add_relationship_click_first_click_on_a_cell_sets_pending() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1256,6 +1499,7 @@ mod tests {
     }
 
     #[test]
+    /// Connecting two cells creates a relationship at their midpoint.
     fn add_relationship_click_second_click_on_a_cell_creates_a_group_at_the_midpoint() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1275,6 +1519,7 @@ mod tests {
     }
 
     #[test]
+    /// Connecting a cell to a relationship adds its membership.
     fn add_relationship_click_second_click_on_an_existing_group_adds_a_member() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1296,6 +1541,7 @@ mod tests {
     }
 
     #[test]
+    /// Relationship connections ignore noncell starting targets.
     fn add_relationship_click_first_click_on_a_non_cell_stays_pending_none() {
         // Clicking a relationship group first (not a cell) doesn't start a
         // valid pending state for creating a NEW relationship — only
@@ -1317,6 +1563,7 @@ mod tests {
     }
 
     #[test]
+    /// Position queries return a cell placement's stored canvas coordinates.
     fn node_position_returns_a_cell_nodes_position() {
         let mut doc = Document::new("demo");
         let cell = add_cell(&mut doc, "a", CellType::i64());
@@ -1328,6 +1575,7 @@ mod tests {
     }
 
     #[test]
+    /// Rectangular selection includes only enclosed node centers.
     fn nodes_in_rect_includes_only_nodes_within_the_bounds() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1342,6 +1590,7 @@ mod tests {
     }
 
     #[test]
+    /// Rectangular selection is independent of drag direction.
     fn nodes_in_rect_handles_corners_given_in_either_order() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1354,6 +1603,7 @@ mod tests {
     }
 
     #[test]
+    /// Identity transforms preserve both screen and canvas coordinates.
     fn identity_transform_is_a_no_op_both_ways() {
         let t = ViewTransform::identity();
         let p = Point::new(3.0, 4.0);
@@ -1362,6 +1612,7 @@ mod tests {
     }
 
     #[test]
+    /// Valid view transforms invert their coordinate conversion.
     fn screen_to_canvas_and_back_round_trips() {
         let t = ViewTransform {
             x: 10.0,
@@ -1376,6 +1627,7 @@ mod tests {
     }
 
     #[test]
+    /// Coordinate conversion accounts for both pan offsets and zoom.
     fn screen_to_canvas_applies_pan_and_zoom_correctly() {
         // A view panned by (10, 20) and zoomed 2x: screen (30, 40) should
         // map to canvas ((30-10)/2, (40-20)/2) = (10, 10).
@@ -1389,6 +1641,7 @@ mod tests {
     }
 
     #[test]
+    /// Panning updates offsets without changing scale.
     fn pan_by_shifts_x_and_y_only() {
         let t = ViewTransform {
             x: 5.0,
@@ -1407,6 +1660,7 @@ mod tests {
     }
 
     #[test]
+    /// Cursor-centered zoom preserves the canvas point under the cursor.
     fn zoom_at_keeps_the_cursors_canvas_point_fixed() {
         let t = ViewTransform {
             x: 0.0,
@@ -1425,6 +1679,7 @@ mod tests {
     }
 
     #[test]
+    /// Zoom applies the requested multiplicative scale change.
     fn zoom_at_multiplies_scale_by_delta() {
         let t = ViewTransform {
             x: 0.0,
@@ -1436,33 +1691,39 @@ mod tests {
     }
 
     #[test]
+    /// A zero wheel delta leaves zoom unchanged.
     fn wheel_zoom_delta_of_zero_is_a_no_op_multiplier() {
         assert!((wheel_zoom_delta(0.0) - 1.0).abs() < 1e-9);
     }
 
     #[test]
+    /// Large positive wheel deltas respect the lower zoom multiplier.
     fn wheel_zoom_delta_clamps_a_large_positive_delta_y_to_the_lower_bound() {
         // A large positive delta_y (scroll down, zoom out) clamps to 1.0 - 0.5.
         assert!((wheel_zoom_delta(100_000.0) - 0.5).abs() < 1e-9);
     }
 
     #[test]
+    /// Large negative wheel deltas respect the upper zoom multiplier.
     fn wheel_zoom_delta_clamps_a_large_negative_delta_y_to_the_upper_bound() {
         // A large negative delta_y (scroll up, zoom in) clamps to 1.0 + 0.5.
         assert!((wheel_zoom_delta(-100_000.0) - 1.5).abs() < 1e-9);
     }
 
     #[test]
+    /// Selected nodes use the selection stroke color.
     fn node_stroke_selected_node_returns_red() {
         assert_eq!(node_stroke(true), "red");
     }
 
     #[test]
+    /// Unselected nodes use the ordinary stroke color.
     fn node_stroke_unselected_node_returns_black() {
         assert_eq!(node_stroke(false), "black");
     }
 
     #[test]
+    /// Hit testing finds points inside a cell's visible bounds.
     fn hit_test_finds_a_cell_node_near_its_position() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1475,6 +1736,7 @@ mod tests {
     }
 
     #[test]
+    /// Empty canvas points produce no hit target.
     fn hit_test_returns_none_for_empty_canvas_area() {
         let doc = Document::new("demo");
         let t = ViewTransform::identity();
@@ -1482,17 +1744,20 @@ mod tests {
     }
 
     #[test]
+    /// Short labels retain the minimum visible cell width.
     fn cell_label_half_width_has_a_minimum_for_short_names() {
         assert_eq!(cell_label_half_width("a"), 40.0);
     }
 
     #[test]
+    /// Long labels expand their visible cell bounds.
     fn cell_label_half_width_widens_for_long_names() {
         let long_name = "a_very_long_cell_name_indeed";
         assert!(cell_label_half_width(long_name) > 40.0);
     }
 
     #[test]
+    /// Long-label hit bounds extend beyond the minimum box width.
     fn hit_test_finds_a_cell_with_a_long_name_beyond_the_minimum_box_width() {
         let mut doc = Document::new("demo");
         let long_name = "a_very_long_cell_name_indeed";
@@ -1502,9 +1767,8 @@ mod tests {
         let half_width = cell_label_half_width(long_name);
         assert!(half_width > 40.0, "test assumes this name widens the box");
 
-        // 39 units out is inside the old fixed 40.0 half-width, but well
-        // within this longer name's actual (wider) box.
-        let hit = hit_test(&doc, &t, Point::new(39.0, 0.0));
+        // This lies beyond the old fixed box and inside the widened label box.
+        let hit = hit_test(&doc, &t, Point::new(60.0, 0.0));
         assert_eq!(hit, Some(NodeId::CellNode(node)));
 
         // Just past the actual (widened) box edge should miss.
@@ -1513,6 +1777,7 @@ mod tests {
     }
 
     #[test]
+    /// Node dragging applies its canvas-space displacement.
     fn apply_drag_delta_moves_a_cell_node() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1524,6 +1789,7 @@ mod tests {
     }
 
     #[test]
+    /// Dragging a node starts node movement.
     fn start_drag_hitting_a_node_returns_node_mode() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1542,6 +1808,7 @@ mod tests {
     }
 
     #[test]
+    /// Node hits take precedence over shift-based rubber-band selection.
     fn start_drag_hitting_a_node_returns_node_mode_even_with_shift_held() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1560,6 +1827,7 @@ mod tests {
     }
 
     #[test]
+    /// Ordinary empty-canvas drags pan the view.
     fn start_drag_on_empty_canvas_without_shift_returns_pan_mode() {
         let doc = Document::new("demo");
         let t = ViewTransform::identity();
@@ -1575,6 +1843,7 @@ mod tests {
     }
 
     #[test]
+    /// Shift-dragging empty canvas starts rectangular selection.
     fn start_drag_on_empty_canvas_with_shift_returns_rubber_band_mode() {
         let doc = Document::new("demo");
         let t = ViewTransform::identity();
@@ -1591,6 +1860,7 @@ mod tests {
     }
 
     #[test]
+    /// Node movement does not display a rubber-band rectangle.
     fn rubber_band_rect_returns_none_for_node_mode() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1604,6 +1874,7 @@ mod tests {
     }
 
     #[test]
+    /// View panning does not display a rubber-band rectangle.
     fn rubber_band_rect_returns_none_for_pan_mode() {
         let t = ViewTransform::identity();
         let mode = Some(DragMode::Pan {
@@ -1613,12 +1884,14 @@ mod tests {
     }
 
     #[test]
+    /// Idle canvases have no rubber-band rectangle.
     fn rubber_band_rect_returns_none_when_no_drag_is_active() {
         let t = ViewTransform::identity();
         assert_eq!(rubber_band_rect(None, &t), None);
     }
 
     #[test]
+    /// Rubber-band rectangles span both gesture endpoints.
     fn rubber_band_rect_computes_bounds_from_corners() {
         let t = ViewTransform::identity();
         let mode = Some(DragMode::RubberBand {
@@ -1629,6 +1902,7 @@ mod tests {
     }
 
     #[test]
+    /// Rubber-band bounds are independent of drag direction.
     fn rubber_band_rect_handles_corners_given_in_either_order() {
         let t = ViewTransform::identity();
         let mode = Some(DragMode::RubberBand {
@@ -1639,6 +1913,7 @@ mod tests {
     }
 
     #[test]
+    /// Rubber-band rendering transforms canvas corners into screen coordinates.
     fn rubber_band_rect_applies_the_view_transform() {
         let t = ViewTransform {
             x: 10.0,
@@ -1654,6 +1929,7 @@ mod tests {
     }
 
     #[test]
+    /// Duplication copies every selected relationship and ignores selected cells.
     fn duplicate_selection_duplicates_every_selected_relationship_group() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1664,14 +1940,18 @@ mod tests {
 
         let mut selection = std::collections::HashSet::new();
         selection.insert(NodeId::RelationshipGroup(group));
+        let other = create_relationship(&mut doc, a_node, b_node, Point::new(50.0, 50.0));
+        selection.insert(NodeId::RelationshipGroup(other));
+        selection.insert(NodeId::CellNode(a_node));
 
         let duplicated = duplicate_selection(&mut doc, &selection, Point::new(0.0, 50.0));
 
-        assert_eq!(duplicated.len(), 1);
-        assert_eq!(doc.relationship_groups_in_order().count(), 2);
+        assert_eq!(duplicated.len(), 2);
+        assert_eq!(doc.relationship_groups_in_order().count(), 4);
     }
 
     #[test]
+    /// Selecting only unsupported node kinds leaves duplication unchanged.
     fn duplicate_selection_ignores_non_relationship_group_selections() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1686,6 +1966,7 @@ mod tests {
     }
 
     #[test]
+    /// Deleting a cell placement removes the selected placement.
     fn delete_selection_deletes_a_selected_cell_node() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1700,6 +1981,7 @@ mod tests {
     }
 
     #[test]
+    /// Deleting a relationship removes that group.
     fn delete_selection_deletes_a_selected_relationship_group() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1719,6 +2001,7 @@ mod tests {
     }
 
     #[test]
+    /// Deleting a conditional removes that group.
     fn delete_selection_deletes_a_selected_conditional_group() {
         use crate::ops::conditionals::add_conditional_with_formula;
 
@@ -1734,6 +2017,7 @@ mod tests {
     }
 
     #[test]
+    /// Cascading deletions tolerate other selections becoming stale.
     fn delete_selection_handles_cross_invalidation_without_panicking() {
         // Selecting both a relationship group AND its only two cell nodes:
         // deleting the second cell node cascades to delete the
@@ -1767,6 +2051,7 @@ mod edge_tests {
     use crate::ops::relationships::create_relationship;
 
     #[test]
+    /// Relationship rendering connects every member placement.
     fn compute_edges_connects_relationship_group_to_each_member() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
@@ -1782,6 +2067,7 @@ mod edge_tests {
     }
 
     #[test]
+    /// Conditional edges deduplicate groups shared by defaults and branches.
     fn compute_edges_connects_conditional_group_to_default_and_branch_groups_once_each() {
         use crate::model::conditional_group::CellValueLiteral;
         use crate::ops::conditionals::{
@@ -1819,6 +2105,7 @@ mod edge_tests {
     }
 
     #[test]
+    /// Conditional rendering connects its selector's placed cell.
     fn compute_edges_connects_conditional_group_to_its_condition_cell() {
         use crate::ops::conditionals::add_conditional_from_bool_cells;
 
