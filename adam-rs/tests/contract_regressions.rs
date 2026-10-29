@@ -234,3 +234,149 @@ fn contributors_before_propagation_ignore_unselected_branches() {
         .unwrap();
     assert_eq!(sheet.contributing_cells(output), HashSet::from([output]));
 }
+
+/// Checks filtered contributor roots through an Out alongside independent reversible pairs.
+#[test]
+fn disconnected_relationships_preserve_filtered_contributors() {
+    for pair_count in [0, 4, 8, 12] {
+        let mut sheet = Sheet::new();
+        let target = sheet.add_cell(5_i32);
+        let output = sheet.add_cell(0_i32);
+        let bound = sheet.add_cell(10_i32);
+        sheet
+            .add_filter(
+                target,
+                Filter::from_fn_1(bound, |v: &i32, hi: &i32| Ok((*v).min(*hi))),
+            )
+            .unwrap();
+        sheet
+            .add_out(
+                Method::from_fn_1_1(target, output, |v: &i32| Ok(*v)),
+                vec![],
+            )
+            .unwrap();
+        let pairs: Vec<_> = (0..pair_count)
+            .map(|_| (sheet.add_cell(1_i32), sheet.add_cell(1_i32)))
+            .collect();
+        for &(a, b) in pairs.iter().rev() {
+            sheet
+                .add_relationship(vec![
+                    Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+                    Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+                ])
+                .unwrap();
+        }
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(target, target, |v: &i32| Ok(*v))])
+            .unwrap();
+        let started = std::time::Instant::now();
+        sheet.propagate().unwrap();
+        let propagation = started.elapsed();
+        assert!(!sheet.is_forced(target));
+        assert!(!sheet.is_source(target));
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            assert_eq!(sheet.contributing_cells(output), HashSet::from([target]));
+        }
+        eprintln!(
+            "independent_pairs={pair_count}; propagation={propagation:?}; three_queries={:?}",
+            started.elapsed()
+        );
+    }
+}
+
+/// Preserves completed active-set contributors through dirty structure and both failure phases.
+#[test]
+fn filtered_contributors_keep_completed_active_graph_until_success() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(false);
+    let target = sheet.add_cell(5_i32);
+    let peer = sheet.add_cell(5_i32);
+    let bound = sheet.add_cell(10_i32);
+    let output = sheet.add_cell(0_i32);
+    let fail_method = sheet.add_cell(false);
+    let fail_requirement = sheet.add_cell(false);
+    let failure_output = sheet.add_cell(false);
+    sheet
+        .add_filter(
+            target,
+            Filter::from_fn_1(bound, |v: &i32, hi: &i32| Ok((*v).min(*hi))),
+        )
+        .unwrap();
+    sheet
+        .add_out(
+            Method::from_fn_1_1(target, output, |v: &i32| Ok(*v)),
+            vec![adam_rs::Requirement::from_fn_1(
+                fail_requirement,
+                |fail: &bool| {
+                    if *fail {
+                        anyhow::bail!("requirement failure");
+                    }
+                    Ok(true)
+                },
+            )],
+        )
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            fail_method,
+            failure_output,
+            |fail: &bool| {
+                if *fail {
+                    anyhow::bail!("method failure");
+                }
+                Ok(false)
+            },
+        )])
+        .unwrap();
+    let reversible = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(target, peer, |v: &i32| Ok(*v)),
+            Method::from_fn_1_1(peer, target, |v: &i32| Ok(*v)),
+        ])
+        .unwrap();
+    let self_writer = sheet
+        .add_relationship(vec![Method::from_fn_1_1(target, target, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![true], vec![self_writer])],
+            vec![reversible],
+        )
+        .unwrap();
+    sheet.propagate().unwrap();
+    let previous_roots = HashSet::from([mode, target, peer, bound]);
+    assert!(!sheet.is_source(target));
+    assert_eq!(sheet.contributing_cells(output), previous_roots);
+
+    sheet.write(mode, true).unwrap();
+    sheet.write(target, 7).unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(peer, peer, |v: &i32| Ok(*v))])
+        .unwrap();
+    assert_eq!(sheet.contributing_cells(output), previous_roots);
+    sheet.write(fail_method, true).unwrap();
+    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
+    assert_eq!(sheet.read::<i32>(output).unwrap(), &5);
+    assert_eq!(sheet.contributing_cells(output), previous_roots);
+
+    sheet.write(fail_method, false).unwrap();
+    sheet.write(fail_requirement, true).unwrap();
+    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
+    assert_eq!(sheet.read::<i32>(output).unwrap(), &7);
+    assert_eq!(sheet.contributing_cells(output), previous_roots);
+
+    sheet.write(fail_requirement, false).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        sheet.contributing_cells(output),
+        HashSet::from([mode, target])
+    );
+    sheet.write(mode, false).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        sheet.contributing_cells(output),
+        HashSet::from([mode, target, peer])
+    );
+}

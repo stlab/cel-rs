@@ -88,6 +88,45 @@ pub(crate) fn can_be_source(
     matching::Assignment::solve_acyclic(relationships, active, &HashSet::from([cell])).is_some()
 }
 
+/// Returns the complete active relationship component touching `cell`.
+///
+/// Connectivity is undirected through every declared input/output cell, including
+/// self-referencing and alternative-method outputs. Filter arguments are not edges
+/// of the assignment graph. Unknown or isolated cells have an empty component.
+///
+/// - Precondition: both adjacency directions describe the same owning graph, and
+///   every active relationship belongs to `relationships`.
+/// - Complexity: Expected O(1 + A + D + E) time and O(V + R) auxiliary space, where A
+///   is active relationships checked in debug builds, D is all adjacency entries of
+///   visited cells (including inactive relationships), E is adjacent-cell entries
+///   of visited relationships, and V/R are visited cells/active relationships.
+pub(crate) fn active_relationship_component(
+    cells: &SlotMap<CellId, CellData>,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+    cell: CellId,
+) -> HashSet<RelationshipId> {
+    debug_assert!(active.iter().all(|id| relationships.contains_key(*id)));
+    let mut component = HashSet::new();
+    let mut visited = HashSet::from([cell]);
+    let mut stack = vec![cell];
+    while let Some(current) = stack.pop() {
+        let Some(data) = cells.get(current) else {
+            continue;
+        };
+        for &relationship in &data.adj {
+            if active.contains(&relationship) && component.insert(relationship) {
+                for &adjacent in &relationships[relationship].adj {
+                    if visited.insert(adjacent) {
+                        stack.push(adjacent);
+                    }
+                }
+            }
+        }
+    }
+    component
+}
+
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
 /// source cell's filter against its (now-settled) current argument values.
 ///
@@ -341,6 +380,121 @@ mod tests {
     use crate::planner::PlanStep;
     use crate::{Error, Filter, Method, Sheet};
     use std::collections::HashSet;
+
+    /// Includes all active claim/dependency edges while excluding inactive bridges and isolated cells.
+    #[test]
+    fn active_component_tracks_complete_relationship_adjacency() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(1_i32);
+        let c = sheet.add_cell(1_i32);
+        let d = sheet.add_cell(1_i32);
+        let extra = sheet.add_cell(1_i32);
+        let other = sheet.add_cell(1_i32);
+        let isolated = sheet.add_cell(1_i32);
+        let reversible = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+                Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+            ])
+            .unwrap();
+        let multi_output = sheet
+            .add_relationship(vec![Method::new(
+                vec![b],
+                vec![c, d],
+                vec![std::any::TypeId::of::<i32>()],
+                vec![std::any::TypeId::of::<i32>(); 2],
+                |inputs| {
+                    let value = *inputs[0].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(value), Box::new(value)])
+                },
+            )])
+            .unwrap();
+        let shared_output = sheet
+            .add_relationship(vec![Method::from_fn_1_1(extra, c, |v: &i32| Ok(*v))])
+            .unwrap();
+        let self_writer = sheet
+            .add_relationship(vec![Method::from_fn_1_1(other, other, |v: &i32| Ok(*v))])
+            .unwrap();
+        let bridge = sheet
+            .add_relationship(vec![Method::from_fn_1_1(d, other, |v: &i32| Ok(*v))])
+            .unwrap();
+        let mut active = HashSet::from([reversible, multi_output, shared_output, self_writer]);
+        for root in [a, b, c, d, extra] {
+            assert_eq!(
+                super::active_relationship_component(
+                    &sheet.cells,
+                    &sheet.relationships,
+                    &active,
+                    root,
+                ),
+                HashSet::from([reversible, multi_output, shared_output])
+            );
+        }
+        assert_eq!(
+            super::active_relationship_component(
+                &sheet.cells,
+                &sheet.relationships,
+                &active,
+                other,
+            ),
+            HashSet::from([self_writer])
+        );
+        for root in [isolated, crate::CellId::default()] {
+            assert!(
+                super::active_relationship_component(
+                    &sheet.cells,
+                    &sheet.relationships,
+                    &active,
+                    root,
+                )
+                .is_empty()
+            );
+        }
+        assert!(
+            super::active_relationship_component(
+                &sheet.cells,
+                &sheet.relationships,
+                &HashSet::new(),
+                a,
+            )
+            .is_empty()
+        );
+        active.insert(bridge);
+        assert_eq!(
+            super::active_relationship_component(&sheet.cells, &sheet.relationships, &active, a),
+            HashSet::from([reversible, multi_output, shared_output, self_writer, bridge])
+        );
+    }
+
+    /// Rejects a free cell when its connected assignment necessarily contains a cycle.
+    #[test]
+    fn source_eligibility_checks_connected_acyclicity() {
+        let mut sheet = Sheet::new();
+        let source = sheet.add_cell(1_i32);
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(1_i32);
+        let first = sheet
+            .add_relationship(vec![Method::from_fn_2_1(
+                [b, source],
+                a,
+                |v: &i32, _: &i32| Ok(*v),
+            )])
+            .unwrap();
+        let second = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &i32| Ok(*v))])
+            .unwrap();
+        assert!(super::can_be_source(
+            &sheet.relationships,
+            &HashSet::from([first]),
+            source
+        ));
+        assert!(!super::can_be_source(
+            &sheet.relationships,
+            &HashSet::from([first, second]),
+            source
+        ));
+    }
 
     /// Distinguishes releasable outputs from mandatory exclusive self-referencing claims.
     #[test]

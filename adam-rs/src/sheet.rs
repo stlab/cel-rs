@@ -1143,6 +1143,15 @@ impl Sheet {
     /// acyclic assignment, including self-referencing outputs, only diagnose values
     /// and do not add value dependencies.
     ///
+    /// Eligibility searches use the candidate's complete input/output relationship
+    /// component within the last successful active set. That completed assignment
+    /// witnesses feasibility of the independent components. Registered methods are
+    /// never replaced or removed, so writes, appended structure and failed
+    /// propagation preserve this witness; newly registered relationships stay outside
+    /// these assignment searches until successful propagation publishes another
+    /// active set. Filter arguments and potential conditional contributors still
+    /// come from the current registered graph.
+    ///
     /// - Postcondition: returns `{id}` if no propagation has run yet, or if `id` is not
     ///   forced and no active or conditional relationship or dynamic filter could produce it.
     ///
@@ -1153,12 +1162,17 @@ impl Sheet {
     ///   total number of branch/default relationships across all conditionals, plus the
     ///   number of traversed filter argument edges. Each visited non-forced filtered
     ///   cell with dynamic arguments that is not currently a source adds at most one
-    ///   exact eligibility search: expected O(T + U · (1 + A · K²)) time, where T
-    ///   is relationship storage slots scanned, A is active relationships, and U counts
-    ///   that search's recursive calls and examined method candidates. U is bounded
-    ///   by O(1 + M + … + M^A), including partial checks when M = 1.
+    ///   exact eligibility search after expected linear traversal of that candidate's
+    ///   component adjacency (including inactive adjacency entries). Each search takes
+    ///   expected O(T + U · (1 + A · K²)) time, where T is relationship storage slots
+    ///   scanned, A is active relationships in that component, and U counts that
+    ///   search's recursive calls and examined method candidates. U is bounded by
+    ///   O(1 + M + … + M^A), including partial checks when M = 1; disconnected
+    ///   components do not multiply its search tree. Debug builds add O(G) validation
+    ///   during each component discovery, where G is prepared active relationships.
     ///   Traversal storage is O(N + E) for visited cells and queued dependency edges E,
-    ///   plus O(1 + A · (1 + K)) auxiliary storage for one eligibility search.
+    ///   plus visited component cells/relationships and O(1 + A · (1 + K)) auxiliary
+    ///   storage for one eligibility search. Repeated queries do not cache searches.
     ///
     /// # Examples
     /// See the [graph example](crate::sheet).
@@ -1183,12 +1197,15 @@ impl Sheet {
                 if let Some(prepared) = &self.last_plan
                     && let Some(args) = self.filter_args(current)
                     && !args.is_empty()
-                    && (self.is_source(current)
-                        || crate::planner::can_be_source(
+                    && (self.is_source(current) || {
+                        let component = crate::planner::active_relationship_component(
+                            &self.cells,
                             &self.relationships,
                             &prepared.active,
                             current,
-                        ))
+                        );
+                        crate::planner::can_be_source(&self.relationships, &component, current)
+                    })
                 {
                     stack.extend(args.iter().copied());
                 }
