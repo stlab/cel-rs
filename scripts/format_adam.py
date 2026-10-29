@@ -35,8 +35,11 @@ def find_adm2_files(start: Path) -> list[Path]:
     IGNORED_DIR_NAMES or starting with '.' are not descended into.
 
     Raises OSError when a directory cannot be read; never returns a partial search.
-    Time: O(b + n * l * log(n)), for b directory-entry bytes, n matching files and
-    maximum path length l. Space: O(b + p), including p matching-path bytes.
+    Time: O(1 + b + v + p + n * l * log(n + 1)), for b directory-entry bytes,
+    v cumulative input/traversal-path bytes (including visited directories),
+    p selected-path bytes, n matching files and maximum selected-path length l
+    (zero when no file matches).
+    Space: O(1 + b + v + p), including traversal and selected-path storage.
 
     Example: find_adm2_files(Path("examples")) selects that tree's Adam sources.
     """

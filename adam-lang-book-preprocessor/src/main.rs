@@ -420,7 +420,7 @@ mod tests {
         let re = adm2_include_regex();
         let content = "{{#include examples/expressions/no_standard_library.adm2}}";
         let result = inject_mount_points(content, &re);
-        assert!(!result.contains("adam-live"));
+        assert_eq!(result, content);
     }
 
     /// Emits one mount per unfenced include in chapter order.
@@ -430,9 +430,10 @@ mod tests {
         let content =
             "{{#include examples/cells/a.adm2}}\n\ntext\n\n{{#include examples/cells/b.adm2}}";
         let result = inject_mount_points(content, &re);
-        assert_eq!(result.matches("adam-live").count(), 2);
-        assert!(result.contains("data-example=\"cells/a\""));
-        assert!(result.contains("data-example=\"cells/b\""));
+        assert_eq!(
+            result,
+            "{{#include examples/cells/a.adm2}}\n<div class=\"adam-live\" data-example=\"cells/a\"></div>\n\n\ntext\n\n{{#include examples/cells/b.adm2}}\n<div class=\"adam-live\" data-example=\"cells/b\"></div>\n"
+        );
     }
 
     /// Places a fenced include's mount outside its closing delimiter.
