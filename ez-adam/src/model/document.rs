@@ -22,7 +22,16 @@ pub const CURRENT_FORMAT_VERSION: u32 = 1;
 /// The `*_order` fields record declaration order explicitly, since
 /// `SlotMap` iteration order is unspecified but `.adm2` generation needs
 /// deterministic output.
+///
+/// Mutation operations preserve live references and declaration-order permutations.
+/// Public fields also permit editing drafts; persistence and export validate their
+/// structural invariants before exposing loaded data or producing output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// `Document::new("resize")` creates an empty editable sheet; use the `ops`
+/// functions to preserve references and declaration order as it changes.
 pub struct Document {
     /// The on-disk format version for this document.
     pub format_version: u32,
@@ -49,6 +58,15 @@ pub struct Document {
 
 impl Document {
     /// Creates a new, empty document for a sheet named `sheet_name`.
+    ///
+    /// - Complexity: O(name bytes) when converting borrowed text to an owned name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let doc = ez_adam::model::document::Document::new("example");
+    /// assert!(doc.cells.is_empty());
+    /// ```
     #[must_use]
     pub fn new(sheet_name: impl Into<String>) -> Self {
         Document {
@@ -66,7 +84,14 @@ impl Document {
 
     /// Iterates over `(CellId, &Cell)` in declaration order.
     ///
-    /// - Complexity: O(n) in the number of cells.
+    /// - Complexity: O(1) construction and per step; O(n) for a full traversal.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let doc = ez_adam::model::document::Document::new("empty");
+    /// assert_eq!(doc.cells_in_order().count(), 0);
+    /// ```
     pub fn cells_in_order(&self) -> impl Iterator<Item = (CellId, &Cell)> {
         self.cell_order
             .iter()
@@ -76,7 +101,14 @@ impl Document {
     /// Iterates over `(RelationshipGroupId, &RelationshipGroup)` in
     /// declaration order.
     ///
-    /// - Complexity: O(n) in the number of relationship groups.
+    /// - Complexity: O(1) construction and per step; O(n) for a full traversal.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let doc = ez_adam::model::document::Document::new("empty");
+    /// assert_eq!(doc.relationship_groups_in_order().count(), 0);
+    /// ```
     pub fn relationship_groups_in_order(
         &self,
     ) -> impl Iterator<Item = (RelationshipGroupId, &RelationshipGroup)> {
@@ -88,7 +120,14 @@ impl Document {
     /// Iterates over `(ConditionalGroupId, &ConditionalGroup)` in
     /// declaration order.
     ///
-    /// - Complexity: O(n) in the number of conditional groups.
+    /// - Complexity: O(1) construction and per step; O(n) for a full traversal.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let doc = ez_adam::model::document::Document::new("empty");
+    /// assert_eq!(doc.conditional_groups_in_order().count(), 0);
+    /// ```
     pub fn conditional_groups_in_order(
         &self,
     ) -> impl Iterator<Item = (ConditionalGroupId, &ConditionalGroup)> {
@@ -110,16 +149,16 @@ impl Document {
 /// live keys (a key encodes its slot index), and this impl compares keys as
 /// well as values. So two maps compare equal exactly when they hold the same
 /// `(key, value)` entries — there is no "same entries, different order"
-/// state to disagree on. Once any `SlotMap`-backed entries exist, two
-/// independently built documents differ in those keys and so compare
-/// unequal; the comparison is meaningful between a document and its clone or
-/// its serde round-trip, where `slotmap`'s serde impl preserves keys (hence
-/// the live-key layout, hence iteration order). (Two empty documents with
-/// identical metadata are equal — there are no keys to differ.)
+/// state to disagree on. Independently constructed maps can reuse the same keys;
+/// keys are map-local, not global object identities. Cloning and serde round trips
+/// preserve both live keys and values.
 ///
 /// If new fields are added to `Document`, this impl must be updated to
 /// compare them.
 impl PartialEq for Document {
+    /// Compares metadata, declaration order, and all keyed values.
+    ///
+    /// - Complexity: O(n + t) in stored entries and text bytes.
     fn eq(&self, other: &Self) -> bool {
         self.format_version == other.format_version
             && self.sheet_name == other.sheet_name
@@ -145,6 +184,7 @@ mod tests {
     use crate::model::cell::{Cell, CellType};
 
     #[test]
+    /// New documents start with empty model and order collections.
     fn new_is_empty() {
         let doc = Document::new("demo");
         assert_eq!(doc.sheet_name, "demo");
@@ -155,6 +195,7 @@ mod tests {
     }
 
     #[test]
+    /// Unchanged snapshots compare equal.
     fn identical_documents_are_equal() {
         let doc1 = Document::new("sheet1");
         let doc2 = Document::new("sheet1");
@@ -162,6 +203,7 @@ mod tests {
     }
 
     #[test]
+    /// Sheet-name edits distinguish document snapshots.
     fn different_sheet_names_compare_unequal() {
         let doc1 = Document::new("sheet1");
         let doc2 = Document::new("sheet2");
@@ -169,6 +211,7 @@ mod tests {
     }
 
     #[test]
+    /// Format versions participate in snapshot equality.
     fn different_format_versions_compare_unequal() {
         let doc1 = Document::new("sheet1");
         let mut doc2 = Document::new("sheet1");
@@ -177,6 +220,7 @@ mod tests {
     }
 
     #[test]
+    /// Cell edits distinguish document snapshots.
     fn documents_with_different_cells_are_not_equal() {
         let mut a = Document::new("demo");
         let b = Document::new("demo");

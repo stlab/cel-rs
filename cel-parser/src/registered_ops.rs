@@ -33,6 +33,9 @@ use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, ResolvedType, Sour
 /// Emitters validate fallible setup before changing the segment. The lookup uniquely owns
 /// each emitter and invokes it only while compiling; segments own the emitted operations.
 /// Boxing a zero-sized, captureless closure does not allocate.
+///
+/// # Examples
+/// See [`OpLookup::register_operation`] for a registered emitter.
 pub type OperationEmitter = Box<dyn Fn(&mut DynSegment, SourceSpan) -> Result<()> + Send + Sync>;
 
 /// Consumes source-order fields using source-position to schema-position indices,
@@ -40,12 +43,18 @@ pub type OperationEmitter = Box<dyn Fn(&mut DynSegment, SourceSpan) -> Result<()
 ///
 /// The lookup uniquely owns this compile-time callback. Boxing a zero-sized,
 /// captureless closure does not allocate.
+///
+/// # Examples
+/// See [`OpLookup::register_record`] for source-order field construction.
 pub type RecordEmitter =
     Box<dyn Fn(&mut DynSegment, &[usize], usize, SourceSpan) -> Result<()> + Send + Sync>;
 
 /// Describes one named operation with complete concrete operand and result identities.
 ///
 /// The emitter consumes exactly `operands` and produces exactly `result`.
+///
+/// # Examples
+/// See [`OpLookup::register_operation`] for signature construction.
 pub struct OperationSignature {
     /// The shared operation name.
     pub name: &'static str,
@@ -58,6 +67,9 @@ pub struct OperationSignature {
 }
 
 /// Describes one required record field.
+///
+/// # Examples
+/// See [`OpLookup::register_record`] for declaring required fields.
 pub struct RecordField {
     /// The source field name.
     pub name: &'static str,
@@ -66,6 +78,9 @@ pub struct RecordField {
 }
 
 /// Describes a named record's required fields and construction implementation.
+///
+/// # Examples
+/// See [`OpLookup::register_record`] for constructing and installing a schema.
 pub struct RecordSchema {
     /// The constructed type, whose source name keys this schema.
     pub ty: ResolvedLeafType,
@@ -472,5 +487,163 @@ impl OpLookup {
             }
         }
         self.lookup_registered_operation(name, segment, arity, span)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Supplies a complete scalar descriptor for registration contracts.
+    fn scalar<T: 'static>(name: &'static str) -> ResolvedType {
+        ResolvedLeafType::new(name, ValueType::leaf::<T>()).into()
+    }
+
+    /// Schema validation rejects duplicate fields and successful construction retains its descriptor.
+    #[test]
+    fn record_schema_validation_precedes_construction() {
+        let mut lookup = OpLookup::new();
+        let invalid = RecordSchema {
+            ty: ResolvedLeafType::new("Invalid", ValueType::leaf::<u8>()),
+            fields: vec![
+                RecordField {
+                    name: "x",
+                    ty: scalar::<i32>("i32"),
+                },
+                RecordField {
+                    name: "x",
+                    ty: scalar::<i32>("i32"),
+                },
+            ],
+            emit: Box::new(|_, _, _, _| panic!("invalid schema must not be installed")),
+        };
+        assert!(lookup.register_record(invalid).is_err());
+        assert!(lookup.record_schema("Invalid").is_none());
+        lookup
+            .register_record(RecordSchema {
+                ty: ResolvedLeafType::new("Empty", ValueType::leaf::<u8>()),
+                fields: Vec::new(),
+                emit: Box::new(|segment, mapping, ambient, _| {
+                    assert!(mapping.is_empty());
+                    assert_eq!(ambient, 0);
+                    segment.just(9u8);
+                    Ok(())
+                }),
+            })
+            .unwrap();
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .construct_record(
+                "Empty",
+                &[],
+                0,
+                &mut segment,
+                proc_macro2::Span::call_site(),
+                proc_macro2::Span::call_site(),
+            )
+            .unwrap();
+        assert_eq!(
+            segment.peek_stack_infos(1)[0].value_type.type_name(),
+            "Empty"
+        );
+        assert_eq!(segment.call0::<u8>().unwrap(), 9);
+    }
+
+    /// Builds one signature whose execution adds an observable offset.
+    fn increment() -> OperationSignature {
+        OperationSignature {
+            name: "increment",
+            operands: vec![scalar::<i32>("i32")],
+            result: scalar::<i32>("i32"),
+            emit: Box::new(|segment, _| {
+                segment.op1r(|value: i32| {
+                    value
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("overflow"))
+                })
+            }),
+        }
+    }
+
+    /// Aliases compare by complete identity, while nested element mismatches remain distinct.
+    #[test]
+    fn complete_identity_does_not_depend_on_diagnostic_names() {
+        assert!(same_type(&scalar::<i32>("i32"), &scalar::<i32>("Alias")));
+        assert!(!same_type(&scalar::<i32>("i32"), &scalar::<u32>("i32")));
+        let array = ResolvedType::Array {
+            element: Box::new(scalar::<i32>("i32")),
+        };
+        assert!(matches_type(
+            &array,
+            &ValueType::array(ValueType::leaf::<i32>())
+        ));
+        assert!(!matches_type(
+            &array,
+            &ValueType::array(ValueType::leaf::<u32>())
+        ));
+    }
+
+    /// Duplicate rejection preserves the first signature and its working emitter.
+    #[test]
+    fn registration_and_dispatch_preserve_the_first_overload() {
+        let mut lookup = OpLookup::new();
+        lookup.register_operation(increment()).unwrap();
+        let mut duplicate = increment();
+        duplicate.result = scalar::<bool>("bool");
+        assert!(lookup.register_operation(duplicate).is_err());
+        assert_eq!(lookup.operation_signatures("increment").count(), 1);
+        assert_eq!(lookup.operation_signatures("missing").count(), 0);
+        let mut segment = DynSegment::new::<()>();
+        segment.just(41i32);
+        assert!(
+            !lookup
+                .lookup_registered_operation(
+                    "missing",
+                    &mut segment,
+                    1,
+                    SourceSpan::new(1, 0, 1, 1)
+                )
+                .unwrap()
+        );
+        assert!(
+            lookup
+                .lookup_registered_operation(
+                    "increment",
+                    &mut segment,
+                    1,
+                    SourceSpan::new(1, 0, 1, 1)
+                )
+                .unwrap()
+        );
+        assert_eq!(segment.call0::<i32>().unwrap(), 42);
+    }
+
+    /// A marker cannot identify two functions and metadata agrees with executable dispatch.
+    #[test]
+    fn function_markers_have_one_name_and_emit_the_registered_value() {
+        let mut lookup = OpLookup::new();
+        lookup.register_function("marker", 17u8).unwrap();
+        assert!(lookup.register_function("other", 18u8).is_err());
+        assert_eq!(
+            lookup.registered_function_name(TypeId::of::<u8>()),
+            Some("marker")
+        );
+        assert_eq!(
+            lookup.registered_function_type("marker").unwrap().type_id(),
+            TypeId::of::<u8>()
+        );
+        let mut segment = DynSegment::new::<()>();
+        assert!(
+            lookup
+                .lookup_registered(
+                    "marker",
+                    &mut segment,
+                    0,
+                    SourceSpan::new(1, 0, 1, 1),
+                    false
+                )
+                .unwrap()
+        );
+        assert_eq!(segment.call0::<u8>().unwrap(), 17);
     }
 }

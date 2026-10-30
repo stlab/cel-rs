@@ -1721,16 +1721,18 @@ scale(2.0, 3.0).outer_transformed_rect(Rect {
 
 ## Host integration
 
-This checked Rust example installs both libraries, constructs records with
+This Rust example installs both libraries, constructs records with
 reversed field order, and composes transforms in application order:
 
 ```rust
 {{#include ../tests/geometry.rs:geometry}}
 ```
 
-Run `cargo test -p cel-lang-book --test geometry` to execute the host example
-and the successful CEL examples marked with `// =>` in this chapter.
-Those comments describe results; they are not part of the signature notation.
+<!-- [knowledge]
+Run cargo test -p cel-lang-book --test geometry after editing examples.
+The test executes the host example and the successful CEL examples marked
+with // => in this chapter; preserve those result markers.
+-->
 
 Installing the library makes records and operations available. Geometry names
 in closure annotations additionally require a configured `TypeResolver`.
@@ -1738,10 +1740,15 @@ The optional Adam adapter supplies type registration when the host enables
 `cel-euclid`'s `adam` feature and calls `cel_euclid::register_adam_types`.
 The host must still install operations on the lookup.
 
-## Geometry policy belongs in the consuming sheet
+## Application constraints {#geometry-policy-belongs-in-the-consuming-sheet}
 
-The library supplies general geometry, not crop-specific constraints.
 The [Adam geometry chapter](https://stlab.github.io/cel-rs/book/geometry.html)
 composes inverse bounds and scalar operations into a self-referencing fitting
-relationship. Its precision, coverage, and inward-margin requirements belong
-to that sheet, not to these operations.
+relationship with application-specific precision, coverage, and inward-margin
+requirements.
+
+<!-- [knowledge]
+Keep crop-specific fitting policy in the consuming Adam sheet, not in the
+general geometry operations. Preserve the operation contracts when changing
+that policy.
+-->

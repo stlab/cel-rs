@@ -33,6 +33,10 @@ pub(crate) const MENU_REDO: &str = "ez-adam-menu-redo";
 ///   reason, matching this crate's convention for framework glue that
 ///   genuinely cannot be tested in isolation.
 #[must_use]
+///
+/// # Examples
+///
+/// Install `build_menu()` through the desktop window's menu configuration before launching.
 pub fn build_menu() -> Menu {
     let file_menu = Submenu::new("File", true);
     file_menu

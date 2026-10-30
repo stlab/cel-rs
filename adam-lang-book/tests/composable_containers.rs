@@ -8,7 +8,9 @@ fn compound_cell_interoperability() {
     use cel_parser::OpLookup;
     use cel_runtime::{Array, ArrayOf, Cons, IntoCStackList, IntoRustTuple, Leaf, Nil};
 
+    /// Represents an integer key paired with an array of measurements.
     type Row = Cons<Leaf<i32>, Cons<ArrayOf<Leaf<f64>>, Nil>>;
+    /// Represents a canonical array of keyed measurement rows.
     type Rows = ArrayOf<Row>;
     let mut sheet = AdamParser::new(TypeRegistry::new(), OpLookup::new())
         .parse_str(

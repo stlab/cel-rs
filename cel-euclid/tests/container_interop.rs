@@ -34,6 +34,7 @@ fn shape(source: &str) -> ResolvedType {
 /// Real vectors, slices, and tuple-list host callbacks share complete CEL identities.
 #[test]
 fn foreign_points_roundtrip_nested_lists_vectors_and_slices() {
+    /// Registers the external client's canonical point-list round trip.
     #[derive(Clone)]
     struct Roundtrip;
     let mut ops = OpLookup::new();

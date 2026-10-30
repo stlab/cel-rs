@@ -1,6 +1,7 @@
 //! Examples backing `book-src/conditionals.md` (Chapter 9). See `src/lib.rs` for how these
 //! `.adm2` files are wired into the book.
 
+/// Recomputes a multi-cell match subject after a dependency changes.
 #[test]
 fn multi_cell_match_subject() {
     let mut parser = adam_lang_book::support::parser();
@@ -19,6 +20,7 @@ fn multi_cell_match_subject() {
     assert!(!*parsed.read::<bool>(locked).unwrap());
 }
 
+/// Releases a forced output to its declared source value when no branch matches.
 #[test]
 fn default_branch_and_spring_back() {
     let mut parser = adam_lang_book::support::parser();
@@ -41,6 +43,7 @@ fn default_branch_and_spring_back() {
     assert!(parsed.is_source(x));
 }
 
+/// Retains source shadows while switching forced and self-referencing directions.
 #[test]
 fn forced_and_self_ref_shadow() {
     let mut parser = adam_lang_book::support::parser();

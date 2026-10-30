@@ -29,8 +29,48 @@ use std::collections::HashMap;
 /// string on its synthetic `input` event, so the live value has to be read
 /// directly off the DOM instead (see `SpTextfield`'s own doc comment, and
 /// `adam_web_ui::inspector`'s identical pattern).
+///
+/// - Complexity: O(id.len()) time and space.
 fn read_value_js(id: &str) -> String {
     format!(r#"dioxus.send(document.getElementById("{id}").value)"#)
+}
+
+/// Renders exact integer clamp text or a floating numeric field and forwards its input.
+///
+/// - Complexity: O(id.len() + value.len()) attribute construction.
+#[component]
+fn ClampField(
+    id: String,
+    value: String,
+    is_integer: bool,
+    oninput: EventHandler<FormEvent>,
+) -> Element {
+    if is_integer {
+        rsx! { SpTextfield {
+            id, value, invalid: false, disabled: false, oninput,
+            onfocus: |_| {}, onblur: |_| {},
+        } }
+    } else {
+        rsx! { SpNumberfield {
+            id, value, min: None, max: None, step: None,
+            invalid: false, disabled: false, readonly: false, oninput,
+            onfocus: |_| {}, onblur: |_| {},
+        } }
+    }
+}
+
+/// Decodes the shared numeric bridge without coercing drafts to JavaScript numbers.
+///
+/// # Errors
+///
+/// Returns an error when the focus-prefixed wire payload is malformed.
+///
+/// - Complexity: O(payload.len()) worst-case validation with borrowed output and no allocation.
+fn numeric_draft(payload: &str) -> Result<&str, &'static str> {
+    match payload.split_once('|') {
+        Some(("0" | "1", draft)) => Ok(draft),
+        _ => Err("invalid numeric field response"),
+    }
 }
 
 /// Records and returns the next input revision for `field_id`.
@@ -38,6 +78,8 @@ fn read_value_js(id: &str) -> String {
 /// Every browser DOM-value read captures this revision before awaiting. A
 /// response applies only while [`is_current_input_revision`] still accepts
 /// it, preventing an older asynchronous response from replacing newer text.
+///
+/// - Complexity: expected O(field_id.len()) time and space.
 fn next_input_revision(revisions: &mut HashMap<String, u64>, field_id: &str) -> u64 {
     let revision = revisions
         .get(field_id)
@@ -51,6 +93,8 @@ fn next_input_revision(revisions: &mut HashMap<String, u64>, field_id: &str) -> 
 
 /// Returns whether `response_revision` is the latest dispatched revision for
 /// `field_id`.
+///
+/// - Complexity: expected O(field_id.len()) time and O(1) space.
 fn is_current_input_revision(
     revisions: &HashMap<String, u64>,
     field_id: &str,
@@ -63,6 +107,13 @@ fn is_current_input_revision(
 /// or `None` if `ty` is `Bool`/`Text` (no clamp fields to show). Each
 /// bound renders as an empty string when unset, matching an editable
 /// text-field's natural "nothing typed" state.
+///
+/// - Complexity: O(formatted bound bytes) time and space.
+///
+/// # Examples
+///
+/// `clamp_bounds_text(&CellType::Bool)` returns `None`; an unbounded numeric type
+/// returns two empty bound drafts.
 pub fn clamp_bounds_text(ty: &CellType) -> Option<(String, String)> {
     match ty {
         CellType::F64 { clamp } => Some((
@@ -87,12 +138,20 @@ fn parse_restrict_input(text: String) -> Option<String> {
 /// a cell's type is out of scope for this plan), output checkbox, clamp
 /// min/max (numeric types only, via [`clamp_bounds_text`]), and restrict
 /// expression text.
+///
+/// - Complexity: O(t) per render for copied name/restriction/bound text bytes t.
 #[component]
+///
+/// # Examples
+///
+/// `SidePanel { document, selection }` mounts this panel when `selection`
+/// contains exactly one live `NodeId::CellNode`.
 pub fn CellPanel(
     mut document: Signal<Document>,
     cell: CellId,
     mut input_revisions: Signal<HashMap<String, u64>>,
 ) -> Element {
+    let mut bridge_error = use_signal(|| None::<String>);
     let (name, ty, output, restrict) = {
         let doc = document.read();
         let c = &doc.cells[cell];
@@ -113,6 +172,9 @@ pub fn CellPanel(
     rsx! {
         div {
             class: "cell-panel",
+            if let Some(error) = bridge_error.read().as_deref() {
+                div { role: "alert", "{error}" }
+            }
             SpFieldLabel { for_: "{name_id}", "Name" }
             SpTextfield {
                 id: name_id.clone(),
@@ -157,64 +219,58 @@ pub fn CellPanel(
                 // otherwise fight the user's typing.
                 div {
                     SpFieldLabel { for_: "{clamp_min_id}", "Clamp min" }
-                    SpNumberfield {
+                    ClampField {
                         id: clamp_min_id.clone(),
                         value: min,
-                        min: None,
-                        max: None,
-                        step: is_integer.then(|| "1".to_string()),
-                        invalid: false,
-                        disabled: false,
-                        readonly: false,
+                        is_integer,
                         oninput: move |_| {
                             let id = clamp_min_id.clone();
                             let revision = next_input_revision(&mut input_revisions.write(), &id);
                             let input_revisions = input_revisions;
                             spawn(async move {
-                                let mut eval = document::eval(&read_value_js(&id));
-                                if let Ok(text) = eval.recv::<String>().await
-                                    && is_current_input_revision(
-                                        &input_revisions.read(),
-                                        &id,
-                                        revision,
-                                    ) {
-                                        set_clamp_min(&mut document.write(), cell, &text);
-                                    }
+                                let mut eval = document::eval(&adam_web_ui::numeric_input_script(&id, false));
+                                let result = eval.recv::<String>().await;
+                                if !is_current_input_revision(&input_revisions.read(), &id, revision) { return; }
+                                match result {
+                                    Ok(payload) => match numeric_draft(&payload) {
+                                        Ok(text) => {
+                                            set_clamp_min(&mut document.write(), cell, text);
+                                            bridge_error.set(None);
+                                        }
+                                        Err(error) => bridge_error.set(Some(error.to_string())),
+                                    },
+                                    Err(error) => bridge_error.set(Some(format!("numeric field read failed: {error}"))),
+                                }
                             });
                         },
-                        onfocus: move |_| {},
-                        onblur: move |_| {},
                     }
                 }
                 div {
                     SpFieldLabel { for_: "{clamp_max_id}", "Clamp max" }
-                    SpNumberfield {
+                    ClampField {
                         id: clamp_max_id.clone(),
                         value: max,
-                        min: None,
-                        max: None,
-                        step: is_integer.then(|| "1".to_string()),
-                        invalid: false,
-                        disabled: false,
-                        readonly: false,
+                        is_integer,
                         oninput: move |_| {
                             let id = clamp_max_id.clone();
                             let revision = next_input_revision(&mut input_revisions.write(), &id);
                             let input_revisions = input_revisions;
                             spawn(async move {
-                                let mut eval = document::eval(&read_value_js(&id));
-                                if let Ok(text) = eval.recv::<String>().await
-                                    && is_current_input_revision(
-                                        &input_revisions.read(),
-                                        &id,
-                                        revision,
-                                    ) {
-                                        set_clamp_max(&mut document.write(), cell, &text);
-                                    }
+                                let mut eval = document::eval(&adam_web_ui::numeric_input_script(&id, false));
+                                let result = eval.recv::<String>().await;
+                                if !is_current_input_revision(&input_revisions.read(), &id, revision) { return; }
+                                match result {
+                                    Ok(payload) => match numeric_draft(&payload) {
+                                        Ok(text) => {
+                                            set_clamp_max(&mut document.write(), cell, text);
+                                            bridge_error.set(None);
+                                        }
+                                        Err(error) => bridge_error.set(Some(error.to_string())),
+                                    },
+                                    Err(error) => bridge_error.set(Some(format!("numeric field read failed: {error}"))),
+                                }
                             });
                         },
-                        onfocus: move |_| {},
-                        onblur: move |_| {},
                     }
                 }
             }
@@ -257,6 +313,13 @@ pub fn CellPanel(
 /// string via [`cel_parser::ParseError::format_rustc_style`] (the same
 /// `annotate-snippets`-backed technique `adam-web-ui::labels::format_adam_error`
 /// uses), with [`Renderer::plain`] so no ANSI escapes leak into the DOM.
+///
+/// - Complexity: O(text length) parsing and diagnostic formatting work.
+///
+/// # Examples
+///
+/// `formula_diagnostic("width +")` returns a readable diagnostic;
+/// `formula_diagnostic("")` leaves an unfinished draft quiet.
 pub fn formula_diagnostic(text: &str) -> Option<String> {
     if text.is_empty() {
         return None;
@@ -270,6 +333,10 @@ pub fn formula_diagnostic(text: &str) -> Option<String> {
 /// `None` if nothing (or more than one thing) is selected — the panel
 /// only ever targets exactly one node at a time.
 #[must_use]
+///
+/// # Examples
+///
+/// `panel_target(&HashSet::new())` returns `None` rather than selecting an arbitrary node.
 pub fn panel_target(selection: &std::collections::HashSet<NodeId>) -> Option<NodeId> {
     let mut iter = selection.iter();
     let first = *iter.next()?;
@@ -284,33 +351,23 @@ pub fn panel_target(selection: &std::collections::HashSet<NodeId>) -> Option<Nod
 ///
 /// - Postcondition: result contains each group from `default` and from any
 ///   branch's `enabled_groups` exactly once, with no duplicates.
-/// - Complexity: O(n*m) where n is the total number of groups across all
-///   sources and m is the size of the combined default (due to `Vec::contains`
-///   checks).
+/// - Complexity: expected O(n) time and O(u) space for n references and u distinct IDs.
 ///
 /// # Examples
 ///
-/// A group appearing in both default and a branch deduplicates to one entry:
-/// ```ignore
-/// let default = vec![group_a];
-/// let branch = ConditionalBranch { enabled_groups: vec![group_a, group_b], .. };
-/// let result = referenced_groups(&default, &[branch]);
-/// assert_eq!(result.len(), 2);
-/// assert_eq!(result.iter().filter(|g| *g == &group_a).count(), 1);
-/// ```
+/// For a live relationship `group`, `referenced_groups(&[group, group], &[])`
+/// returns `vec![group]`.
 pub fn referenced_groups(
     default: &[RelationshipGroupId],
     branches: &[ConditionalBranch],
 ) -> Vec<RelationshipGroupId> {
-    let mut groups: Vec<_> = default.to_vec();
-    for branch in branches {
-        for g in &branch.enabled_groups {
-            if !groups.contains(g) {
-                groups.push(*g);
-            }
-        }
-    }
-    groups
+    let mut seen = std::collections::HashSet::new();
+    default
+        .iter()
+        .chain(branches.iter().flat_map(|branch| &branch.enabled_groups))
+        .copied()
+        .filter(|group| seen.insert(*group))
+        .collect()
 }
 
 /// Returns `known` extended with any group from `referenced` not already
@@ -330,30 +387,55 @@ pub fn referenced_groups(
 ///   same relative order it had in `known`, followed by every element of
 ///   `referenced` not already present, in `referenced`'s order, with no
 ///   duplicates.
+/// - Precondition: `known` contains distinct group IDs.
+/// - Complexity: expected O(k + r) time and O(k + r) space for known and referenced IDs.
 ///
 /// # Examples
 ///
-/// ```ignore
-/// let known = vec![group_a];
-/// let referenced = vec![group_b];
-/// assert_eq!(union_preserving_known_order(&known, &referenced), vec![group_a, group_b]);
-/// ```
+/// `union_preserving_known_order(&[group_a], &[group_b])` returns
+/// `vec![group_a, group_b]` when the IDs differ.
 fn union_preserving_known_order(
     known: &[RelationshipGroupId],
     referenced: &[RelationshipGroupId],
 ) -> Vec<RelationshipGroupId> {
-    let mut result = known.to_vec();
-    for &group in referenced {
-        if !result.contains(&group) {
-            result.push(group);
-        }
-    }
-    result
+    let mut seen: std::collections::HashSet<_> = known.iter().copied().collect();
+    debug_assert_eq!(seen.len(), known.len());
+    known
+        .iter()
+        .copied()
+        .chain(
+            referenced
+                .iter()
+                .copied()
+                .filter(|group| seen.insert(*group)),
+        )
+        .collect()
+}
+
+/// Retains unchecked live columns in their existing order and discards deleted groups.
+///
+/// - Complexity: expected O(k + r) time and O(k + r) space for known and referenced columns.
+fn live_columns(
+    doc: &Document,
+    known: &[RelationshipGroupId],
+    referenced: &[RelationshipGroupId],
+) -> Vec<RelationshipGroupId> {
+    let mut columns = union_preserving_known_order(known, referenced);
+    columns.retain(|group| doc.relationship_groups.contains_key(*group));
+    columns
 }
 
 /// Renders `group`'s member formulas as an editable list, each validated
 /// live via [`formula_diagnostic`].
+///
+/// - Complexity: O(m + t) member/text construction per render for m members and t
+///   copied text bytes, plus one parse/diagnostic pass per formula.
 #[component]
+///
+/// # Examples
+///
+/// `SidePanel { document, selection }` mounts this panel for a single live
+/// `NodeId::RelationshipGroup`, exposing each member's editable formula.
 pub fn RelationshipPanel(
     mut document: Signal<Document>,
     group: RelationshipGroupId,
@@ -402,6 +484,7 @@ pub fn RelationshipPanel(
             for (node, cell_name, formula) in members {
                 {
                     let field_id = format!("member-formula-{node:?}");
+                    let diagnostic = formula_diagnostic(&formula);
                     rsx! {
                         div {
                             key: "{node:?}",
@@ -409,7 +492,7 @@ pub fn RelationshipPanel(
                             SpTextfield {
                                 id: field_id.clone(),
                                 value: formula.clone(),
-                                invalid: formula_diagnostic(&formula).is_some(),
+                                invalid: diagnostic.is_some(),
                                 disabled: false,
                                 oninput: move |_| {
                                     let id = field_id.clone();
@@ -435,7 +518,7 @@ pub fn RelationshipPanel(
                                 onfocus: move |_| {},
                                 onblur: move |_| {},
                             }
-                            if let Some(diagnostic) = formula_diagnostic(&formula) {
+                            if let Some(diagnostic) = diagnostic {
                                 div { class: "diagnostic", "{diagnostic}" }
                             }
                         }
@@ -461,17 +544,31 @@ fn formula_expr_for_display(condition: &ConditionExpr) -> Option<&str> {
 /// its current lifetime — see [`union_preserving_known_order`]),
 /// checkboxes = whether each group is enabled on that branch.
 ///
+/// - Complexity: O(r + t + b·g·e) per render for copied references r, copied text t,
+///   b branches, g displayed groups, and at most e enabled IDs per branch; formula
+///   parsing adds its own cost. Retained-column reconciliation is expected linear
+///   in known/referenced IDs.
+///
 /// - Precondition: the caller gives this component a distinct `key` per
 ///   `conditional` (e.g. in [`SidePanel`]) so switching to a different
 ///   conditional starts a fresh column set instead of carrying over the
 ///   previous conditional's columns.
 #[component]
+///
+/// # Examples
+///
+/// Select one `NodeId::ConditionalGroup` in `SidePanel { document, selection }`
+/// to edit its selector draft and enabled-relationship table.
 pub fn ConditionalPanel(
     mut document: Signal<Document>,
     conditional: ConditionalGroupId,
     mut input_revisions: Signal<HashMap<String, u64>>,
 ) -> Element {
-    let mut known_groups = use_signal(Vec::<RelationshipGroupId>::new);
+    let mut known_groups = use_signal(move || {
+        let doc = document.peek();
+        let cond = &doc.conditional_groups[conditional];
+        live_columns(&doc, &[], &referenced_groups(&cond.default, &cond.branches))
+    });
 
     use_effect(move || {
         let referenced = {
@@ -479,7 +576,7 @@ pub fn ConditionalPanel(
             let cond = &doc.conditional_groups[conditional];
             referenced_groups(&cond.default, &cond.branches)
         };
-        let merged = union_preserving_known_order(&known_groups.peek(), &referenced);
+        let merged = live_columns(&document.read(), &known_groups.peek(), &referenced);
         if merged != *known_groups.peek() {
             known_groups.set(merged);
         }
@@ -495,7 +592,13 @@ pub fn ConditionalPanel(
             formula_expr,
         )
     };
-    let all_groups = known_groups.read().clone();
+    let all_groups = {
+        let doc = document.read();
+        let cond = &doc.conditional_groups[conditional];
+        let referenced = referenced_groups(&cond.default, &cond.branches);
+        live_columns(&doc, &known_groups.read(), &referenced)
+    };
+    let diagnostic = formula_expr.as_deref().and_then(formula_diagnostic);
 
     let name_id = format!("name-{conditional:?}");
     let formula_id = format!("conditional-formula-{conditional:?}");
@@ -530,7 +633,7 @@ pub fn ConditionalPanel(
                 SpTextfield {
                     id: formula_id.clone(),
                     value: expr.clone(),
-                    invalid: formula_diagnostic(&expr).is_some(),
+                    invalid: diagnostic.is_some(),
                     disabled: false,
                     oninput: move |_| {
                         let id = formula_id.clone();
@@ -551,7 +654,7 @@ pub fn ConditionalPanel(
                     onfocus: move |_| {},
                     onblur: move |_| {},
                 }
-                if let Some(diagnostic) = formula_diagnostic(&expr) {
+                if let Some(diagnostic) = diagnostic {
                     div { class: "diagnostic", "{diagnostic}" }
                 }
             }
@@ -603,7 +706,14 @@ pub fn ConditionalPanel(
 /// Renders whichever of [`CellPanel`]/[`RelationshipPanel`]/[`ConditionalPanel`]
 /// matches the current single-node `selection`, or nothing if the
 /// selection is empty or multi-node (per [`panel_target`]).
+///
+/// - Complexity: dispatch is O(1), plus the selected panel's rendering cost.
 #[component]
+///
+/// # Examples
+///
+/// Inside a Dioxus scope, `rsx! { SidePanel { document, selection } }` follows
+/// the editor's document and selected-node signals.
 pub fn SidePanel(
     document: Signal<Document>,
     selection: Signal<std::collections::HashSet<NodeId>>,
@@ -615,19 +725,19 @@ pub fn SidePanel(
             class: "side-panel",
             match target {
                 Some(NodeId::CellNode(node)) => {
-                    let cell = document.read().cell_nodes[node].cell;
-                    rsx! { CellPanel { document, cell, input_revisions } }
+                    let cell = document.read().cell_nodes.get(node).map(|node| node.cell);
+                    rsx! { if let Some(cell) = cell { CellPanel { key: "{cell:?}", document, cell, input_revisions } } }
                 }
                 Some(NodeId::RelationshipGroup(group)) => {
-                    rsx! { RelationshipPanel { document, group, input_revisions } }
+                    rsx! { if document.read().relationship_groups.contains_key(group) { RelationshipPanel { key: "{group:?}", document, group, input_revisions } } }
                 }
                 Some(NodeId::ConditionalGroup(conditional)) => rsx! {
-                    ConditionalPanel {
+                    if document.read().conditional_groups.contains_key(conditional) { ConditionalPanel {
                         key: "{conditional:?}",
                         document,
                         conditional,
                         input_revisions,
-                    }
+                    } }
                 },
                 None => rsx! { div { "No selection" } },
             }
@@ -639,23 +749,79 @@ pub fn SidePanel(
 mod formula_tests {
     use super::*;
 
+    /// Deleted columns disappear while unchecked live columns keep their positions.
     #[test]
+    fn conditional_columns_keep_only_live_groups() {
+        let mut doc = Document::new("s");
+        let live = doc.relationship_groups.insert(
+            crate::model::relationship_group::RelationshipGroup::new(
+                "live",
+                crate::model::geometry::Point::new(0.0, 0.0),
+            ),
+        );
+        let dead = doc.relationship_groups.insert(
+            crate::model::relationship_group::RelationshipGroup::new(
+                "dead",
+                crate::model::geometry::Point::new(0.0, 0.0),
+            ),
+        );
+        doc.relationship_groups.remove(dead);
+        assert_eq!(live_columns(&doc, &[live, dead], &[]), vec![live]);
+        assert_eq!(referenced_groups(&[live, live], &[]), vec![live]);
+    }
+
+    /// Numeric bridge payloads preserve drafts and drive exact bound changes without number coercion.
+    #[test]
+    fn numeric_bridge_payloads_are_decoded_without_number_coercion() {
+        for draft in ["", "-", "-12", "1.25", "9007199254740993"] {
+            assert_eq!(numeric_draft(&format!("1|{draft}")).unwrap(), draft);
+        }
+        assert!(numeric_draft("42").is_err());
+        assert!(numeric_draft("bad|1").is_err());
+        let mut doc = Document::new("bounds");
+        let integer = crate::ops::cells::add_cell(&mut doc, "integer", CellType::i64());
+        let float = crate::ops::cells::add_cell(&mut doc, "float", CellType::f64());
+        set_clamp_min(
+            &mut doc,
+            integer,
+            numeric_draft("1|9007199254740993").unwrap(),
+        );
+        set_clamp_max(&mut doc, float, numeric_draft("0|-1.25").unwrap());
+        assert_eq!(
+            clamp_bounds_text(&doc.cells[integer].ty).unwrap().0,
+            "9007199254740993"
+        );
+        assert_eq!(clamp_bounds_text(&doc.cells[float].ty).unwrap().1, "-1.25");
+        set_clamp_min(&mut doc, integer, numeric_draft("1|-").unwrap());
+        assert_eq!(
+            clamp_bounds_text(&doc.cells[integer].ty).unwrap().0,
+            "9007199254740993"
+        );
+        set_clamp_min(&mut doc, integer, numeric_draft("1|").unwrap());
+        assert_eq!(clamp_bounds_text(&doc.cells[integer].ty).unwrap().0, "");
+    }
+
+    #[test]
+    /// Valid formula drafts have no syntax diagnostic.
     fn formula_diagnostic_is_none_for_valid_cel() {
         assert_eq!(formula_diagnostic("a + b"), None);
     }
 
     #[test]
+    /// Empty editable formula drafts suppress syntax diagnostics.
     fn formula_diagnostic_is_none_for_empty_text() {
         assert_eq!(formula_diagnostic(""), None);
     }
 
     #[test]
+    /// Invalid nonempty formula drafts produce syntax diagnostics.
     fn formula_diagnostic_is_some_for_invalid_cel() {
         let diagnostic = formula_diagnostic("a +").expect("invalid CEL should have a diagnostic");
         assert!(!diagnostic.is_empty());
     }
 
     #[test]
+    /// Formula diagnostics use readable messages rather than internal debug output.
     fn formula_diagnostic_does_not_use_debug_formatting() {
         // The rendered diagnostic must be a real annotate-snippets caret
         // rendering, not `format!("{e:?}")` Debug output — which for
@@ -672,6 +838,7 @@ mod tests {
     use crate::model::cell::ClampRange;
 
     #[test]
+    /// Value-read scripts address the specified control.
     fn read_value_js_embeds_the_given_id_in_a_getelementbyid_lookup() {
         let js = read_value_js("restrict-abc");
         assert_eq!(
@@ -681,6 +848,7 @@ mod tests {
     }
 
     #[test]
+    /// Delayed field responses cannot supersede a newer revision.
     fn input_response_is_current_only_for_the_latest_revision() {
         let mut revisions = HashMap::new();
         let first = next_input_revision(&mut revisions, "name-abc");
@@ -691,6 +859,7 @@ mod tests {
     }
 
     #[test]
+    /// Editing one field does not retire another field's response.
     fn input_response_revisions_are_independent_per_field() {
         let mut revisions = HashMap::new();
         let name = next_input_revision(&mut revisions, "name-abc");
@@ -705,12 +874,14 @@ mod tests {
     }
 
     #[test]
+    /// Nonnumeric cells do not show numeric bound fields.
     fn clamp_bounds_text_is_none_for_bool_and_text() {
         assert_eq!(clamp_bounds_text(&CellType::Bool), None);
         assert_eq!(clamp_bounds_text(&CellType::Text), None);
     }
 
     #[test]
+    /// Bound editors display the stored numeric endpoints.
     fn clamp_bounds_text_shows_set_bounds() {
         let ty = CellType::I64 {
             clamp: ClampRange {
@@ -725,6 +896,7 @@ mod tests {
     }
 
     #[test]
+    /// Absent numeric endpoints display blank drafts.
     fn clamp_bounds_text_shows_empty_string_for_unset_bounds() {
         let ty = CellType::F64 {
             clamp: ClampRange {
@@ -736,11 +908,13 @@ mod tests {
     }
 
     #[test]
+    /// Clearing a restriction removes the optional draft.
     fn parse_restrict_input_converts_empty_to_none() {
         assert_eq!(parse_restrict_input(String::new()), None);
     }
 
     #[test]
+    /// Nonempty restrictions retain the authored draft.
     fn parse_restrict_input_converts_nonempty_to_some() {
         assert_eq!(
             parse_restrict_input("x > 0".to_string()),
@@ -749,12 +923,14 @@ mod tests {
     }
 
     #[test]
+    /// Empty conditional tables reference no relationship groups.
     fn referenced_groups_with_empty_default_and_branches_returns_empty() {
         let result = referenced_groups(&[], &[]);
         assert!(result.is_empty());
     }
 
     #[test]
+    /// Default relationships appear in the referenced-column set.
     fn referenced_groups_includes_groups_from_default() {
         use slotmap::SlotMap;
 
@@ -771,6 +947,7 @@ mod tests {
     }
 
     #[test]
+    /// Branch relationships appear in the referenced-column set.
     fn referenced_groups_includes_groups_from_branches() {
         use slotmap::SlotMap;
 
@@ -790,6 +967,7 @@ mod tests {
     }
 
     #[test]
+    /// Shared default/branch relationships produce one referenced column.
     fn referenced_groups_deduplicates_groups_in_default_and_branches() {
         use slotmap::SlotMap;
 
@@ -813,6 +991,7 @@ mod tests {
     }
 
     #[test]
+    /// Relationships shared across branches produce one referenced column.
     fn referenced_groups_deduplicates_groups_across_multiple_branches() {
         use slotmap::SlotMap;
 
@@ -837,6 +1016,7 @@ mod tests {
     }
 
     #[test]
+    /// Newly observed columns preserve reference order.
     fn union_preserving_known_order_with_nothing_known_returns_referenced_in_order() {
         use slotmap::SlotMap;
 
@@ -849,6 +1029,7 @@ mod tests {
     }
 
     #[test]
+    /// Unchecked known columns remain available for later re-enabling.
     fn union_preserving_known_order_keeps_a_known_group_that_is_no_longer_referenced() {
         use slotmap::SlotMap;
 
@@ -864,6 +1045,7 @@ mod tests {
     }
 
     #[test]
+    /// New references append after stable existing columns.
     fn union_preserving_known_order_appends_newly_referenced_groups_after_known_ones() {
         use slotmap::SlotMap;
 
@@ -876,6 +1058,7 @@ mod tests {
     }
 
     #[test]
+    /// Rediscovering a known relationship does not duplicate its column.
     fn union_preserving_known_order_does_not_duplicate_an_already_known_group() {
         use slotmap::SlotMap;
 
@@ -887,6 +1070,7 @@ mod tests {
     }
 
     #[test]
+    /// Formula condition panels display the authored scalar expression.
     fn formula_expr_for_display_returns_the_expr_for_formula_mode() {
         let condition = ConditionExpr::Formula {
             referenced_cells: vec![],
@@ -896,18 +1080,21 @@ mod tests {
     }
 
     #[test]
+    /// Truth-table condition panels do not invent a formula draft.
     fn formula_expr_for_display_is_none_for_cells_mode() {
         let condition = ConditionExpr::Cells(vec![]);
         assert_eq!(formula_expr_for_display(&condition), None);
     }
 
     #[test]
+    /// Empty selections have no editable side-panel target.
     fn panel_target_is_none_for_empty_selection() {
         let selection = std::collections::HashSet::new();
         assert_eq!(panel_target(&selection), None);
     }
 
     #[test]
+    /// Multiple selections do not choose an arbitrary editable target.
     fn panel_target_is_none_for_multiple_selections() {
         let mut selection = std::collections::HashSet::new();
         // Two arbitrary distinct NodeIds — construct via slotmap fixtures
@@ -920,6 +1107,7 @@ mod tests {
     }
 
     #[test]
+    /// Single selections expose their node as the side-panel target.
     fn panel_target_returns_the_single_selected_node() {
         let mut cells: slotmap::SlotMap<crate::model::cell_node::CellNodeId, ()> =
             slotmap::SlotMap::with_key();

@@ -13,24 +13,33 @@ use indexmap::IndexMap;
 use std::any::TypeId;
 
 /// Type-erased write closure: parses a string and writes it to a cell.
+///
+/// # Examples
+///
+/// `(meta.write_str)(&mut sheet, "42")` applies a draft through its registered
+/// cell-type parser before the caller propagates the sheet.
 pub type WriteStrFn = Box<dyn Fn(&mut Sheet, &str) -> Result<(), Error>>;
 
 /// Display and write metadata for a single cell.
+///
+/// # Examples
+///
+/// Read `labels.cells[&id].number_input_safe` to select a binary64 numeric control, and
+/// invoke its `display` callback to obtain the exact current text.
 pub struct CellMeta {
     /// Human-readable cell name shown in the inspector.
     pub label: String,
     /// `true` if the cell holds a `bool`, so [`crate::SheetInspector`] can render it as a
     /// checkbox instead of a text field.
     pub is_bool: bool,
-    /// `true` if the cell holds one of the 14 numeric primitive types, so
-    /// [`crate::SheetInspector`] can render it with [`crate::spectrum::SpNumberfield`]
-    /// instead of a plain text field.
+    /// `true` if the cell holds one of the 14 numeric primitive types.
+    /// Numeric draft and clamp semantics apply even when its editor is text-valued.
     pub is_numeric: bool,
-    /// `true` if the cell holds one of the 12 integer primitive types (as opposed to
-    /// `f32`/`f64`), so [`crate::SheetInspector`] can set its numeric widget's `step` to `1` —
-    /// [`crate::spectrum::SpNumberfield`]'s, or, for a range-filtered cell,
-    /// [`crate::spectrum::SpSlider`]'s — since an integer cell has no fractional steps to land
-    /// on.
+    /// Selects binary64 number/slider controls for floats and integer domains up to
+    /// 32 bits. Wider integer domains use exact text controls, including ranged cells.
+    pub number_input_safe: bool,
+    /// Identifies integer parsing/clamp semantics. Binary64-safe integer controls
+    /// use a unit step; wider domains retain exact text.
     pub is_integer: bool,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,
@@ -40,13 +49,19 @@ pub struct CellMeta {
     pub write_str: WriteStrFn,
     /// Live slider bounds, present only for a numeric cell whose filter is a
     /// [`adam_rs::FilterKind::Range`] — recomputed from the filter's current argument values on
-    /// every call, so a range driven by other cells or relationships stays live. Cast to `f64`
-    /// for display, matching [`format_rounded`]'s existing all-numeric-types-as-`f64` convention.
+    /// every call, so a range driven by other cells or relationships stays live.
+    /// These approximate `f64` bounds do not format cell values; wide-integer editors
+    /// do not use them to render or transport values.
     #[allow(clippy::type_complexity)]
     pub range: Option<Box<dyn Fn(&Sheet) -> (f64, f64)>>,
 }
 
 /// Associates human-readable labels and type-erased closures with stable sheet IDs.
+///
+/// # Examples
+///
+/// `labels_from_cell_names(&parsed, &parsed.cell_names)` creates declaration-ordered
+/// metadata suitable for a `SheetInspector`.
 pub struct Labels {
     /// Cells in insertion order (preserves display ordering).
     pub cells: IndexMap<CellId, CellMeta>,
@@ -54,6 +69,12 @@ pub struct Labels {
 
 impl Labels {
     /// Creates an empty label set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// assert!(adam_web_ui::Labels::new().cells.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self {
             cells: IndexMap::new(),
@@ -64,6 +85,22 @@ impl Labels {
     ///
     /// - Precondition: `id` is a live cell in the sheet this `Labels` will be used with.
     /// - Precondition: `T` matches the type registered with `Sheet::add_cell` for `id`.
+    ///
+    /// Only Boolean control classification is inferred here. Use
+    /// [`labels_from_cell_names`] for automatic numeric/range classification.
+    ///
+    /// - Complexity: O(label.len()) registration time and space; display and parsing
+    ///   callbacks subsequently incur their concrete type's formatting/parsing costs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut sheet = adam_rs::Sheet::new();
+    /// let id = sheet.add_cell(3i64);
+    /// let mut labels = adam_web_ui::Labels::new();
+    /// labels.add_cell::<i64>(id, "count");
+    /// assert_eq!((labels.cells[&id].display)(&sheet), "3");
+    /// ```
     pub fn add_cell<T>(&mut self, id: CellId, label: &str)
     where
         T: std::any::Any + std::fmt::Display + std::str::FromStr + 'static,
@@ -75,6 +112,7 @@ impl Labels {
                 label: label.to_owned(),
                 is_bool: TypeId::of::<T>() == TypeId::of::<bool>(),
                 is_numeric: false,
+                number_input_safe: false,
                 is_integer: false,
                 display: Box::new(move |sheet| {
                     sheet
@@ -125,6 +163,7 @@ impl Labels {
                 label: label.to_owned(),
                 is_bool: false,
                 is_numeric: false,
+                number_input_safe: false,
                 is_integer: false,
                 display: Box::new(move |sheet| {
                     formatter
@@ -178,18 +217,20 @@ pub fn format_rounded(v: f64) -> String {
     }
 }
 
-/// Converts a filter-recognized numeric primitive to `f64` for display — the same "every numeric
-/// type displays as `f64`" convention [`format_rounded`] already documents. Implemented for
-/// exactly the 14 primitives `TypeRegistry::range_entry` recognizes range support for; `i64`,
-/// `u64`, `i128`, `u128`, `usize`, and `isize` lose precision beyond 2^53, identical to
-/// `labels_from_cell_names`'s existing `try_float_ty!`-driven display path for those types.
+/// Converts a filter-recognized primitive to approximate `f64` slider bounds.
+///
+/// Large integers can lose precision beyond 2^53; this display-only conversion does
+/// not define integer storage, integer field formatting, or string-write semantics.
 trait ToF64Display {
+    /// Returns the primitive's nearest representable display approximation.
     fn to_f64_display(&self) -> f64;
 }
 
+/// Implements the documented display-only conversion for numeric primitives.
 macro_rules! impl_to_f64_display {
     ($($T:ty),*) => {
         $(impl ToF64Display for $T {
+            /// Returns this primitive's display-only `f64` approximation.
             fn to_f64_display(&self) -> f64 {
                 *self as f64
             }
@@ -209,7 +250,17 @@ impl_to_f64_display!(
 /// primitives are silently skipped, so they simply won't appear in the sidebar.
 /// Callable signatures are skipped because no callable Inspector exists.
 ///
-/// - Complexity: O(n) in the number of cells.
+/// - Complexity: O(n + t + s) registration work for cells n, copied label bytes t,
+///   and prepared compound type structure s; later value formatting has its own costs.
+///
+/// # Examples
+///
+/// ```
+/// let parsed = adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
+///     .parse_str("sheet example { cell width: i64; }").unwrap();
+/// let labels = adam_web_ui::labels_from_cell_names(&parsed, &parsed.cell_names);
+/// assert!(labels.cells[&parsed.cell_names["width"].0].is_integer);
+/// ```
 pub fn labels_from_cell_names(
     sheet: &Sheet,
     cell_names: &IndexMap<String, (CellId, TypeShape)>,
@@ -294,6 +345,7 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
     };
     meta.is_numeric = true;
     meta.is_integer = is_integer;
+    meta.number_input_safe = !is_integer || std::mem::size_of::<T>() <= 4;
     if matches!(
         sheet.filter_kind(id),
         Some(adam_rs::FilterKind::Range { .. })
@@ -349,6 +401,8 @@ pub fn format_adam_error(
 }
 
 /// Returns the operation's message without replacing or consuming its typed error.
+///
+/// - Complexity: O(formatted message bytes) output space, plus the error's formatting cost.
 fn runtime_message(error: &Error) -> String {
     if let Error::MethodFailed { error, .. } = error
         && error.downcast_ref::<SpanContext>().is_some()
@@ -704,6 +758,8 @@ relationship choose(divisor: second);
 
     /// Parses `src` into a `ParsedSheet` via the standard adam-lang pipeline, for tests that
     /// need a real (rather than hand-built) span table to resolve `Error` sites against.
+    ///
+    /// - Complexity: parser/type-checker and sheet-construction work for the supplied source.
     fn parse(src: &str) -> adam_lang::ParsedSheet {
         use adam_lang::{AdamParser, TypeRegistry};
         use cel_parser::OpLookup;
@@ -713,6 +769,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Errors without source sites fall back to their display message.
     fn format_adam_error_invalid_id_falls_back_to_display() {
         let parsed = parse("sheet s { cell a: i32 = 0; }");
         let msg = format_adam_error(
@@ -726,6 +783,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Located method failures render source caret diagnostics.
     fn format_adam_error_method_failed_renders_caret_diagnostic() {
         use cel_parser::{SourceSpan, SpanContext};
 
@@ -745,6 +803,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Plain error rendering omits terminal escape sequences.
     fn format_adam_error_plain_renderer_has_no_ansi_escape_codes() {
         use cel_parser::{SourceSpan, SpanContext};
 
@@ -767,6 +826,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// A method failure without span context still renders its available located span.
     fn format_adam_error_method_failed_falls_back_to_a_single_located_span_without_a_span_context()
     {
         use adam_rs::ErrorSite;
@@ -788,6 +848,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Cycle errors render all supplied binding spans.
     fn format_adam_error_cycle_renders_a_multi_span_backtrace() {
         use adam_lang::{AdamParser, TypeRegistry};
         use cel_parser::OpLookup;
@@ -802,6 +863,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Rounded numeric display removes redundant decimal zeros and points.
     fn format_rounded_trims_trailing_zeros_and_point() {
         assert_eq!(format_rounded(86.666666666667), "86.67");
         assert_eq!(format_rounded(300.0), "300");
@@ -810,12 +872,14 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Rounded zero has no misleading negative sign.
     fn format_rounded_negative_zero_has_no_minus_sign() {
         assert_eq!(format_rounded(-0.0), "0");
         assert_eq!(format_rounded(-0.001), "0");
     }
 
     #[test]
+    /// Floating-point metadata selects numeric but not integer controls.
     fn labels_from_cell_names_marks_float_cells_as_numeric_but_not_integer() {
         let mut sheet = AdamSheet::new();
         let a = sheet.add_cell(2.0_f64);
@@ -830,6 +894,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Floating-point metadata displays rounded decimal values.
     fn labels_from_cell_names_rounds_float_display_to_two_decimals() {
         let mut sheet = AdamSheet::new();
         let a = sheet.add_cell(86.666666666667_f64);
@@ -843,6 +908,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Supported scalar types receive display/write metadata.
     fn labels_from_cell_names_builds_entries_for_supported_types() {
         let mut sheet = AdamSheet::new();
         let a = sheet.add_cell(2.0_f64);
@@ -873,6 +939,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Tuple cells receive compound display metadata.
     fn labels_from_cell_names_includes_tuple_typed_cells() {
         let sheet = tuple_sheet();
         let pair = sheet.cell_names["pair"].0;
@@ -941,6 +1008,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Metadata preserves declaration-ordered cell names.
     fn labels_from_cell_names_preserves_declaration_order() {
         let mut sheet = AdamSheet::new();
         let z = sheet.add_cell(1_i32);
@@ -956,6 +1024,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Unfiltered numeric cells have numeric classification without slider bounds.
     fn labels_from_cell_names_marks_numeric_cells_and_leaves_range_none_without_a_filter() {
         let mut sheet = AdamSheet::new();
         let a = sheet.add_cell(3_i32);
@@ -974,6 +1043,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Range-filtered numeric cells expose their current slider bounds.
     fn labels_from_cell_names_populates_range_for_a_range_filtered_cell() {
         use adam_rs::Filter;
         use std::any::Any;
@@ -1003,6 +1073,7 @@ relationship choose(divisor: second);
         assert_eq!(range_fn(&sheet), (0.0, 100.0));
     }
 
+    /// Builds one floating-point cell with generic display/write metadata.
     fn sheet_with_one_cell() -> (AdamSheet, Labels) {
         let mut sheet = AdamSheet::new();
         let mut labels = Labels::new();
@@ -1012,6 +1083,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Generic display callbacks format the registered cell's value.
     fn display_closure_returns_value_string() {
         let (sheet, labels) = sheet_with_one_cell();
         let a_id = *labels.cells.keys().next().unwrap();
@@ -1020,6 +1092,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Generic write callbacks parse and update the registered cell.
     fn write_str_closure_parses_and_writes() {
         let (mut sheet, labels) = sheet_with_one_cell();
         let a_id = *labels.cells.keys().next().unwrap();
@@ -1029,6 +1102,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Compound metadata displays the tuple's canonical debug representation.
     fn add_tuple_cell_display_returns_rust_debug_formatted_string() {
         let sheet = tuple_sheet();
         let cell_id = sheet.cell_names["pair"].0;
@@ -1039,6 +1113,7 @@ relationship choose(divisor: second);
     }
 
     #[test]
+    /// Unsupported compound edits return an error without changing the stored value.
     fn add_tuple_cell_write_str_always_errs_without_mutating_the_sheet() {
         let mut sheet = tuple_sheet();
         let cell_id = sheet.cell_names["pair"].0;

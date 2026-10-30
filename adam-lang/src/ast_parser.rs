@@ -28,6 +28,7 @@ pub struct AdamAstParser {
 }
 
 impl Default for AdamAstParser {
+    /// Creates an AST parser without a registry or operation environment.
     fn default() -> Self {
         Self::new()
     }
@@ -37,8 +38,11 @@ impl AdamAstParser {
     /// Creates a new AST-building parser.
     ///
     /// Unlike [`crate::AdamParser::new`], this takes no `TypeRegistry`/`OpLookup` — `AstContext`
-    /// resolves no identifiers and validates nothing during parsing (see this plan's Architecture
-    /// section), so there is nothing for either to configure.
+    /// resolves no identifiers and performs no semantic validation during parsing.
+    ///
+    /// # Examples
+    ///
+    /// See [`Self`] for parsing an annotated cell without an operation environment.
     #[must_use]
     pub fn new() -> Self {
         AdamAstParser {
@@ -71,6 +75,9 @@ impl AdamAstParser {
     /// keyword, missing sheet name, missing top-level braces, or trailing tokens after the
     /// sheet closes), imports, multiple definitions, or a component signature. Use
     /// [`Self::parse_module_str`] for complete modules.
+    ///
+    /// - Complexity: O(n) source scanning and AST storage for n source bytes,
+    ///   plus delegated CEL expression parsing.
     ///
     /// # Examples
     ///
@@ -165,7 +172,7 @@ impl AdamAstParser {
                 }
                 Err(error) => {
                     module.errors.push(error);
-                    let end = cursor.skip_to_module_item();
+                    let end = cursor.skip_to_module_item()?;
                     module
                         .items
                         .push(ast::ModuleItem::Error(ast::ExprSpan { start, end }));
@@ -298,7 +305,8 @@ impl AdamAstParser {
                 Err(e) => {
                     errors.push(e);
                     let recovery_fallback = cursor.last_span();
-                    let item_end = cursor.skip_to_recovery_point(target_depth, recovery_fallback);
+                    let item_end =
+                        cursor.skip_to_recovery_point(target_depth, recovery_fallback)?;
                     items.push(ast::SheetItem::Error {
                         span: ast::ExprSpan {
                             start: item_start,
@@ -494,7 +502,7 @@ impl AdamAstParser {
         self.cel.set_lex_tokens(tokens);
         let result = self.cel.parse_type_expression();
         cursor.set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
-        cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count());
+        cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count())?;
         result
     }
 
@@ -624,6 +632,8 @@ impl AdamAstParser {
                 let relationships = self.parse_branch_relationships(cursor)?;
                 let close = cursor.expect_close_brace()?;
                 default = Some(ast::DefaultBranch {
+                    leading_comment: None,
+                    blank_line_before: false,
                     relationships,
                     trailing_comment: None,
                     trailing_line_comment: None,
@@ -810,7 +820,7 @@ impl AdamAstParser {
             .parse_expression_ctx_restricted(restriction)
             .map(cel_parser::AstContext::into_expr);
         cursor.set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
-        cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count());
+        cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count())?;
         result
     }
 }
@@ -866,6 +876,7 @@ mod tests {
     use super::*;
     use cel_parser::Expr;
 
+    /// Produces no declarations for an empty sheet.
     #[test]
     fn parse_empty_sheet_has_no_items() {
         let sheet = AdamAstParser::new().parse_str("sheet empty {}").unwrap();
@@ -874,6 +885,7 @@ mod tests {
         assert!(sheet.errors.is_empty());
     }
 
+    /// Records both the type annotation and initializer of a cell.
     #[test]
     fn parse_cell_with_annotation_and_initializer() {
         let sheet = AdamAstParser::new()
@@ -891,6 +903,7 @@ mod tests {
         assert!(cell.initializer.is_some());
     }
 
+    /// Leaves the initializer absent for an annotation-only cell.
     #[test]
     fn parse_cell_annotation_only_has_no_initializer() {
         let sheet = AdamAstParser::new()
@@ -903,6 +916,7 @@ mod tests {
         assert!(cell.initializer.is_none());
     }
 
+    /// Leaves the annotation absent for an initializer-only cell.
     #[test]
     fn parse_cell_initializer_only_has_no_type_name() {
         let sheet = AdamAstParser::new()
@@ -915,6 +929,7 @@ mod tests {
         assert!(cell.initializer.is_some());
     }
 
+    /// Distinguishes source declarations from ordinary cells.
     #[test]
     fn parse_source_decl_produces_a_source_decl_sheet_item() {
         let sheet = AdamAstParser::new()
@@ -923,6 +938,7 @@ mod tests {
         assert!(matches!(sheet.items[0], ast::SheetItem::Source(_)));
     }
 
+    /// Records a source cell's filter expression.
     #[test]
     fn parse_source_with_a_filter() {
         let sheet = AdamAstParser::new()
@@ -935,6 +951,7 @@ mod tests {
         assert!(matches!(&filter.body, Expr::Ident { name, .. } if name == "_"));
     }
 
+    /// Leaves the filter absent when a source has no filter clause.
     #[test]
     fn parse_source_without_a_filter_leaves_it_none() {
         let sheet = AdamAstParser::new()
@@ -946,6 +963,7 @@ mod tests {
         assert!(source.filter.is_none());
     }
 
+    /// Preserves the declaration order of relationship bindings.
     #[test]
     fn parse_relationship_records_bindings_in_order() {
         let sheet = AdamAstParser::new()
@@ -968,6 +986,7 @@ mod tests {
         assert!(matches!(rel.bindings[0].body, Expr::Op { ref name, .. } if name == "*"));
     }
 
+    /// Distinguishes a direct target from a tuple destructure.
     #[test]
     fn parse_binding_bare_identifier_target_is_not_a_destructure() {
         let sheet = AdamAstParser::new()
@@ -992,6 +1011,7 @@ mod tests {
         }
     }
 
+    /// Records a singleton tuple target as a destructure.
     #[test]
     fn parse_binding_single_element_tuple_target_is_a_destructure() {
         let sheet = AdamAstParser::new()
@@ -1005,6 +1025,7 @@ mod tests {
         assert_eq!(rel.bindings[0].outputs[0].0, "x");
     }
 
+    /// Records every identifier in a multi-output destructure.
     #[test]
     fn parse_binding_multi_identifier_target_is_a_destructure() {
         let sheet = AdamAstParser::new()
@@ -1024,6 +1045,7 @@ mod tests {
         );
     }
 
+    /// Recovers a malformed unparenthesized multi-output binding at the sheet boundary.
     #[test]
     fn multi_output_binding_without_parens_recovers_at_sheet_item_level() {
         let sheet = AdamAstParser::new()
@@ -1046,6 +1068,7 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
+    /// Records named and default conditional branches.
     #[test]
     fn parse_conditional_records_branches_and_default() {
         let sheet = AdamAstParser::new()
@@ -1069,6 +1092,7 @@ mod tests {
         assert!(cond.default.is_some());
     }
 
+    /// Records a negative literal conditional key.
     #[test]
     fn parse_conditional_records_a_negated_literal_branch_key() {
         let sheet = AdamAstParser::new()
@@ -1090,6 +1114,7 @@ mod tests {
         assert!(cond.branches[0].negated);
     }
 
+    /// Diagnoses a minus sign without a following branch literal.
     #[test]
     fn parse_conditional_branch_dash_not_followed_by_a_literal_is_error() {
         let sheet = AdamAstParser::new()
@@ -1106,6 +1131,7 @@ mod tests {
         assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
+    /// Diagnoses an unsupported branch-literal suffix.
     #[test]
     fn parse_conditional_branch_literal_with_invalid_suffix_is_error() {
         // `10xyz` isn't a `cel_parser`-recognized literal (unrecognized integer suffix) — must
@@ -1125,6 +1151,7 @@ mod tests {
         assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
+    /// Diagnoses a negated unsigned branch literal.
     #[test]
     fn parse_conditional_branch_negating_an_unsigned_literal_is_error() {
         // `-1u32` has no `cel_parser` unary `-` overload — must be rejected here exactly as the
@@ -1143,6 +1170,7 @@ mod tests {
         assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
+    /// Records an expression tree for a conditional subject.
     #[test]
     fn parse_conditional_records_an_expression_match_subject() {
         let sheet = AdamAstParser::new()
@@ -1189,6 +1217,7 @@ mod tests {
         }
     }
 
+    /// Records all relationships within a named conditional branch.
     #[test]
     fn parse_conditional_branch_records_multiple_relationships() {
         let sheet = AdamAstParser::new()
@@ -1211,6 +1240,7 @@ mod tests {
         assert_eq!(cond.branches[0].relationships.len(), 2);
     }
 
+    /// Records all relationships within the default branch.
     #[test]
     fn parse_conditional_default_branch_records_multiple_relationships() {
         let sheet = AdamAstParser::new()
@@ -1236,6 +1266,7 @@ mod tests {
         );
     }
 
+    /// Recovers a bare branch binding instead of accepting it as a relationship.
     #[test]
     fn conditional_branch_bare_binding_without_relationship_wrapper_recovers() {
         // A branch body is now `{ relationship_decl }`, not `{ binding }` directly — a bare binding is
@@ -1259,6 +1290,7 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
+    /// Retains a CEL expression tree as the binding body.
     #[test]
     fn parse_binding_body_is_a_cel_expr_tree() {
         let sheet = AdamAstParser::new()
@@ -1270,6 +1302,7 @@ mod tests {
         assert!(matches!(rel.bindings[0].body, Expr::Tuple { .. }));
     }
 
+    /// Represents an unknown sheet item with an error placeholder.
     #[test]
     fn parse_unknown_sheet_item_is_recorded_as_an_error_item() {
         let sheet = AdamAstParser::new()
@@ -1279,6 +1312,7 @@ mod tests {
         assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
+    /// Represents a malformed cell with an error placeholder.
     #[test]
     fn parse_malformed_cell_is_recorded_as_an_error_item() {
         let sheet = AdamAstParser::new()
@@ -1288,6 +1322,7 @@ mod tests {
         assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
+    /// Preserves a valid sibling after a recovered declaration error.
     #[test]
     fn recovery_records_an_error_item_and_continues_parsing() {
         let sheet = AdamAstParser::new()
@@ -1308,6 +1343,7 @@ mod tests {
         assert_eq!(sheet.errors.len(), 1);
     }
 
+    /// Limits a recovery span to tokens consumed by the failed declaration.
     #[test]
     fn recovery_error_span_covers_tokens_actually_consumed_by_the_failed_item() {
         // When recovery stops immediately (the very next token is already the sibling
@@ -1328,6 +1364,7 @@ mod tests {
         assert_eq!(&source[range], "cell bad");
     }
 
+    /// Retains independent diagnostics for multiple malformed declarations.
     #[test]
     fn recovery_collects_multiple_errors_from_multiple_malformed_items() {
         let sheet = AdamAstParser::new()
@@ -1345,6 +1382,7 @@ mod tests {
         assert!(matches!(sheet.items.last(), Some(ast::SheetItem::Cell(_))));
     }
 
+    /// Reports no recovery diagnostics for well-formed declarations.
     #[test]
     fn well_formed_input_has_empty_errors() {
         let sheet = AdamAstParser::new()
@@ -1512,6 +1550,7 @@ mod tests {
         assert!(matches!(sheet.items[1], ast::SheetItem::Cell(_)));
     }
 
+    /// Records an output's explicit type without inventing requirements.
     #[test]
     fn parse_out_with_explicit_type_and_no_requirements() {
         let sheet = AdamAstParser::new()
@@ -1538,6 +1577,7 @@ mod tests {
         assert!(out.require.is_none());
     }
 
+    /// Leaves an output's type annotation absent when omitted.
     #[test]
     fn parse_out_with_no_type_annotation() {
         let sheet = AdamAstParser::new()
@@ -1549,6 +1589,7 @@ mod tests {
         assert!(out.type_name.is_none());
     }
 
+    /// Preserves output requirement declaration order.
     #[test]
     fn parse_out_with_requirements_in_declaration_order() {
         let sheet = AdamAstParser::new()
@@ -1572,6 +1613,7 @@ mod tests {
         assert_eq!(require.requirements[1].name.as_deref(), Some("max_width"));
     }
 
+    /// Leaves an unlabeled requirement's name absent.
     #[test]
     fn parse_requirement_without_a_label_leaves_name_none() {
         let sheet = AdamAstParser::new()
@@ -1592,6 +1634,7 @@ mod tests {
         assert_eq!(require.requirements[0].name, None);
     }
 
+    /// Represents a malformed output with an error placeholder.
     #[test]
     fn parse_malformed_out_is_recorded_as_an_error_item() {
         let sheet = AdamAstParser::new()
@@ -1612,6 +1655,7 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
+    /// Records the elements of an explicit tuple cell annotation.
     #[test]
     fn parse_cell_with_explicit_tuple_type() {
         let sheet = AdamAstParser::new()
@@ -1630,6 +1674,7 @@ mod tests {
         }
     }
 
+    /// Records an ordinary cell's filter expression.
     #[test]
     fn parse_cell_with_a_filter() {
         let sheet = AdamAstParser::new()
@@ -1642,6 +1687,7 @@ mod tests {
         assert!(matches!(&filter.body, Expr::Ident { name, .. } if name == "_"));
     }
 
+    /// Retains cell references within a filter expression.
     #[test]
     fn parse_cell_with_a_filter_referencing_a_cell() {
         let sheet = AdamAstParser::new()
@@ -1661,6 +1707,7 @@ mod tests {
         }
     }
 
+    /// Leaves a cell's filter absent when no clause is present.
     #[test]
     fn parse_cell_without_a_filter_leaves_it_none() {
         let sheet = AdamAstParser::new()
@@ -1672,6 +1719,7 @@ mod tests {
         assert!(cell.filter.is_none());
     }
 
+    /// Preserves the next sheet item after a malformed filter.
     #[test]
     fn recovery_malformed_filter_recovers_at_the_next_sheet_item() {
         let sheet = AdamAstParser::new()
@@ -1692,6 +1740,7 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
+    /// Records recursively nested tuple type annotations.
     #[test]
     fn parse_cell_with_nested_tuple_type() {
         let sheet = AdamAstParser::new()
@@ -1713,6 +1762,7 @@ mod tests {
         }
     }
 
+    /// Records an empty tuple type with zero elements.
     #[test]
     fn parse_cell_with_empty_tuple_type() {
         let sheet = AdamAstParser::new()
@@ -1727,6 +1777,7 @@ mod tests {
         }
     }
 
+    /// Treats a parenthesized type without a comma as grouping.
     #[test]
     fn parse_cell_with_parenthesized_type_is_grouping_not_a_1_tuple() {
         let sheet = AdamAstParser::new()
@@ -1741,6 +1792,7 @@ mod tests {
         ));
     }
 
+    /// Records a singleton tuple type marked by its required comma.
     #[test]
     fn parse_cell_with_1_tuple_type_requires_trailing_comma() {
         let sheet = AdamAstParser::new()
@@ -1755,6 +1807,7 @@ mod tests {
         }
     }
 
+    /// Records tuple construction in a cell initializer.
     #[test]
     fn parse_cell_initializer_is_a_tuple_expr() {
         let sheet = AdamAstParser::new()
@@ -1766,6 +1819,7 @@ mod tests {
         assert!(matches!(cell.initializer, Some(Expr::Tuple { .. })));
     }
 
+    /// Records a tuple annotation on an output declaration.
     #[test]
     fn parse_out_with_explicit_tuple_type() {
         let sheet = AdamAstParser::new()
@@ -1780,6 +1834,7 @@ mod tests {
         ));
     }
 
+    /// Preserves a following declaration after a malformed tuple annotation.
     #[test]
     fn malformed_tuple_type_recovers_at_the_next_sheet_item() {
         // Note: unlike a typical "forgot the closing delimiter" typo, the `(`/`)` pair here must
@@ -1797,6 +1852,7 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
+    /// Preserves a following declaration after malformed generic arguments.
     #[test]
     fn malformed_generic_type_argument_list_recovers_at_the_next_sheet_item() {
         // Same balanced-delimiter caveat as the tuple-type test above: the missing `,` between
@@ -1813,6 +1869,7 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
+    /// Attaches outer documentation to a cell.
     #[test]
     fn attaches_an_outer_doc_comment_to_a_cell() {
         let sheet = AdamAstParser::new()
@@ -1824,6 +1881,7 @@ mod tests {
         assert_eq!(cell.doc_comment.as_deref(), Some(" the total"));
     }
 
+    /// Attaches outer documentation to a relationship.
     #[test]
     fn attaches_an_outer_doc_comment_to_a_relationship() {
         let sheet = AdamAstParser::new()
@@ -1835,6 +1893,7 @@ mod tests {
         assert_eq!(rel.doc_comment.as_deref(), Some(" docs"));
     }
 
+    /// Attaches outer documentation to a conditional.
     #[test]
     fn attaches_an_outer_doc_comment_to_a_conditional() {
         let sheet = AdamAstParser::new()
@@ -1848,6 +1907,7 @@ mod tests {
         assert_eq!(cond.doc_comment.as_deref(), Some(" docs"));
     }
 
+    /// Attaches outer documentation to an output.
     #[test]
     fn attaches_an_outer_doc_comment_to_an_out_decl() {
         let sheet = AdamAstParser::new()
@@ -1859,6 +1919,7 @@ mod tests {
         assert_eq!(out.doc_comment.as_deref(), Some(" docs"));
     }
 
+    /// Attaches inner documentation to its containing sheet.
     #[test]
     fn attaches_a_sheet_level_inner_doc_comment() {
         let sheet = AdamAstParser::new()
@@ -1867,6 +1928,7 @@ mod tests {
         assert_eq!(sheet.doc_comment.as_deref(), Some(" module docs"));
     }
 
+    /// Joins consecutive outer documentation lines in source order.
     #[test]
     fn joins_consecutive_outer_doc_comment_lines() {
         let sheet = AdamAstParser::new()
@@ -1878,6 +1940,7 @@ mod tests {
         assert_eq!(cell.doc_comment.as_deref(), Some(" line one\n line two"));
     }
 
+    /// Keeps outer documentation attached across an intervening blank line.
     #[test]
     fn a_doc_comment_binds_forward_across_a_blank_line() {
         let sheet = AdamAstParser::new()
@@ -1889,6 +1952,7 @@ mod tests {
         assert_eq!(cell.doc_comment.as_deref(), Some(" docs"));
     }
 
+    /// Retains the order of ordinary and documentation comments.
     #[test]
     fn a_plain_comment_and_a_doc_comment_coexist_in_source_order() {
         // NOTE: deviates from the task brief's literal source string, which places `cell x` as
@@ -1915,6 +1979,7 @@ mod tests {
         );
     }
 
+    /// Diagnoses unsupported documentation before a binding.
     #[test]
     fn a_doc_comment_before_a_binding_recovers_as_a_declaration_level_error() {
         let sheet = AdamAstParser::new()
@@ -1926,6 +1991,7 @@ mod tests {
         assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
+    /// Records range syntax within a relationship expression.
     #[test]
     fn range_syntax_is_reachable_from_a_relationship_binding() {
         let sheet = AdamAstParser::new()

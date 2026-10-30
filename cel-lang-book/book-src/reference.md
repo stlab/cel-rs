@@ -1,32 +1,32 @@
 # Reference Manual
 
-This chapter is the compact language reference for CEL expressions. It
-gathers the core grammar, token categories, type names, literal forms,
-operators, standard-library operations, collections, closures, and sharp edges in one
-place.
+This chapter defines CEL's grammar, tokens, types, literals, operators,
+standard-library operations, collections, and closures.
 
 ## Concept
 
-CEL is an expression language. Every source form in this chapter produces
-a value or helps compose one. Use the tutorial chapters for worked prose,
-and use this chapter when you need the exact grammar or a concise rule
-table.
+CEL is an expression language. Use the tutorial chapters for worked examples.
 
 ## Syntax
 
-CEL uses strict LL(1) parsing with one token of lookahead. A comma requires
-another item, except for the required terminal comma in a singleton tuple value
-or type. No other list accepts a trailing comma.
+CEL uses strict LL(1) parsing.
+
+<!-- [knowledge]
+Keep these productions consistent with the parser's single-token decisions.
+In CEL's grammar, consuming a separator commits to another item; the required
+comma marking a singleton tuple value or type is the exception. Do not add
+optional trailing commas when editing the grammar or examples.
+-->
 
 ```text
-expression = range_expression .
+expression = closure_expression | range_expression .
 range_expression = ".." [ or_expression ]
                  | "..=" or_expression
                  | or_expression [ ".." [ or_expression ] | "..=" or_expression ] .
 or_expression = and_expression { "||" and_expression } .
 and_expression = comparison_expression { "&&" comparison_expression } .
 comparison_expression = bitwise_or_expression
-    [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ] .
+    [ comparison_operator bitwise_or_expression ] .
 bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression } .
 bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression } .
 bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression } .
@@ -34,24 +34,23 @@ bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expressi
 additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression } .
 multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
 cast_expression = unary_expression { "as" identifier } .
-unary_expression = (("-" | "!") unary_expression) | postfix_expression .
-postfix_expression = primary_expression {
-    "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ argument_list ] ")" ])
-} .
+unary_expression = ("-" | "!") unary_expression | postfix_expression .
+postfix_expression = primary_expression { postfix_suffix } .
+postfix_suffix = "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier) .
+comparison_operator = "==" | "!=" | "<" | ">" | "<=" | ">=" .
 argument_list = expression { "," expression } .
 primary_expression = literal
-                   | identifier [ record_fields ]
+                   | value_identifier [ record_fields ]
                    | tuple_or_group
                    | array_expression
-                   | if_expression
-                   | closure_expression .
+                   | if_expression .
 record_fields = "{"
     [ field_initializer { "," field_initializer } ] "}" .
 field_initializer = identifier ":" expression .
 tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
 array_expression = "[" [ expression { "," expression } ] "]"
                  [ ":" type_expr ] .
-type_expr = identifier [ "(" type_expr { "," type_expr } ")" ]
+type_expr = identifier [ "(" [ type_expr { "," type_expr } ] ")" ]
           | "[" type_expr "]"
           | "(" [ type_expr [ "," [ type_expr { "," type_expr } ] ] ] ")" .
 if_expression = "if" expression "{" expression "}"
@@ -60,6 +59,25 @@ closure_expression = "||" expression
                    | "|" closure_param { "," closure_param } "|" expression .
 closure_param = identifier ":" type_expr .
 ```
+
+These productions encode precedence and left associativity directly. Comparisons
+and ranges do not chain; logical operators may combine separate comparisons.
+A closure is a complete expression, not a primary operand. Its body consumes the
+remaining expression inside its delimiter boundary. Group a closure before applying
+an operator or postfix suffix to it. Arguments and collection elements are complete
+expressions and accept bare closures.
+A call suffix directly after a named member dispatches that member. Parenthesize
+the member before the call suffix to call its result instead.
+
+`value_identifier` excludes `if`, `else`, `as`, `true`, and `false`.
+
+<!-- [knowledge]
+Expand the productions in ordinary and header modes. Header mode removes
+record_fields from its primary production, reserving the following brace for
+the body. A condition enters header mode; a closure body inherits its enclosing
+mode. Groups, arguments, arrays, record field values, and branch bodies enter
+ordinary mode. The user-facing condition restriction is documented in Exact rules.
+-->
 
 ## Worked examples
 
@@ -137,7 +155,7 @@ true as i32
 | <code>&amp;&amp;</code>, <code>&#124;&#124;</code> | `bool` and `bool` | Short-circuit logical operators. |
 | `==`, `!=` | homogeneous numeric operands, homogeneous `bool`, or homogeneous `String` | Produces `bool`. |
 | `<`, `<=`, `>`, `>=` | homogeneous numeric operands or homogeneous `String` | Produces `bool`. |
-| range forms | homogeneous numeric endpoints, or no endpoints for `..` | `..=` requires a right endpoint. Endpoints are full expressions. |
+| range forms | homogeneous numeric endpoints, or no endpoints for `..` | `..=` requires a right endpoint. Group closures and nested ranges used as endpoints. |
 | `as` | expression plus built-in scalar target name | Integer targets accept integer, floating-point, and `bool` sources. `f32`/`f64` targets accept integer and floating-point sources. `bool` and `String` targets accept only their same-type sources. |
 | call and `.N` | a valid callee and arguments, or a tuple plus an unsuffixed integer | `.N` applies to tuples only. |
 
@@ -155,13 +173,6 @@ when the evaluation environment installs it. See
 | `signum(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | No unsigned support. Successful calls are infallible. |
 | `sqrt(x)` | `f32`, `f64` | same as operand | Float-only. Inputs below zero yield `NaN` rather than an error. |
 | `floor(x)`, `ceil(x)`, `trunc(x)`, `fract(x)`, `round_ties_even(x)` | `f32`, `f64` | same as operand | Float-only. Successful calls are infallible. |
-
-- None of the documented functions are integer-only.
-- `sqrt`, `floor`, `ceil`, `trunc`, `fract`, and `round_ties_even` are
-  float-only.
-- `min`, `max`, and `clamp` support both integers and floats.
-- `abs` and `signum` support signed integers and floats, but not unsigned
-  integers.
 
 ## Collection table
 
@@ -206,9 +217,11 @@ when the evaluation environment installs it. See
   preparation, not each invocation. Clone, equality, and formatting are
   explicit independent capabilities.
 - Native Rust operations can serve interpreted CEL through typed adapters.
-  A macro-compiled CEL backend does not yet exist.
 - Comparison expressions consume one comparison operator.
 - Range forms do not chain.
+- Closures require parentheses as operator operands, including range endpoints,
+  cast inputs, and postfix receivers. Complete-expression positions, including
+  call arguments, tuple elements, array elements, and branch bodies, accept bare closures.
 - `expr.name` and `expr.name()` invoke the same host-provided unary operation.
   `expr.name(a, b)` passes the receiver first, followed by explicit arguments.
   Each operand evaluates once in source order. A value binding named `name`

@@ -14,6 +14,8 @@ use crate::{CellId, CellKind, Filter, MatchExpr, Requirement, Sheet};
 /// Owns declarations and validates all local references before accepting them.
 ///
 /// Private included names do not enter this builder's declaration namespace.
+///
+/// # Examples
 /// See the [module example](super).
 pub struct TemplateBuilder {
     recipe: SheetTemplate,
@@ -562,7 +564,7 @@ impl TemplateBuilder {
         default: Vec<RelationshipSlot>,
     ) -> Result<(), TemplateError>
     where
-        T: Clone + Any + PartialEq + 'static,
+        T: Any + PartialEq + 'static,
         F: Fn(&[CellId]) -> anyhow::Result<MatchExpr> + 'static,
         K: Fn() -> anyhow::Result<Vec<Vec<T>>> + 'static,
     {
@@ -850,5 +852,41 @@ impl std::hash::Hash for CellSlot {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::hash::Hash::hash(&Rc::as_ptr(&self.owner), state);
         std::hash::Hash::hash(&self.index, state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Starts fresh namespaces and keeps the builder usable after a rejected declaration.
+    #[test]
+    fn defaults_and_rejected_declarations_preserve_builder_contract() {
+        let mut builder = TemplateBuilder::default();
+        let slot = builder.parameter::<i32>("input").unwrap();
+        assert!(matches!(
+            builder.parameter::<bool>("input"),
+            Err(TemplateError::DuplicateParameter { .. })
+        ));
+        let foreign = TemplateBuilder::new().parameter::<i32>("input").unwrap();
+        assert_ne!(slot, foreign);
+        assert_eq!(HashSet::from([slot.clone(), slot, foreign]).len(), 2);
+        builder.cell("private", || Ok(9_i32)).unwrap();
+        let template = builder.finish().unwrap();
+        assert_eq!(template.parameter_names().collect::<Vec<_>>(), ["input"]);
+        assert!(!template.is_relationship_only());
+        let mut sheet = Sheet::new();
+        let actual = sheet.add_cell(3_i32);
+        let instance = template
+            .instantiate(&mut sheet, &[("input", actual)])
+            .unwrap();
+        assert_eq!(instance.cells().len(), 2);
+        assert_eq!(*sheet.read::<i32>(instance.cells()[1]).unwrap(), 9);
+        assert!(
+            TemplateBuilder::default()
+                .finish()
+                .unwrap()
+                .is_relationship_only()
+        );
     }
 }

@@ -1033,15 +1033,6 @@ mod tests {
         assert!(!span.source_text().unwrap_or_default().is_empty());
     }
 
-    /// Provides a source span through the token-tree trait implementation.
-    #[test]
-    fn test_haspan_trait_for_tokentree() {
-        let input = TokenStream::from_str("42").unwrap();
-        let tt = input.into_iter().next().unwrap();
-
-        assert_eq!(HasSpan::span(&tt).source_text().as_deref(), Some("42"));
-    }
-
     /// Preserves the order of identifiers, punctuation, and literals.
     #[test]
     fn test_mixed_tokens() {

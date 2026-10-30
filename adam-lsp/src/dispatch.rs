@@ -24,13 +24,24 @@ const INVALID_PARAMS: i32 = -32602;
 
 /// Runs the adam-lang language server on stdin/stdout until the client sends `exit`.
 ///
+/// - Complexity: cumulative message dispatch, source analysis and serialization
+///   time; space for the current source snapshot and its analysis.
+///
 /// # Errors
 ///
 /// Returns `Err` if the initialize handshake fails, a message can't be read from or written to
 /// stdio, or the background reader/writer threads panic.
+///
+/// # Examples
+///
+/// ```no_run
+/// adam_lsp::run()?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 pub fn run() -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::stdio();
     serve(&connection)?;
+    drop(connection);
     io_threads.join()?;
     Ok(())
 }
@@ -45,7 +56,10 @@ pub fn run() -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns `Err` under the same conditions as [`run`].
+/// Returns an error if initialization, shutdown or transport communication fails.
+///
+/// - Complexity: cumulative message dispatch, source analysis and serialization
+///   time; space for the current source snapshot and its analysis.
 ///
 /// # Examples
 ///
@@ -70,6 +84,9 @@ pub fn serve(connection: &Connection) -> anyhow::Result<()> {
 }
 
 /// Dispatches every message on `connection` until a `shutdown`/`exit` sequence ends the server.
+///
+/// - Complexity: cumulative dispatch and analysis time; space for the current
+///   source snapshot and its analysis.
 ///
 /// # Errors
 ///
@@ -96,6 +113,9 @@ fn main_loop(connection: &Connection, mut modules: ModuleSources) -> anyhow::Res
 /// Handles one client request. Only `textDocument/formatting` is implemented; every other method
 /// gets a JSON-RPC "Method not found" response (`shutdown` is intercepted earlier, in
 /// `main_loop`, and never reaches here).
+///
+/// - Complexity: formatting time/space for an open source, plus response
+///   serialization and expected O(u) URI lookup time for u URI bytes.
 ///
 /// # Errors
 ///
@@ -146,6 +166,8 @@ fn handle_request(
 ///
 /// Open documents overlay registered revisions by exact URI; closing restores the
 /// supplied revision. Malformed notifications leave documents unchanged.
+/// FULL-sync changes must omit both range fields; any range-bearing entry
+/// rejects the complete batch. Complete replacements apply in array order.
 /// - Complexity: diagnostic analysis and serialization plus O(n) full-text storage.
 ///
 /// # Errors
@@ -190,6 +212,14 @@ fn handle_notification(
                         return Ok(());
                     }
                 };
+            if params
+                .content_changes
+                .iter()
+                .any(|change| change.range.is_some() || change.range_length.is_some())
+            {
+                eprintln!("adam-lsp: ignoring incremental didChange with FULL synchronization");
+                return Ok(());
+            }
             if let Some(change) = params.content_changes.into_iter().last() {
                 documents.insert(params.text_document.uri.as_str().to_owned(), change.text);
                 publish_all(connection, documents, modules)?;
@@ -233,7 +263,7 @@ fn handle_notification(
 
 /// Sends one complete diagnostic replacement for `uri`.
 ///
-/// - Complexity: O(d) for the serialized diagnostic size.
+/// - Complexity: O(u + d) time and space for u URI and d serialized diagnostic bytes.
 ///
 /// # Errors
 ///
@@ -270,7 +300,8 @@ fn publish_all(
 
 /// Sends a complete diagnostic replacement for each URI in the supplied map.
 ///
-/// - Complexity: O(d) for the serialized diagnostic size.
+/// - Complexity: O(f + u + d) time and O(u + d) serialization space for f
+///   owners, u URI bytes and d diagnostic bytes.
 /// # Errors
 /// Returns an error if the transport fails or an internal URI cannot be parsed.
 fn publish_diagnostics(
@@ -289,8 +320,8 @@ fn publish_diagnostics(
 ///   parse, or parses with any recovered syntax error) — refusing to format code it can't fully
 ///   understand, matching `rustfmt`. Otherwise returns exactly one [`TextEdit`] replacing the
 ///   whole document with `format_source`'s output.
-/// - Complexity: O(n) in the length of `source` — parses, attaches trivia to, and formats the
-///   whole sheet once, with no caching across calls.
+/// - Complexity: [`format_source`]'s parsing/trivia/formatting costs and O(o)
+///   output space for o formatted bytes, with no caching across calls.
 fn format_edits(source: &str) -> Vec<TextEdit> {
     match format_source(source) {
         Ok(formatted) => vec![TextEdit {
@@ -318,6 +349,7 @@ fn whole_document_range() -> Range {
     }
 }
 
+/// Verifies formatting, lifecycle handshakes and safe notification dispatch.
 #[cfg(test)]
 mod tests {
     use lsp_server::{Connection, Message, Notification as ServerNotification, Request, RequestId};
@@ -332,6 +364,83 @@ mod tests {
     };
 
     use super::{format_edits, serve};
+
+    /// Rejects malformed formatting parameters and returns no edits for unknown documents.
+    #[test]
+    fn formatting_request_validates_params_and_unknown_document() {
+        let (server, client) = Connection::memory();
+        let documents = std::collections::HashMap::new();
+        for (params, valid) in [
+            (serde_json::json!({"missing":"params"}), false),
+            (
+                serde_json::json!({
+                    "textDocument":{"uri":"file:///missing.adm2"},
+                    "options":{"tabSize":4,"insertSpaces":true}
+                }),
+                true,
+            ),
+        ] {
+            super::handle_request(
+                &server,
+                &documents,
+                Request::new(4.into(), Formatting::METHOD.into(), params),
+            )
+            .unwrap();
+            let Message::Response(response) = client.receiver.recv().unwrap() else {
+                panic!("expected formatting response")
+            };
+            assert_eq!(response.id, 4.into());
+            if valid {
+                assert_eq!(response.response_result.unwrap(), serde_json::json!([]));
+            } else {
+                assert_eq!(
+                    response.response_result.unwrap_err().code,
+                    super::INVALID_PARAMS
+                );
+            }
+        }
+    }
+
+    /// Rejects incremental FULL-sync messages without losing the last complete document.
+    #[test]
+    fn full_sync_rejects_range_changes_and_recovers() {
+        let (server, client) = Connection::memory();
+        let uri = "file:///full.adm2";
+        let original = "sheet old {}";
+        let mut documents = std::collections::HashMap::from([(uri.into(), original.into())]);
+        let mut modules = crate::modules::ModuleSources::default();
+        for changes in [
+            serde_json::json!([{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"text":"x"}]),
+            serde_json::json!([{"rangeLength":1,"text":"x"}]),
+            serde_json::json!([{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"text":"x"},{"text":"sheet new {}"}]),
+            serde_json::json!([]),
+        ] {
+            super::handle_notification(
+                &server,
+                &mut documents,
+                &mut modules,
+                ServerNotification::new(
+                    DidChangeTextDocument::METHOD.into(),
+                    serde_json::json!({"textDocument":{"uri":uri,"version":2},"contentChanges":changes}),
+                ),
+            ).unwrap();
+            assert_eq!(documents[uri], original);
+            assert!(client.receiver.try_recv().is_err());
+        }
+        super::handle_notification(
+            &server,
+            &mut documents,
+            &mut modules,
+            ServerNotification::new(
+                DidChangeTextDocument::METHOD.into(),
+                serde_json::json!({"textDocument":{"uri":uri,"version":3},"contentChanges":[{"text":"sheet interim {}"},{"text":"sheet new {}"}]}),
+            ),
+        ).unwrap();
+        assert_eq!(documents[uri], "sheet new {}");
+        let publication = expect_published(&client);
+        assert_eq!(publication.uri.as_str(), uri);
+        assert!(publication.diagnostics.is_empty());
+    }
 
     /// Whole-document edits preserve comments around list closers without trailing commas.
     #[test]
@@ -370,23 +479,29 @@ mod tests {
         }
     }
 
+    /// Refuses formatting a source without a sheet.
     #[test]
     fn format_edits_is_empty_for_a_syntax_error() {
         assert!(format_edits("not a sheet at all").is_empty());
     }
 
+    /// Refuses formatting a sheet with a recovered malformed declaration.
     #[test]
     fn format_edits_is_empty_for_a_recovered_syntax_error() {
         assert!(format_edits("sheet s { cell x unknown_syntax }").is_empty());
     }
 
+    /// Produces one canonical full-document replacement for a clean sheet.
     #[test]
     fn format_edits_returns_one_edit_replacing_the_whole_document() {
         let edits = format_edits("sheet   s{cell x:i32=1;}");
         assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.start, lsp_types::Position::new(0, 0));
+        assert!(edits[0].range.end.line >= 1);
         assert_eq!(edits[0].new_text, "sheet s {\n    cell x: i32 = 1;\n}\n");
     }
 
+    /// Preserves a cell filter in canonical formatting.
     #[test]
     fn format_edits_formats_a_cell_with_a_filter() {
         let edits = format_edits("sheet s { cell a:i32=1 filter _; }");
@@ -397,6 +512,7 @@ mod tests {
         );
     }
 
+    /// Formats inclusive range filters without failing the request.
     #[test]
     fn format_edits_formats_a_cell_with_a_range_inclusive_filter() {
         // Regression test: formatting a range-literal filter (as in
@@ -412,6 +528,7 @@ mod tests {
         );
     }
 
+    /// Formats the stored source of an opened document over the real transport.
     #[test]
     fn formatting_request_returns_the_edit_for_a_previously_opened_document() {
         let (server, client) = Connection::memory();
@@ -455,6 +572,7 @@ mod tests {
             Message::Response(r) => r,
             other => panic!("expected a response, got {other:?}"),
         };
+        assert_eq!(response.id, RequestId::from(3));
         let edits: Vec<TextEdit> =
             serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert_eq!(edits.len(), 1);
@@ -464,7 +582,9 @@ mod tests {
         server_thread.join().unwrap().unwrap();
     }
 
-    /// Sends the `initialize` -> `initialized` handshake on `client`, discarding the response.
+    /// Completes initialization after verifying its successful response ID and FULL sync.
+    ///
+    /// - Complexity: O(n) space for the initialization response's n payload bytes.
     fn initialize(client: &Connection) {
         client
             .sender
@@ -474,7 +594,12 @@ mod tests {
                 serde_json::json!({}),
             )))
             .unwrap();
-        client.receiver.recv().unwrap();
+        let Message::Response(response) = client.receiver.recv().unwrap() else {
+            panic!("expected initialization response")
+        };
+        assert_eq!(response.id, RequestId::from(1));
+        let result = response.response_result.unwrap();
+        assert_eq!(result["capabilities"]["textDocumentSync"], 1);
         client
             .sender
             .send(Message::Notification(ServerNotification::new(
@@ -484,7 +609,7 @@ mod tests {
             .unwrap();
     }
 
-    /// Sends the `shutdown` -> `exit` sequence on `client`, discarding the response.
+    /// Sends exit after verifying the successful shutdown response ID.
     fn shut_down(client: &Connection) {
         client
             .sender
@@ -494,7 +619,11 @@ mod tests {
                 serde_json::json!(null),
             )))
             .unwrap();
-        client.receiver.recv().unwrap();
+        let Message::Response(response) = client.receiver.recv().unwrap() else {
+            panic!("expected shutdown response")
+        };
+        assert_eq!(response.id, RequestId::from(2));
+        assert!(response.response_result.is_ok(), "{response:?}");
         client
             .sender
             .send(Message::Notification(ServerNotification::new(
@@ -506,6 +635,8 @@ mod tests {
 
     /// Receives the next message from `client` and asserts it's a `publishDiagnostics`
     /// notification, returning its deserialized params.
+    ///
+    /// - Complexity: O(n) time and space for n serialized diagnostic bytes.
     fn expect_published(client: &Connection) -> PublishDiagnosticsParams {
         let published = match client.receiver.recv().unwrap() {
             Message::Notification(n) => n,
@@ -515,6 +646,7 @@ mod tests {
         serde_json::from_value(published.params).unwrap()
     }
 
+    /// Publishes the opened owner's type errors.
     #[test]
     fn open_notification_triggers_a_publish_diagnostics_notification() {
         let (server, client) = Connection::memory();
@@ -545,6 +677,7 @@ mod tests {
         server_thread.join().unwrap().unwrap();
     }
 
+    /// Continues serving after a malformed open notification.
     #[test]
     fn malformed_open_notification_is_skipped_not_crashed() {
         let (server, client) = Connection::memory();
@@ -586,6 +719,7 @@ mod tests {
         server_thread.join().unwrap().unwrap();
     }
 
+    /// Replaces clean diagnostics after a complete text update introduces a type error.
     #[test]
     fn change_notification_after_open_triggers_a_second_publish_diagnostics_notification() {
         let (server, client) = Connection::memory();
@@ -635,6 +769,7 @@ mod tests {
         server_thread.join().unwrap().unwrap();
     }
 
+    /// Returns method-not-found with the original ID for unsupported requests.
     #[test]
     fn unrecognized_request_method_gets_a_method_not_found_response() {
         let (server, client) = Connection::memory();
@@ -654,7 +789,11 @@ mod tests {
             Message::Response(r) => r,
             other => panic!("expected a response, got {other:?}"),
         };
-        assert!(response.response_result.is_err());
+        assert_eq!(response.id, RequestId::from(3));
+        assert_eq!(
+            response.response_result.unwrap_err().code,
+            super::METHOD_NOT_FOUND
+        );
 
         shut_down(&client);
         server_thread.join().unwrap().unwrap();

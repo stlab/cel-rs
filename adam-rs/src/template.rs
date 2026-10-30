@@ -64,6 +64,8 @@ pub use provenance::{InstanceOccurrence, MethodOrigin, OccurrenceId, TemplateId}
 /// Identifies a cell declaration within exactly one owning builder/template.
 ///
 /// Clones retain identity, not ownership of a live cell.
+///
+/// # Examples
 /// See the [module example](self).
 #[derive(Clone, Debug)]
 pub struct CellSlot {
@@ -84,6 +86,8 @@ impl Eq for CellSlot {}
 ///
 /// A group expands to zero or more distinct live relationships, never a merged
 /// runtime relationship. Inclusion returns one group in the including namespace.
+///
+/// # Examples
 /// See [`TemplateBuilder::include`].
 #[derive(Clone, Debug)]
 pub struct RelationshipSlot {
@@ -107,7 +111,10 @@ type MethodFactory = dyn Fn(&[CellId], &[CellId]) -> anyhow::Result<Method>;
 ///
 /// Factories must create fresh execution state satisfying [`Method`]'s contract.
 /// Their returned method's positional edges and types must match the declarations.
-/// Immutable captured configuration may be shared. See the [module example](self).
+/// Immutable captured configuration may be shared.
+///
+/// # Examples
+/// See the [module example](self).
 pub struct MethodRecipe {
     inputs: Vec<CellSlot>,
     outputs: Vec<CellSlot>,
@@ -218,6 +225,8 @@ enum RelationshipRecipe {
 /// Parameters alias bindings; private cells and methods are fresh per instance.
 /// Destruction releases last-owned inclusion edges iteratively; shared children
 /// and their factories remain alive until their last strong owner releases them.
+///
+/// # Examples
 /// See the [module example](self).
 pub struct SheetTemplate {
     owner: Rc<()>,
@@ -354,6 +363,8 @@ impl SheetTemplate {
 ///
 /// The group represents the entire compact include, including transitive children.
 /// It contains no live handles and does not enumerate its members before expansion.
+///
+/// # Examples
 /// See [`TemplateBuilder::include`].
 pub struct TemplateInclusion {
     relationships: Vec<RelationshipSlot>,
@@ -379,6 +390,8 @@ impl TemplateInclusion {
 /// remain distinct even when their recipe belongs to a group.
 /// Occurrence records retain local mappings and immutable identity tokens, not
 /// template factories or recursively owned inclusion edges.
+///
+/// # Examples
 /// See the [module example](self).
 #[derive(Debug)]
 pub struct Instance {
@@ -409,5 +422,83 @@ impl Instance {
     /// See the [module example](self).
     pub fn cells(&self) -> &[CellId] {
         &self.cells
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Preserves slot identity through cloning and distinguishes owners and indices.
+    #[test]
+    fn local_handle_identity_laws() {
+        let mut a = TemplateBuilder::new();
+        let x = a.parameter::<i32>("x").unwrap();
+        let y = a.parameter::<i32>("y").unwrap();
+        let foreign = TemplateBuilder::new().parameter::<i32>("x").unwrap();
+        assert_eq!(x, x.clone());
+        assert_eq!(x.clone(), x);
+        assert_ne!(x, y);
+        assert_ne!(x, foreign);
+        let group = RelationshipSlot {
+            owner: x.owner.clone(),
+            index: 0,
+        };
+        assert_eq!(group, group.clone());
+        assert_ne!(
+            group,
+            RelationshipSlot {
+                owner: y.owner.clone(),
+                index: 1
+            }
+        );
+        assert_ne!(
+            group,
+            RelationshipSlot {
+                owner: foreign.owner.clone(),
+                index: 0
+            }
+        );
+    }
+
+    /// Rejects each malformed relationship boundary and accepts overlapping non-nested outputs.
+    #[test]
+    fn relationship_edges_obey_structural_contract() {
+        assert!(check_relationship_edges::<usize>(&[]).is_err());
+        assert!(check_relationship_edges(&[(&[0][..], &[][..])]).is_err());
+        assert!(check_relationship_edges(&[(&[0][..], &[1, 1][..])]).is_err());
+        assert!(check_relationship_edges(&[(&[0][..], &[1][..]), (&[1][..], &[2][..])]).is_err());
+        assert!(check_relationship_edges(&[(&[0][..], &[1][..]), (&[0][..], &[1][..])]).is_err());
+        assert!(
+            check_relationship_edges(&[(&[0, 2][..], &[1][..]), (&[0][..], &[1, 2][..])]).is_err()
+        );
+        assert!(
+            check_relationship_edges(&[(&[2][..], &[0, 1][..]), (&[0][..], &[1, 2][..])]).is_ok()
+        );
+    }
+
+    /// Retains empty-template summaries and the inclusion's single borrowed group.
+    #[test]
+    fn empty_template_and_inclusion_accessors() {
+        let child = Rc::new(TemplateBuilder::new().finish().unwrap());
+        assert_eq!(child.parameter_names().count(), 0);
+        assert!(child.is_relationship_only());
+        let mut builder = TemplateBuilder::new();
+        let inclusion = builder.include(child, &[]).unwrap();
+        assert_eq!(inclusion.relationships().len(), 1);
+        let instance = builder
+            .finish()
+            .unwrap()
+            .instantiate(&mut Sheet::new(), &[])
+            .unwrap();
+        assert!(instance.cells().is_empty());
+        assert!(instance.relationships().is_empty());
+        assert_eq!(
+            instance.relationship_group(
+                instance.occurrences()[0].id(),
+                &inclusion.relationships()[0]
+            ),
+            Some(&[][..])
+        );
     }
 }

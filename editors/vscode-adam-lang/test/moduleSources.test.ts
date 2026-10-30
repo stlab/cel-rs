@@ -6,6 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import * as path from 'node:path';
 import type { ModuleSourceOptions } from '../src/moduleSources';
+import { INITIAL, parseRawGrammar, Registry } from 'vscode-textmate';
+import { loadWASM, OnigScanner, OnigString } from 'vscode-oniguruma';
 
 /** Reproduces the extension's shared loader and event wiring without VS Code. */
 function moduleAdapter(currentOptions: () => ModuleSourceOptions, requestRefresh: () => void) {
@@ -352,6 +354,20 @@ test('editor event glue uses current configuration and suppresses unrelated sour
   assert.equal(refreshes, 3);
 });
 
+test('editor event handlers accept an owner providing only source identity', () => {
+  let selected = 'file:///workspace/first.adm2';
+  let refreshes = 0;
+  const handlers = createModuleSourceHandlers(
+    { isSource: (uri: string) => uri === selected },
+    () => { refreshes += 1; },
+  );
+  handlers.sourceChanged(selected);
+  selected = 'file:///workspace/second.adm2';
+  handlers.sourceChanged('file:///workspace/first.adm2');
+  handlers.sourceChanged(selected);
+  assert.equal(refreshes, 2);
+});
+
 test('refresh transport failures reject but do not poison future refreshes', async () => {
   let count = 0;
   const refresh = createModuleSourceRefresh(
@@ -366,53 +382,113 @@ test('refresh transport failures reject but do not poison future refreshes', asy
 });
 
 test('disposing refresh ownership suppresses pending publications and future loads', async () => {
-  let release: (() => void) | undefined;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  let loads = 0;
-  const refresh = createModuleSourceRefresh(
-    async () => { loads += 1; await gate; return []; },
-    async () => { assert.fail('disposed refresh must not publish'); },
-    () => { assert.fail('disposed refresh must not report'); },
-  );
-  const pending = refresh();
-  await Promise.resolve();
-  refresh.dispose();
-  release?.();
-  await pending;
-  await refresh();
-  assert.equal(loads, 1);
+  for (const rejected of [false, true]) {
+    let release: (() => void) | undefined;
+    let started: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const loading = new Promise<void>((resolve) => { started = resolve; });
+    let loads = 0;
+    const refresh = createModuleSourceRefresh(
+      async () => {
+        loads += 1;
+        started?.();
+        await gate;
+        if (rejected) { throw new Error('disposed load failed'); }
+        return [];
+      },
+      async () => { assert.fail('disposed refresh must not publish'); },
+      () => { assert.fail('disposed refresh must not report'); },
+    );
+    const pending = [refresh(), refresh()];
+    await loading;
+    refresh.dispose();
+    release?.();
+    await Promise.all(pending);
+    await refresh();
+    assert.equal(loads, 1);
+  }
 });
 
 test('refreshes serialize snapshots and publish read errors explicitly before recovery', async () => {
+  const first = { path: 'first', uri: 'file:///first.adm2', text: 'sheet first() {}' };
+  const last = { path: 'last', uri: 'file:///last.adm2', text: 'sheet last() {}' };
   const snapshots: unknown[] = [];
   const errors: string[] = [];
+  let release: (() => void) | undefined;
+  let started: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const publishing = new Promise<void>((resolve) => { started = resolve; });
   let count = 0;
   const refresh = createModuleSourceRefresh(
     async () => {
       count += 1;
       if (count === 2) { throw new Error('deleted definition'); }
-      return await loadModuleSources(options());
+      return count === 1 ? [first] : [last];
     },
-    async (snapshot) => { snapshots.push(snapshot); },
+    async (snapshot) => {
+      snapshots.push(snapshot);
+      if (snapshots.length === 1) {
+        started?.();
+        await gate;
+      }
+    },
     (message) => { errors.push(message); },
   );
-  await Promise.all([refresh(), refresh(), refresh()]);
+  const pending = [refresh(), refresh(), refresh()];
+  await publishing;
+  try {
+    assert.equal(count, 1, 'a pending publication owns the queue');
+    assert.deepEqual(snapshots, [{ moduleSources: [first] }]);
+  } finally {
+    release?.();
+    await Promise.all(pending);
+  }
   assert.deepEqual(snapshots, [
-    { moduleSources: await loadModuleSources(options()) },
+    { moduleSources: [first] },
     { moduleSourcesError: 'deleted definition' },
-    { moduleSources: await loadModuleSources(options()) },
+    { moduleSources: [last] },
   ]);
   assert.deepEqual(errors, ['deleted definition']);
 });
 
 test('grammar highlights module keywords, parameter types and named bindings', async () => {
-  const grammar = JSON.parse(await readFile(path.resolve(__dirname, '../../syntaxes/adam-lang.tmLanguage.json'), 'utf8'));
-  const keyword = new RegExp(grammar.repository.keywords.patterns[0].match);
-  assert.ok(keyword.test('use'));
-  assert.ok(keyword.test('as'));
-  assert.ok(new RegExp(grammar.repository.types.patterns[0].match).test('f64'));
-  const binding = grammar.repository.bindings;
-  assert.ok(binding);
-  assert.ok(new RegExp(binding.match).test('a: x'));
-  assert.ok(grammar.patterns.some((entry: { include: string }) => entry.include === '#bindings'));
+  await loadWASM(await readFile(require.resolve('vscode-oniguruma/release/onig.wasm')));
+  const grammarPath = path.resolve(__dirname, '../../syntaxes/adam-lang.tmLanguage.json');
+  const source = await readFile(grammarPath, 'utf8');
+  const registry = new Registry({
+    onigLib: Promise.resolve({
+      createOnigScanner: (patterns) => new OnigScanner(patterns),
+      createOnigString: (content) => new OnigString(content),
+    }),
+    loadGrammar: async (scope) => scope === 'source.adam-lang'
+      ? parseRawGrammar(source, grammarPath) : null,
+  });
+  try {
+    const grammar = await registry.loadGrammar('source.adam-lang');
+    assert.ok(grammar);
+    /** Returns observable token text and scopes for one independently tokenized line. */
+    const tokens = (line: string) => grammar.tokenizeLine(line, INITIAL).tokens
+      .map((token) => ({ text: line.slice(token.startIndex, token.endIndex), scopes: token.scopes }))
+      .filter((token) => token.text.length > 0);
+    const imports = tokens('use geometry as g;');
+    for (const keyword of ['use', 'as']) {
+      assert.ok(imports.some((token) => token.text === keyword
+        && token.scopes.includes('keyword.declaration.adam-lang')));
+    }
+    const parameters = tokens('sheet area(a: f64) {}');
+    assert.ok(parameters.some((token) => token.text === 'f64'
+      && token.scopes.includes('storage.type.adam-lang')));
+    assert.ok(parameters.some((token) => token.text === 'a'
+      && token.scopes.includes('variable.parameter.adam-lang')));
+    for (const [line, scope] of [
+      ['// use geometry as f64; a: x', 'comment.line.double-slash.adam-lang'],
+      ['"use geometry as f64; a: x"', 'string.quoted.double.adam-lang'],
+    ]) {
+      const protectedTokens = tokens(line);
+      assert.ok(protectedTokens.length > 0);
+      assert.ok(protectedTokens.every((token) => token.scopes.includes(scope)));
+    }
+  } finally {
+    registry.dispose();
+  }
 });

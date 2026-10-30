@@ -9,6 +9,50 @@ use adam_web_ui::{GraphView, Renderer, SheetInspector, build_sheet, to_graph_dat
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Renders the real book root without starting a browser renderer.
+    ///
+    /// - Complexity: O(source/output bytes) storage plus Root build, propagation, and rendering work.
+    fn render(source: &str) -> String {
+        let mut dom = VirtualDom::new_with_props(
+            Root,
+            RootProps {
+                source: source.to_string(),
+                name: "same.adm2".to_string(),
+                graph_ids: vec![],
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    /// Successful sheets render controls; parse failure renders only a plain diagnostic.
+    #[test]
+    fn root_renders_success_and_parse_failure() {
+        let good = render("sheet s { cell x: bool; }");
+        assert!(good.contains("sp-theme"));
+        assert!(good.contains("sp-checkbox"));
+        let bad = render("sheet s { cell x }");
+        assert!(bad.contains("adam-live-error"));
+        assert!(!bad.contains("sp-checkbox"));
+        assert!(!bad.contains('\u{1b}'));
+    }
+
+    /// Propagation failure retains the inspector alongside its diagnostic.
+    #[test]
+    fn root_retains_controls_on_propagation_failure() {
+        let html = render("sheet s { cell x: i64 = 0i64; out result := 1i64 / x; }");
+        assert_eq!(html.matches("<sp-textfield").count(), 2);
+        assert!(!html.contains("sp-number-field"));
+        assert!(html.contains("adam-live-error"));
+        assert!(html.contains("division"));
+        assert!(!html.contains('\u{1b}'));
+    }
+}
+
 #[derive(Clone, PartialEq, Props)]
 /// Supplies one independent inspector and its existing external graph containers.
 struct RootProps {
@@ -27,23 +71,22 @@ struct RootProps {
 /// is a browser element, not a terminal, so ANSI escape codes would show as literal garbage
 /// text rather than color.
 ///
-/// `outcome` is a plain call rather than a `use_hook` because `BuildOutcome` holds a
-/// `ParsedSheet`, which cannot be `Clone` (it owns type-erased cell values) and `use_hook`
-/// requires its state to be. `parsed` and `labels` still end up seeded exactly once:
-/// `use_signal`'s initializer closure only ever fires on this component's first render, and
-/// props never change after [`mount`] constructs them, so no later render (should one ever
-/// occur; this component holds no subscriptions of its own that would trigger one) can replace
-/// already-mounted state.
+/// Each mount has immutable props. Initialization stores its non-copyable sheet
+/// inside scope-owned signals exactly once, including failed builds.
 ///
-/// Caution: the `use_signal` calls below live inside a `match` arm on `outcome.sheet_labels`,
-/// which is only sound because `build_sheet` is deterministic over an unchanging `props` — the
-/// arm taken can never differ across re-renders of the same component instance. If `Root` ever
-/// gains a reason to re-render with different props, or `build_sheet` ever becomes
-/// non-deterministic, this conditional-hook-call pattern would need reworking (e.g. calling
-/// `use_signal` unconditionally with an `Option`-shaped initial value instead).
+/// - Complexity: initialization includes parsing/propagation; rendering costs O(c + g)
+///   components for c cells and g graph hosts, excluding graph serialization.
 #[component]
 fn Root(props: RootProps) -> Element {
-    let outcome = build_sheet(&props.source, &props.name, &Renderer::plain());
+    let (sheet_labels, error) = use_hook(|| {
+        let outcome = build_sheet(&props.source, &props.name, &Renderer::plain());
+        (
+            outcome
+                .sheet_labels
+                .map(|(parsed, labels)| (Signal::new(parsed), Signal::new(labels))),
+            outcome.error,
+        )
+    });
     let source_text = use_memo({
         let source = props.source.clone();
         move || source.clone()
@@ -53,12 +96,8 @@ fn Root(props: RootProps) -> Element {
         move || name.clone()
     });
 
-    let inner = match outcome.sheet_labels {
+    let inner = match sheet_labels {
         Some((parsed, labels)) => {
-            let parsed = use_signal(|| parsed);
-            let labels = use_signal(|| labels);
-            let error = outcome.error.clone();
-
             let data = use_memo(move || to_graph_data(&parsed.read(), &labels.read()));
             rsx! {
                 SheetInspector { parsed, labels, source_text, source_name }
@@ -77,7 +116,7 @@ fn Root(props: RootProps) -> Element {
             }
         }
         None => {
-            let error = outcome.error.unwrap_or_default();
+            let error = error.unwrap_or_default();
             rsx! {
                 pre { class: "adam-live-error", "{error}" }
             }
@@ -100,16 +139,22 @@ fn Root(props: RootProps) -> Element {
 /// `graph_ids` (the graph containers bound to this example's sheet) on every propagate,
 /// through an independent shared [`GraphView`] channel owner per container.
 ///
+/// Distinct host elements receive independent controls even when `name` is identical.
+/// A graph container has one current owner: mounting another view for the same graph
+/// ID retires its preceding channel rather than creating independent graph contents.
+///
 /// - Precondition: an element with id `element_id` already exists in the document — the
 ///   mdBook `live-examples` preprocessor is what creates it (see
 ///   `adam-lang-book-preprocessor`).
 ///
-/// - Complexity: O(s + g) setup in source size `s` and graph count `g`, plus parsing.
+/// - Complexity: setup copies source/diagnostic-name bytes; mounting additionally
+///   parses, propagates, and renders the sheet and requested graph hosts.
 ///
 /// # Examples
 ///
-/// ```ignore
-/// mount("inspector", source, "tutorial/first_sheet", vec!["graph".into()]);
+/// ```javascript
+/// // After initializing the WASM module and creating both DOM hosts:
+/// mount("inspector", source, "tutorial/first_sheet", ["graph"]);
 /// ```
 #[wasm_bindgen]
 pub fn mount(element_id: &str, source: &str, name: &str, graph_ids: Vec<String>) {

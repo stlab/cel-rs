@@ -6,6 +6,7 @@ mod open_file;
 
 use dioxus::prelude::*;
 
+/// Launches the Begin renderer and its root component.
 fn main() {
     #[allow(deprecated)]
     LaunchBuilder::new()

@@ -31,10 +31,15 @@ use std::ptr::NonNull;
 /// This layout is independent of Rust's unspecified `Vec<T>` header layout.
 #[repr(C)]
 pub(crate) struct RawArray {
+    /// Points to the owned element allocation, or an aligned dangling address for ZSTs.
     pub(crate) ptr: NonNull<()>,
+    /// Counts initialized logical elements, including ZSTs.
     pub(crate) len: usize,
+    /// Retains the original vector capacity for allocation reconstruction.
     pub(crate) capacity: usize,
+    /// Destroys the initialized members using their bound concrete or erased type.
     drop_members: unsafe fn(&mut RawArray),
+    /// Retains recursive element ownership metadata for an erased array.
     pub(crate) element_type: Option<crate::ValueType>,
 }
 
@@ -161,7 +166,9 @@ unsafe fn drop_erased_members(raw: &mut RawArray) {
 /// ```
 #[repr(transparent)]
 pub struct Array<T> {
+    /// Owns the allocation and exactly the initialized `T` elements.
     pub(crate) raw: RawArray,
+    /// Associates the erased header with its concrete element type.
     marker: PhantomData<T>,
 }
 
@@ -368,6 +375,53 @@ mod ownership_tests {
     use super::*;
     use std::cell::Cell;
     use std::rc::Rc;
+
+    /// Preserves vector ownership and exposes exactly the initialized elements.
+    #[test]
+    fn vector_transfers_preserve_raw_parts() {
+        let mut values = Vec::with_capacity(8);
+        values.push(String::from("owned"));
+        values.push(String::from("second"));
+        let pointer = values.as_ptr();
+        let capacity = values.capacity();
+        let array = Array::from_vec(values);
+        assert_eq!(array.len(), 2);
+        assert!(!array.is_empty());
+        assert_eq!(array.capacity(), capacity);
+        assert_eq!(array.as_slice().as_ptr(), pointer);
+        assert_eq!(array.as_slice(), ["owned", "second"]);
+        assert_eq!(format!("{array:?}"), "Array([\"owned\", \"second\"])");
+        let values = array.into_vec();
+        assert_eq!(values.as_ptr(), pointer);
+        assert_eq!(values.capacity(), capacity);
+        assert_eq!(values, ["owned", "second"]);
+
+        assert!(Array::from_vec(Vec::<String>::new()).is_empty());
+        let zero_sized = Array::from_vec(vec![(); 3]);
+        assert_eq!(zero_sized.len(), 3);
+        assert_eq!(zero_sized.into_vec(), [(); 3]);
+    }
+
+    /// Preserves value equality while keeping cloned mutable values independent.
+    #[test]
+    fn clone_and_equality_laws() {
+        let first = Array::from_vec(vec![String::from("first")]);
+        let second = first.clone();
+        let third = second.clone();
+        assert!(first == first);
+        assert_eq!(first, second);
+        assert_eq!(second, first);
+        assert_eq!(second, third);
+        assert_eq!(first, third);
+        assert!(!(first != second));
+        let mut original = first.into_vec();
+        let mut cloned = second.into_vec();
+        original[0].push_str(" changed");
+        assert_eq!(cloned, ["first"]);
+        cloned[0].push_str(" copied");
+        assert_eq!(original, ["first changed"]);
+        assert_eq!(third.as_slice(), ["first"]);
+    }
 
     /// Releases members when only the erased owning header remains.
     #[test]

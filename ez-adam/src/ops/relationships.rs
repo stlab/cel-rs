@@ -12,6 +12,10 @@ use crate::model::relationship_group::{RelationshipGroup, RelationshipGroupId};
 /// - Precondition: `a` and `b` are valid keys in `doc.cell_nodes`.
 /// - Postcondition: the returned group's `members` is `[(a, ""), (b, "")]`.
 #[must_use]
+/// # Examples
+///
+/// `create_relationship(&mut document, width_node, height_node, position)`
+/// starts a two-member relationship with editable empty formulas.
 pub fn create_relationship(
     doc: &mut Document,
     a: CellNodeId,
@@ -37,6 +41,9 @@ pub fn create_relationship(
 ///
 /// - Complexity: O(n) in `group`'s member count (it scans to reject a
 ///   duplicate `node`).
+/// # Examples
+///
+/// `add_member(&mut document, group, new_node)` appends a previously unbound placement.
 pub fn add_member(doc: &mut Document, group: RelationshipGroupId, node: CellNodeId) {
     debug_assert!(
         doc.relationship_groups.contains_key(group),
@@ -57,6 +64,10 @@ pub fn add_member(doc: &mut Document, group: RelationshipGroupId, node: CellNode
 /// - Precondition: `node` is a member of `group`.
 ///
 /// - Complexity: O(n) in `group`'s member count (linear search for `node`).
+/// # Examples
+///
+/// `set_member_formula(&mut document, group, width_node, "height * 2")`
+/// replaces that member's expression draft.
 pub fn set_member_formula(
     doc: &mut Document,
     group: RelationshipGroupId,
@@ -77,6 +88,11 @@ pub fn set_member_formula(
 /// `.adm2` (see [`RelationshipGroup`]'s own doc comment).
 ///
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
+/// - Complexity: O(name bytes) when converting borrowed text.
+///
+/// # Examples
+///
+/// `set_display_name(&mut document, group, "Aspect ratio")` changes only its canvas label.
 pub fn set_display_name(doc: &mut Document, group: RelationshipGroupId, name: impl Into<String>) {
     debug_assert!(
         doc.relationship_groups.contains_key(group),
@@ -102,6 +118,10 @@ pub fn set_display_name(doc: &mut Document, group: RelationshipGroupId, name: im
 ///
 /// - Complexity: O(n) in `group`'s member count.
 #[must_use]
+/// # Examples
+///
+/// `duplicate_relationship_group(&mut document, group, Point::new(0.0, 100.0))`
+/// adds fresh placements of the same cells and clears copied formula drafts.
 pub fn duplicate_relationship_group(
     doc: &mut Document,
     group: RelationshipGroupId,
@@ -111,11 +131,11 @@ pub fn duplicate_relationship_group(
         doc.relationship_groups.contains_key(group),
         "group is not a valid key"
     );
-    let source_members = doc.relationship_groups[group].members.clone();
+    let source_members = &doc.relationship_groups[group].members;
     let source_position = doc.relationship_groups[group].position;
 
     let mut new_members = Vec::with_capacity(source_members.len());
-    for (node, _formula) in &source_members {
+    for (node, _formula) in source_members {
         debug_assert!(
             doc.cell_nodes.contains_key(*node),
             "member node is not a valid key"
@@ -143,7 +163,11 @@ pub fn duplicate_relationship_group(
 ///
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 ///
-/// - Complexity: O(n) in the total number of conditional-group branches.
+/// - Complexity: O(r + b + e) in relationship order entries r, conditional branches b,
+///   and all enabled/default group references e.
+/// # Examples
+///
+/// `delete_relationship_group(&mut document, group)` also detaches conditional references.
 pub fn delete_relationship_group(doc: &mut Document, group: RelationshipGroupId) {
     debug_assert!(
         doc.relationship_groups.contains_key(group),
@@ -166,6 +190,7 @@ mod duplicate_tests {
     use crate::ops::cells::{add_cell, add_cell_node};
 
     #[test]
+    /// Duplicates place the original shared cells at offset positions.
     fn duplicate_binds_new_nodes_to_the_same_cells() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -186,6 +211,7 @@ mod duplicate_tests {
     }
 
     #[test]
+    /// Relationship duplication clears member formula drafts.
     fn duplicate_clears_formula_text() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -203,6 +229,7 @@ mod duplicate_tests {
     }
 
     #[test]
+    /// Relationship duplicates use fresh placement IDs.
     fn duplicate_creates_distinct_node_instances() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -223,6 +250,7 @@ mod duplicate_tests {
     }
 
     #[test]
+    /// Relationship duplication assigns the next generated display name.
     fn duplicate_auto_names_sequentially() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -244,6 +272,7 @@ mod tests {
     use crate::model::cell::CellType;
     use crate::ops::cells::{add_cell, add_cell_node};
 
+    /// Adds two distinct placed integer cells to `doc`.
     fn two_nodes(doc: &mut Document) -> (CellNodeId, CellNodeId) {
         let a = add_cell(doc, "width_pixels", CellType::i64());
         let b = add_cell(doc, "height_pixels", CellType::i64());
@@ -254,6 +283,7 @@ mod tests {
     }
 
     #[test]
+    /// New relationships preserve both member placements and empty drafts.
     fn create_relationship_binds_both_nodes_with_empty_formulas() {
         let mut doc = Document::new("demo");
         let (a, b) = two_nodes(&mut doc);
@@ -265,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    /// Relationship creation assigns sequential display names.
     fn create_relationship_auto_names_sequentially() {
         let mut doc = Document::new("demo");
         let (a, b) = two_nodes(&mut doc);
@@ -275,6 +306,7 @@ mod tests {
     }
 
     #[test]
+    /// Adding a new placement appends it with an empty formula draft.
     fn add_member_appends_a_new_member_with_empty_formula() {
         let mut doc = Document::new("demo");
         let (a, b) = two_nodes(&mut doc);
@@ -290,6 +322,7 @@ mod tests {
     }
 
     #[test]
+    /// Formula edits affect the matching member.
     fn set_member_formula_updates_the_matching_members_formula() {
         let mut doc = Document::new("demo");
         let (a, b) = two_nodes(&mut doc);
@@ -303,6 +336,7 @@ mod tests {
     }
 
     #[test]
+    /// Display-name edits update the selected relationship.
     fn set_display_name_updates_the_groups_display_name() {
         let mut doc = Document::new("demo");
         let (a, b) = two_nodes(&mut doc);
@@ -315,6 +349,7 @@ mod tests {
     }
 
     #[test]
+    /// Relationship deletion removes its value and order entry.
     fn delete_relationship_group_removes_it_from_the_document() {
         let mut doc = Document::new("demo");
         let (a, b) = two_nodes(&mut doc);
@@ -327,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    /// Relationship deletion removes default-branch references.
     fn delete_relationship_group_removes_it_from_a_conditionals_default() {
         use crate::model::cell::CellType as CT;
         use crate::ops::conditionals::add_conditional_with_formula;
@@ -344,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    /// Relationship deletion removes named-branch references.
     fn delete_relationship_group_removes_it_from_a_conditionals_branch() {
         use crate::model::cell::CellType as CT;
         use crate::model::conditional_group::CellValueLiteral;

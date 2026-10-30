@@ -1143,7 +1143,18 @@ fn native_use_requires_no_parser() {
 /// Detects missing binding validation before private initialization or mutation.
 #[test]
 fn binding_errors_precede_factories() {
-    let template = identity();
+    let calls = Rc::new(std::cell::Cell::new(0));
+    let mut builder = TemplateBuilder::new();
+    let factory_calls = calls.clone();
+    builder
+        .cell("private", move || {
+            factory_calls.set(factory_calls.get() + 1);
+            Ok(0_i32)
+        })
+        .unwrap();
+    builder.parameter::<i32>("input").unwrap();
+    builder.parameter::<i32>("output").unwrap();
+    let template = builder.finish().unwrap();
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(1i32);
     let b = sheet.add_cell(2i32);
@@ -1173,6 +1184,8 @@ fn binding_errors_precede_factories() {
         template.instantiate(&mut sheet, &[("input", a), ("output", wrong)]),
         Err(TemplateError::TypeMismatch { .. })
     ));
+    assert_eq!(calls.get(), 0);
+    assert_eq!(sheet.cells().count(), 3);
 }
 
 /// Detects incorrect inclusion remapping and loss of inline declaration order.
@@ -1400,7 +1413,7 @@ fn failed_method_factory_reports_its_local_site() {
     let a = builder.parameter::<i32>("a").unwrap();
     let b = builder.parameter::<i32>("b").unwrap();
     let output = b.clone();
-    builder
+    let relationship = builder
         .relationship(vec![
             MethodRecipe::new(&[a], &[b], |_, _| anyhow::bail!("method factory failed")).unwrap(),
         ])
@@ -1424,7 +1437,7 @@ fn failed_method_factory_reports_its_local_site() {
     };
     assert!(matches!(
         site,
-        adam_rs::template::ConstructionSite::Method { index: 0, .. }
+        adam_rs::template::ConstructionSite::Method { relationship: failed, index: 0 } if failed == relationship
     ));
     assert!(inclusions.is_empty());
     assert_eq!(

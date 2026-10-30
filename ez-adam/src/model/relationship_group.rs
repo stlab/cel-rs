@@ -10,6 +10,11 @@ use crate::model::geometry::Point;
 new_key_type! {
     /// A stable handle to a [`RelationshipGroup`] in a
     /// [`crate::model::document::Document`].
+    ///
+    /// # Examples
+    ///
+    /// Retain the ID returned by `create_relationship` to edit the same group's
+    /// member formulas through `set_member_formula`.
     pub struct RelationshipGroupId;
 }
 
@@ -20,6 +25,11 @@ new_key_type! {
 /// relationship blocks are anonymous, so it is never emitted by
 /// `generate_adm2`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// `create_relationship(&mut document, first, second, position)` creates a group
+/// containing the two live cell placements.
 pub struct RelationshipGroup {
     /// The display name for the relationship group (e.g., `"r1"`) — UI
     /// bookkeeping only, never emitted to `.adm2`.
@@ -34,6 +44,16 @@ pub struct RelationshipGroup {
 
 impl RelationshipGroup {
     /// Creates an empty relationship group at `position` with no members.
+    ///
+    /// - Complexity: O(name bytes) when converting borrowed text.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ez_adam::model::{geometry::Point, relationship_group::RelationshipGroup};
+    /// let group = RelationshipGroup::new("relationship", Point::new(10.0, 20.0));
+    /// assert!(group.members.is_empty());
+    /// ```
     #[must_use]
     pub fn new(display_name: impl Into<String>, position: Point) -> Self {
         RelationshipGroup {
@@ -49,6 +69,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// New relationship groups start without members.
     fn new_has_no_members() {
         let group = RelationshipGroup::new("r1", Point::new(0.0, 0.0));
         assert_eq!(group.display_name, "r1");

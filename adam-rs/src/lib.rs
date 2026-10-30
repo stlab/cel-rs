@@ -144,8 +144,9 @@
 //!   claimant tightens it; a cell no other relationship contributes to just reads its
 //!   own `source`. The seed is rebuilt from `source` every round, so it is never stale
 //!   and never accumulates.
-//! - `source` is written only by [`Sheet::write`]/[`Sheet::add_cell`], never by method
-//!   or filter execution.
+//! - [`Sheet::write`]/[`Sheet::add_cell`] establish `source` aspirations. Ordinary
+//!   unshadowed method outputs replace `source` at commit; self-referencing outputs
+//!   and source filters preserve aspirations and publish derived overrides instead.
 //! - An `Out`-kind cell can never be [`Sheet::write`]-ed or claimed as another method's
 //!   output ([`Error::InvalidCellKind`]).
 //!

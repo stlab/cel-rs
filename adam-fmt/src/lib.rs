@@ -133,6 +133,42 @@ pub fn render_error(path: &Path, error: &FormatFileError) -> String {
 mod tests {
     use super::*;
 
+    /// Classifies denied rewrites as I/O errors when the filesystem enforces read-only modes.
+    #[cfg(unix)]
+    #[test]
+    fn format_file_classifies_write_permission_failures() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = directory.path().join("readonly.adm2");
+        std::fs::write(&path, "sheet   s{}").unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            return;
+        }
+        assert!(matches!(
+            format_file(&path),
+            Err(FormatFileError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    /// Retains every recovered diagnostic and leaves malformed declarations untouched on disk.
+    #[test]
+    fn format_file_preserves_source_with_recovered_errors() {
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let path = directory.path().join("recovered.adm2");
+        let original = "sheet s {\ncell first broken;\nsource second broken;\n}";
+        std::fs::write(&path, original).unwrap();
+        assert!(matches!(
+            format_file(&path),
+            Err(FormatFileError::Format {
+                source,
+                error: FormatSourceError::Recovered(errors),
+            }) if source == original && errors.len() == 2
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+
     /// Replaces unformatted source with canonical output and reports a change.
     #[test]
     fn format_file_rewrites_an_unformatted_file_and_reports_a_change() {
@@ -238,14 +274,17 @@ mod tests {
         // Exercises FormatSourceError::Recovered specifically (as opposed to ::Parse, covered
         // above), since that's the variant whose `.collect()` a reviewer once mistakenly flagged
         // as failing to compile (`String` does implement `FromIterator<String>`).
-        let source = "sheet s { cell x unknown_syntax }".to_string();
+        let source = "sheet s {\ncell x unknown_syntax;\ncell y unknown_syntax;\n}".to_string();
         let error = adam_lang::format_source(&source).unwrap_err();
-        assert!(matches!(error, adam_lang::FormatSourceError::Recovered(_)));
+        assert!(
+            matches!(&error, adam_lang::FormatSourceError::Recovered(errors) if errors.len() == 2)
+        );
         let rendered = render_error(
             Path::new("sheet.adm2"),
             &FormatFileError::Format { source, error },
         );
         assert!(rendered.contains("sheet.adm2"));
         assert!(rendered.contains("cell x unknown_syntax"));
+        assert!(rendered.contains("cell y unknown_syntax"));
     }
 }

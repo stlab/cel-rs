@@ -8,6 +8,7 @@ use adam_rs::{
     RequirementId, Sheet,
 };
 
+/// Builds an area Out with editable dimensions and a dynamic maximum-area requirement.
 fn sheet_with_area_output() -> (Sheet, CellId, CellId, CellId, CellId) {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
@@ -30,6 +31,7 @@ fn sheet_with_area_output() -> (Sheet, CellId, CellId, CellId, CellId) {
 }
 
 #[test]
+/// Checks publication of a single method's computed value.
 fn single_method_executes_correctly() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
@@ -45,6 +47,7 @@ fn single_method_executes_correctly() {
 }
 
 #[test]
+/// Checks the fixed direction of a single-method relationship.
 fn single_method_forced_direction() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
@@ -59,6 +62,7 @@ fn single_method_forced_direction() {
 }
 
 #[test]
+/// Checks forced direction cascading through an adjacent relationship.
 fn forced_direction_cascades_through_adjacent_relationship() {
     // R1: a -> b (single method) forces b, regardless of strength.
     // R2: b -> c or c -> b (two methods) — b is already forced by R1, so R2's
@@ -87,6 +91,7 @@ fn forced_direction_cascades_through_adjacent_relationship() {
 }
 
 #[test]
+/// Checks absence of forced-output classification before propagation.
 fn is_forced_false_before_propagate() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -98,6 +103,7 @@ fn is_forced_false_before_propagate() {
 }
 
 #[test]
+/// Checks forced classification of a sole pure output.
 fn is_forced_true_for_single_method_output() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
@@ -113,6 +119,7 @@ fn is_forced_true_for_single_method_output() {
 }
 
 #[test]
+/// Checks that viable output alternatives avoid forced-cell classification.
 fn is_forced_false_for_multi_method_relationship() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0.0_f64);
@@ -136,6 +143,7 @@ fn is_forced_false_for_multi_method_relationship() {
 }
 
 #[test]
+/// Checks enumeration of every classified forced cell.
 fn forced_cells_iterates_all_forced_cells() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(2_i32);
@@ -158,6 +166,7 @@ fn forced_cells_iterates_all_forced_cells() {
 }
 
 #[test]
+/// Checks forced-cell classification against the active conditional branch.
 fn is_forced_respects_conditional_branch_activation() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(0_i32);
@@ -187,6 +196,7 @@ fn is_forced_respects_conditional_branch_activation() {
 }
 
 #[test]
+/// Checks absence of forced-relationship classification before propagation.
 fn is_relationship_forced_false_before_propagate() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -198,6 +208,7 @@ fn is_relationship_forced_false_before_propagate() {
 }
 
 #[test]
+/// Checks forced-relationship classification for a sole method.
 fn is_relationship_forced_true_for_single_method_relationship() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
@@ -212,6 +223,7 @@ fn is_relationship_forced_true_for_single_method_relationship() {
 }
 
 #[test]
+/// Checks that surviving alternatives avoid forced-relationship classification.
 fn is_relationship_forced_false_for_multi_method_relationship() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0.0_f64);
@@ -233,6 +245,7 @@ fn is_relationship_forced_false_for_multi_method_relationship() {
 }
 
 #[test]
+/// Checks cascading forced-relationship classification after method elimination.
 fn forced_relationships_cascade_through_adjacent_relationship() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(2_i32);
@@ -256,6 +269,7 @@ fn forced_relationships_cascade_through_adjacent_relationship() {
 }
 
 #[test]
+/// Checks enumeration of every classified forced relationship.
 fn forced_relationships_iterates_all_forced_relationships() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(2_i32);
@@ -279,6 +293,7 @@ fn forced_relationships_iterates_all_forced_relationships() {
 }
 
 #[test]
+/// Checks forced-relationship classification against branch activation.
 fn is_relationship_forced_respects_conditional_branch_activation() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(0_i32);
@@ -308,6 +323,7 @@ fn is_relationship_forced_respects_conditional_branch_activation() {
 }
 
 #[test]
+/// Checks producer-before-consumer execution through a relationship chain.
 fn chained_relationships_execute_in_order() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -334,6 +350,7 @@ fn chained_relationships_execute_in_order() {
 }
 
 #[test]
+/// Checks changed membership for committed method outputs.
 fn changed_cells_tracked() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -351,6 +368,7 @@ fn changed_cells_tracked() {
 }
 
 #[test]
+/// Checks explicit clearing of completed changed membership.
 fn clear_changed_empties_the_changed_set() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -368,27 +386,30 @@ fn clear_changed_empties_the_changed_set() {
 }
 
 #[test]
+/// Checks replacement of changed membership when propagation reverses direction.
 fn propagate_clears_previous_changed_set() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     sheet
-        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .add_relationship(vec![
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+        ])
         .unwrap();
 
     sheet.write(a, 1_i32).unwrap();
     sheet.propagate().unwrap();
-    // b changed in first propagation
+    assert_eq!(sheet.changed().collect::<Vec<_>>(), vec![b]);
 
-    sheet.write(a, 2_i32).unwrap();
+    sheet.write(b, 2_i32).unwrap();
     sheet.propagate().unwrap();
-    // b changed again; changed set should have only cells from this propagation
     let changed: Vec<_> = sheet.changed().collect();
-    assert_eq!(changed.len(), 1);
-    assert!(changed.contains(&b));
+    assert_eq!(changed, vec![a]);
 }
 
 #[test]
+/// Checks that edit strength determines the selected relationship direction.
 fn strength_drives_method_selection() {
     // a * b = c — three methods, one per direction.
     let mut sheet = Sheet::new();
@@ -416,6 +437,7 @@ fn strength_drives_method_selection() {
 }
 
 #[test]
+/// Checks propagation of a method callback's failure.
 fn method_returning_error_propagates_as_method_failed() {
     let mut sheet = Sheet::new();
     // b added first (lower strength) so it is the output; a added second
@@ -436,6 +458,7 @@ fn method_returning_error_propagates_as_method_failed() {
 }
 
 #[test]
+/// Checks cycle rejection for mutually dependent selected methods.
 fn mutually_dependent_relationships_return_cycle() {
     // a→b and b→a: both are single-method relationships, so each is trivially
     // selected (one candidate each) regardless of cell strength. Neither method's
@@ -455,12 +478,13 @@ fn mutually_dependent_relationships_return_cycle() {
 }
 
 #[test]
+/// Checks both selected directions of a two-input/one-output string relationship.
 fn arity_3_2_1() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell("a".to_string());
     let c = sheet.add_cell("ab".to_string());
     let b = sheet.add_cell("b".to_string());
-    sheet
+    let relationship = sheet
         .add_relationship(vec![
             Method::from_fn_2_1([a, b], c, |x: &String, y: &String| Ok(x.clone() + y)),
             Method::new(
@@ -481,14 +505,20 @@ fn arity_3_2_1() {
         ])
         .unwrap();
 
+    sheet.write(c, "xyz".to_string()).unwrap();
     sheet.propagate().unwrap();
-
-    assert_eq!(sheet.read::<String>(a).unwrap(), "a");
-    assert_eq!(sheet.read::<String>(b).unwrap(), "b");
-    assert_eq!(sheet.read::<String>(c).unwrap(), "ab");
+    assert_eq!(sheet.selected_method(relationship), Some(1));
+    assert_eq!(sheet.read::<String>(a).unwrap(), "x");
+    assert_eq!(sheet.read::<String>(b).unwrap(), "yz");
+    sheet.write(a, "left".to_string()).unwrap();
+    sheet.write(b, "right".to_string()).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.selected_method(relationship), Some(0));
+    assert_eq!(sheet.read::<String>(c).unwrap(), "leftright");
 }
 
 #[test]
+/// Checks direct self-reference clamping against a fixed zero bound.
 fn self_ref_direct_clamp() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -513,6 +543,7 @@ fn self_ref_direct_clamp() {
 }
 
 #[test]
+/// Checks propagation of self-referencing less-than-or-equal constraints.
 fn self_ref_le_chain() {
     // a <= b <= c enforced by two self-referencing constraints.
     //
@@ -581,6 +612,7 @@ fn self_ref_le_chain() {
 }
 
 #[test]
+/// Checks persistent self-reference pressure without another anchor write.
 fn self_ref_pressure_persists_without_rewriting_anchor() {
     // a = min(a, b): b applies downward pressure on a, but a's original written
     // value must survive across rounds where only b is rewritten.
@@ -612,6 +644,7 @@ fn self_ref_pressure_persists_without_rewriting_anchor() {
 }
 
 #[test]
+/// Checks activation of the branch matching the subject value.
 fn conditional_activates_matching_branch() {
     // mode=1 activates rel_on which doubles `a` into `b`.
     let mut sheet = Sheet::new();
@@ -638,6 +671,7 @@ fn conditional_activates_matching_branch() {
 }
 
 #[test]
+/// Checks derived shadowing of a stored aspiration by a forced conditional output.
 fn conditional_forced_cell_shadows_original_value() {
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
@@ -663,6 +697,7 @@ fn conditional_forced_cell_shadows_original_value() {
 }
 
 #[test]
+/// Checks restoration of the stored aspiration after a forced branch deactivates.
 fn conditional_forced_cell_reverts_to_source_when_deactivated() {
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
@@ -696,6 +731,7 @@ fn conditional_forced_cell_reverts_to_source_when_deactivated() {
 }
 
 #[test]
+/// Checks changed membership for a value restored by branch deactivation.
 fn changed_reports_cell_reverted_by_conditional_deactivation() {
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
@@ -726,6 +762,7 @@ fn changed_reports_cell_reverted_by_conditional_deactivation() {
 }
 
 #[test]
+/// Checks that downstream inputs cannot observe an inactive branch's stale override.
 fn pure_input_never_observes_stale_derived_after_conditional_deactivates() {
     // a is forced to b's value only when p == 1. c always reads a directly
     // (c = a * 10), regardless of the conditional. When p flips back to 0, a
@@ -768,6 +805,7 @@ fn pure_input_never_observes_stale_derived_after_conditional_deactivates() {
 }
 
 #[test]
+/// Checks immediate publication of an explicit write before the next forced production.
 fn explicit_write_to_forced_cell_takes_immediate_effect() {
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(1_i32);
@@ -796,6 +834,7 @@ fn explicit_write_to_forced_cell_takes_immediate_effect() {
 }
 
 #[test]
+/// Checks successful propagation with neither a matching branch nor a default.
 fn conditional_no_match_and_no_default_succeeds_silently() {
     // No branch matches, no default — propagate succeeds, b keeps its value.
     let mut sheet = Sheet::new();
@@ -823,6 +862,7 @@ fn conditional_no_match_and_no_default_succeeds_silently() {
 }
 
 #[test]
+/// Checks default activation for an unmatched subject.
 fn conditional_default_branch_activates_when_no_key_matches() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(0_i32);
@@ -858,6 +898,7 @@ fn conditional_default_branch_activates_when_no_key_matches() {
 }
 
 #[test]
+/// Checks that any declared key can activate a multi-key branch.
 fn conditional_multi_key_branch_matches_any_key() {
     // Branch is active for mode=0 OR mode=2.
     let mut sheet = Sheet::new();
@@ -894,6 +935,7 @@ fn conditional_multi_key_branch_matches_any_key() {
 }
 
 #[test]
+/// Checks consistent values across repeated conditional branch switches.
 fn conditional_branch_switch_stability() {
     // When branch switches, previously derived cells should not block the new plan.
     // Setup: mode controls which of two independent relationships is active.
@@ -934,6 +976,7 @@ fn conditional_branch_switch_stability() {
 }
 
 #[test]
+/// Checks branch selection from a subject derived by a multi-method prerequisite.
 fn conditional_match_cell_derived_from_multi_method_unconditional_relationship() {
     // A multi-method unconditional relationship can produce the match cell.
     // Setup: `flag` is produced by a two-method relationship between `x` and `y`.
@@ -997,6 +1040,7 @@ fn conditional_match_cell_derived_from_multi_method_unconditional_relationship()
 }
 
 #[test]
+/// Checks branch selection after its unconditional subject producer executes.
 fn conditional_match_cell_is_derived_from_unconditional_relationship() {
     // The match cell (flag) is computed by an unconditional single-method relationship.
     let mut sheet = Sheet::new();
@@ -1038,6 +1082,7 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
 }
 
 #[test]
+/// Checks that settled guard prerequisites select the matching branch.
 fn guard_prerequisite_values_select_the_matching_branch() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(true);
@@ -1068,6 +1113,7 @@ fn guard_prerequisite_values_select_the_matching_branch() {
 }
 
 #[test]
+/// Checks rejection of incompatible guard assignments before prerequisite publication.
 fn incompatible_guard_assignment_conflicts_without_committing_prerequisites() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(false);
@@ -1124,6 +1170,7 @@ fn incompatible_guard_assignment_conflicts_without_committing_prerequisites() {
 }
 
 #[test]
+/// Checks precommit conflict when a staged guard method's input producer changes.
 fn changed_guard_method_input_producer_conflicts_without_committing() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(false);
@@ -1179,6 +1226,7 @@ fn changed_guard_method_input_producer_conflicts_without_committing() {
 }
 
 #[test]
+/// Checks rejection of a changed filter-argument producer before stale reclamping.
 fn changed_filter_argument_producer_conflicts_without_reclamping_stale_value() {
     let mut sheet = Sheet::new();
     let switch = sheet.add_cell(true);
@@ -1241,6 +1289,7 @@ fn changed_filter_argument_producer_conflicts_without_reclamping_stale_value() {
 }
 
 #[test]
+/// Checks preservation of guard seed values when producer provenance matches.
 fn guard_seed_values_are_preserved_for_matching_provenance() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(2_i32);
@@ -1374,15 +1423,18 @@ fn assert_restaged_seed_input_conflicts(recursive: bool) {
 }
 
 #[test]
+/// Checks conflict rather than reuse of a seed with restaged source provenance.
 fn restaged_guard_seed_source_input_conflicts_instead_of_reusing_stale_seed() {
     assert_restaged_seed_input_conflicts(false);
 }
 
 #[test]
+/// Checks conflict rather than reuse of recursively restaged seed input.
 fn restaged_recursive_guard_seed_input_conflicts_instead_of_reusing_stale_seed() {
     assert_restaged_seed_input_conflicts(true);
 }
 #[test]
+/// Checks multi-output prerequisite values and retention of a stronger later aspiration.
 fn multi_input_multi_output_guard_prerequisite_preserves_values() {
     let mut sheet = Sheet::new();
     let total = sheet.add_cell(1_i32);
@@ -1401,7 +1453,10 @@ fn multi_input_multi_output_guard_prerequisite_preserves_values() {
                     let lhs = *inputs[0].downcast_ref::<i32>().unwrap();
                     let rhs = *inputs[1].downcast_ref::<i32>().unwrap();
                     let total = *inputs[2].downcast_ref::<i32>().unwrap();
-                    Ok(vec![Box::new(total + lhs + rhs), Box::new(lhs + rhs)])
+                    let sum = lhs
+                        .checked_add(rhs)
+                        .ok_or_else(|| anyhow::anyhow!("overflow"))?;
+                    Ok(vec![Box::new(total.max(sum)), Box::new(sum)])
                 },
             ),
             Method::new(
@@ -1420,7 +1475,11 @@ fn multi_input_multi_output_guard_prerequisite_preserves_values() {
         .add_relationship(vec![Method::from_fn_1_1(
             sum,
             branch_output,
-            |value: &i32| Ok(*value * 10),
+            |value: &i32| {
+                value
+                    .checked_mul(10)
+                    .ok_or_else(|| anyhow::anyhow!("overflow"))
+            },
         )])
         .unwrap();
     sheet
@@ -1438,11 +1497,18 @@ fn multi_input_multi_output_guard_prerequisite_preserves_values() {
 
     sheet.propagate().unwrap();
 
-    assert_eq!(*sheet.read::<i32>(total).unwrap(), 6);
+    assert_eq!(*sheet.read::<i32>(total).unwrap(), 5);
     assert_eq!(*sheet.read::<i32>(sum).unwrap(), 5);
     assert_eq!(*sheet.read::<i32>(branch_output).unwrap(), 50);
+    sheet.write(total, 12_i32).unwrap();
+    sheet.write(lhs, 2_i32).unwrap();
+    sheet.write(rhs, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(total).unwrap(), 12);
+    assert_eq!(*sheet.read::<i32>(sum).unwrap(), 5);
 }
 #[test]
+/// Checks guard seed-cycle rejection before any staged value commits.
 fn self_referencing_guard_seed_cycle_is_reported_before_commit() {
     let (mut sheet, a, b, c, d, s, rel1, rel2) = seed_cycle_sheet();
     let output = sheet.add_cell(false);
@@ -1479,6 +1545,7 @@ fn self_referencing_guard_seed_cycle_is_reported_before_commit() {
 }
 
 #[test]
+/// Checks reclamping after the active branch settles a dynamic bound.
 fn conditional_bound_filter_runs_after_branch() {
     for reverse_relationship_order in [false, true] {
         let mut sheet = Sheet::new();
@@ -1523,6 +1590,7 @@ fn conditional_bound_filter_runs_after_branch() {
 }
 
 #[test]
+/// Checks branch selection using the conformed guard value.
 fn filtered_guard_value_determines_branch_selection() {
     let mut sheet = Sheet::new();
     let guard = sheet.add_cell(8_i32);
@@ -1556,6 +1624,7 @@ fn filtered_guard_value_determines_branch_selection() {
 }
 
 #[test]
+/// Checks source/derived publication when switching between self-reference and plain writes.
 fn cell_shadowed_as_self_ref_in_one_branch_and_plain_reassignment_in_another() {
     // p == 0: a <= b enforced by a two-way self-referencing relationship.
     // p != 0 (default): a and b are mutually assignable (two methods, neither
@@ -1618,6 +1687,7 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_plain_reassignment_in_another() {
 }
 
 #[test]
+/// Checks ordinary publication for an unforced conditional method's output.
 fn unforced_conditional_relationship_does_not_shadow_its_losing_cell() {
     // A two-method mutual relationship (`a := b; b := a;`), active only while a
     // conditional's key matches -- e.g. adam-lang-book's constrain.adm2. Neither
@@ -1667,6 +1737,7 @@ fn unforced_conditional_relationship_does_not_shadow_its_losing_cell() {
 }
 
 #[test]
+/// Checks shadowing and restoration through cascaded forced outputs.
 fn cascaded_forced_output_of_an_unconditional_relationship_shadows_and_reverts() {
     // R1 (a -> b, single method) lives in a conditional and forces b only while
     // active. R2 (b <-> c, two methods) is itself unconditional, but once R1 is
@@ -1727,6 +1798,7 @@ fn cascaded_forced_output_of_an_unconditional_relationship_shadows_and_reverts()
 }
 
 #[test]
+/// Checks acyclic diamond resolution when outer cells have stronger aspirations.
 fn diamond_relationships_resolve_when_outer_cells_outrank_shared_cells() {
     // Reproduces begin/examples/diamond.adm2: R1{a,b,c} and R2{b,c,d} are triangle
     // relationships sharing b and c. Writing a then d makes them outrank the
@@ -1797,6 +1869,7 @@ fn diamond_relationships_resolve_when_outer_cells_outrank_shared_cells() {
 }
 
 #[test]
+/// Checks resolution of cascading claims across overlapping diamonds.
 fn overlapping_diamond_chain_resolves_via_cascade() {
     // R1{a,b,c}, R2{b,c,d}, R3{c,d,e}: two overlapping diamonds (R1/R2 share b,c;
     // R2/R3 share c,d). a and e -- the two outer tips -- outrank the three shared
@@ -1857,6 +1930,7 @@ fn overlapping_diamond_chain_resolves_via_cascade() {
 }
 
 #[test]
+/// Checks that a closed dependency loop remains unschedulable.
 fn mutually_dependent_relationships_with_no_external_input_remain_cycle() {
     // x = f(y); y = g(x), each with only one method and no other cell involved: a
     // genuine algebraic loop with no valid acyclic execution order, regardless of
@@ -1876,6 +1950,7 @@ fn mutually_dependent_relationships_with_no_external_input_remain_cycle() {
 }
 
 #[test]
+/// Checks fixed Out registration without requirements.
 fn add_out_succeeds_with_no_requirements() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
@@ -1887,6 +1962,7 @@ fn add_out_succeeds_with_no_requirements() {
 }
 
 #[test]
+/// Checks fixed Out registration with one attached requirement.
 fn add_out_succeeds_with_one_requirement() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
@@ -1909,6 +1985,7 @@ fn add_out_succeeds_with_one_requirement() {
 }
 
 #[test]
+/// Checks fixed Out registration with multiple attached requirements.
 fn add_out_succeeds_with_multiple_requirements() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
@@ -1932,6 +2009,7 @@ fn add_out_succeeds_with_multiple_requirements() {
 }
 
 #[test]
+/// Checks rejection of an Out writer without outputs.
 fn add_out_returns_invalid_output_for_writer_with_zero_outputs() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -1943,6 +2021,7 @@ fn add_out_returns_invalid_output_for_writer_with_zero_outputs() {
 }
 
 #[test]
+/// Checks rejection of an Out writer targeting multiple cells.
 fn add_out_returns_invalid_output_for_writer_with_two_outputs() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -1981,6 +2060,7 @@ fn add_out_accepts_multiple_requirements() {
 }
 
 #[test]
+/// Checks rejection of Out promotion for a cell with an existing writer.
 fn add_out_returns_invalid_cell_kind_when_output_cell_already_has_a_relationship() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -1996,6 +2076,7 @@ fn add_out_returns_invalid_cell_kind_when_output_cell_already_has_a_relationship
 }
 
 #[test]
+/// Checks legal Out promotion of a previously registered conditional subject.
 fn add_out_succeeds_when_output_cell_was_previously_a_conditional_match_cell() {
     // Superseded behavior (was `add_output_returns_invalid_cell_kind_when_output_cell_is_a_conditional_match_cell`,
     // asserting `Err(InvalidCellKind)`): `add_conditional` never records adjacency in
@@ -2014,6 +2095,7 @@ fn add_out_succeeds_when_output_cell_was_previously_a_conditional_match_cell() {
 }
 
 #[test]
+/// Checks legal use of an existing Out as another Out writer's input.
 fn add_out_succeeds_when_writer_input_is_already_an_out_cell() {
     // Superseded behavior (was `add_output_returns_invalid_cell_kind_when_writer_input_is_already_an_output_cell`,
     // asserting `Err(InvalidCellKind)`): an `out` cell is no longer terminal — it
@@ -2037,6 +2119,7 @@ fn add_out_succeeds_when_writer_input_is_already_an_out_cell() {
 }
 
 #[test]
+/// Checks legal use of an existing Out as a requirement input.
 fn add_out_succeeds_when_requirement_input_is_already_an_out_cell() {
     // Superseded behavior (was `add_output_returns_invalid_cell_kind_when_requirement_input_is_already_an_output_cell`,
     // asserting `Err(InvalidCellKind)`): `Sheet::add_requirement`'s inputs may be any
@@ -2061,6 +2144,7 @@ fn add_out_succeeds_when_requirement_input_is_already_an_out_cell() {
 }
 
 #[test]
+/// Checks a requirement reading its own governed Out value.
 fn add_out_allows_a_requirement_to_reference_the_outputs_own_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2073,6 +2157,7 @@ fn add_out_allows_a_requirement_to_reference_the_outputs_own_cell() {
 }
 
 #[test]
+/// Checks rejection of an external write to a fixed Out.
 fn write_returns_invalid_cell_kind_for_an_output_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2090,6 +2175,7 @@ fn write_returns_invalid_cell_kind_for_an_output_cell() {
 }
 
 #[test]
+/// Checks declaration-order enumeration of a cell's requirements.
 fn cell_requirements_returns_requirement_ids_in_declaration_order() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2110,23 +2196,7 @@ fn cell_requirements_returns_requirement_ids_in_declaration_order() {
 }
 
 #[test]
-/// Preserves a check's cell and input identity without display labels.
-fn unlabeled_requirement_preserves_identity() {
-    let mut sheet = Sheet::new();
-    let a = sheet.add_cell(0_i32);
-    let b = sheet.add_cell(0_i32);
-    let out = sheet
-        .add_out(
-            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            vec![Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))],
-        )
-        .unwrap();
-    let id = sheet.cell_requirements(out).unwrap()[0];
-    assert_eq!(sheet.requirement_cell(id), Some(out));
-    assert_eq!(sheet.requirement_inputs(id), Some([a].as_slice()));
-}
-
-#[test]
+/// Checks governed-cell and ordered-input identities for an unlabeled requirement.
 fn requirement_cell_and_inputs_return_correct_values() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2143,6 +2213,7 @@ fn requirement_cell_and_inputs_return_correct_values() {
 }
 
 #[test]
+/// Checks absent requirement metadata for an unknown identity.
 fn requirement_cell_inputs_return_none_for_invalid_id() {
     let sheet = Sheet::new();
     let id = RequirementId::default();
@@ -2151,12 +2222,14 @@ fn requirement_cell_inputs_return_none_for_invalid_id() {
 }
 
 #[test]
+/// Checks absent successful requirement validation before propagation.
 fn cell_requirements_valid_false_before_propagate() {
     let (sheet, out, ..) = sheet_with_area_output();
     assert!(!sheet.cell_requirements_valid(out));
 }
 
 #[test]
+/// Checks successful requirement status after a conforming propagation.
 fn cell_requirements_valid_true_when_requirement_holds() {
     let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
@@ -2167,15 +2240,7 @@ fn cell_requirements_valid_true_when_requirement_holds() {
 }
 
 #[test]
-fn cell_requirements_valid_false_when_requirement_fails() {
-    let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
-    sheet.write(width, 50_i32).unwrap();
-    sheet.write(height, 40_i32).unwrap();
-    sheet.propagate().unwrap();
-    assert!(!sheet.cell_requirements_valid(out));
-}
-
-#[test]
+/// Checks enumeration of the failed requirement identity.
 fn violated_requirements_lists_the_failing_requirement() {
     let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
@@ -2187,6 +2252,7 @@ fn violated_requirements_lists_the_failing_requirement() {
 }
 
 #[test]
+/// Checks exclusion of passing requirements from the violation subset.
 fn violated_requirements_returns_only_the_failing_subset_of_multiple_requirements() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
@@ -2219,6 +2285,7 @@ fn violated_requirements_returns_only_the_failing_subset_of_multiple_requirement
 }
 
 #[test]
+/// Checks requirement-status recovery after a later conforming edit.
 fn cell_requirements_valid_updates_across_propagate_calls() {
     let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
@@ -2232,6 +2299,7 @@ fn cell_requirements_valid_updates_across_propagate_calls() {
 }
 
 #[test]
+/// Checks propagation failure from a requirement callback error.
 fn requirement_function_error_aborts_propagate_with_method_failed() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2248,6 +2316,7 @@ fn requirement_function_error_aborts_propagate_with_method_failed() {
 }
 
 #[test]
+/// Checks an isolated plain source's singleton contributor set.
 fn contributing_cells_returns_self_for_plain_source_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
@@ -2260,6 +2329,7 @@ fn contributing_cells_returns_self_for_plain_source_cell() {
 }
 
 #[test]
+/// Checks singleton contributor queries before a completed plan exists.
 fn contributing_cells_returns_singleton_before_propagate() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2271,6 +2341,7 @@ fn contributing_cells_returns_singleton_before_propagate() {
 }
 
 #[test]
+/// Checks transitive root contributors through a derived chain.
 fn contributing_cells_returns_root_sources_for_derived_chain() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(2_i32);
@@ -2287,6 +2358,7 @@ fn contributing_cells_returns_root_sources_for_derived_chain() {
 }
 
 #[test]
+/// Checks self-aspiration and other inputs as self-reference contributors.
 fn contributing_cells_includes_self_and_other_inputs_for_self_referencing_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(10_i32);
@@ -2304,6 +2376,7 @@ fn contributing_cells_includes_self_and_other_inputs_for_self_referencing_cell()
 }
 
 #[test]
+/// Checks active-branch contributors together with its controlling match cell.
 fn contributing_cells_follows_active_conditional_branch_and_includes_match_cell() {
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
@@ -2336,6 +2409,7 @@ fn contributing_cells_follows_active_conditional_branch_and_includes_match_cell(
 }
 
 #[test]
+/// Checks contributor traversal across every viable direction, not only today's selection.
 fn contributing_cells_includes_every_direction_of_an_unforced_multi_method_relationship() {
     // a * b = c -- three methods, one per direction (same shape as
     // strength_drives_method_selection). With a, b currently sources and c derived,
@@ -2368,6 +2442,7 @@ fn contributing_cells_includes_every_direction_of_an_unforced_multi_method_relat
 }
 
 #[test]
+/// Checks transitive contributors of a conditional's derived match cell.
 fn contributing_cells_includes_transitive_contributors_of_a_conditional_match_cell() {
     // p is itself derived (not a plain source) from x and y; a conditional branch only
     // defined for p == 1 writes target. With p == 3 (no branch match, no default), target
@@ -2405,6 +2480,7 @@ fn contributing_cells_includes_transitive_contributors_of_a_conditional_match_ce
 }
 
 #[test]
+/// Checks requirement contributors that lie outside the governed Out writer's inputs.
 fn requirement_contributing_cells_unions_inputs_outside_writer() {
     let (mut sheet, out, width, height, max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
@@ -2416,6 +2492,7 @@ fn requirement_contributing_cells_unions_inputs_outside_writer() {
 }
 
 #[test]
+/// Checks an empty contributor set for an unknown requirement.
 fn requirement_contributing_cells_returns_empty_for_invalid_id() {
     let sheet = Sheet::new();
     assert_eq!(
@@ -2425,12 +2502,14 @@ fn requirement_contributing_cells_returns_empty_for_invalid_id() {
 }
 
 #[test]
+/// Checks empty Out enumeration when none are registered.
 fn out_cells_empty_for_sheet_with_no_out_cells() {
     let sheet = Sheet::new();
     assert_eq!(sheet.out_cells().count(), 0);
 }
 
 #[test]
+/// Checks enumeration of every registered Out identity.
 fn out_cells_iterates_every_live_out_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2450,18 +2529,21 @@ fn out_cells_iterates_every_live_out_cell() {
 }
 
 #[test]
+/// Checks empty relevance when no requirements exist.
 fn requirement_relevant_cells_empty_when_sheet_has_no_requirements() {
     let sheet = Sheet::new();
     assert_eq!(sheet.requirement_relevant_cells(), HashSet::new());
 }
 
 #[test]
+/// Checks pre-propagation relevance of a requirement's governed Out.
 fn requirement_relevant_cells_returns_out_cell_itself_before_propagate() {
     let (sheet, out, ..) = sheet_with_area_output();
     assert_eq!(sheet.requirement_relevant_cells(), HashSet::from([out]));
 }
 
 #[test]
+/// Checks root-source relevance after requirement propagation.
 fn requirement_relevant_cells_returns_root_sources_after_propagate() {
     let (mut sheet, _out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
@@ -2474,6 +2556,7 @@ fn requirement_relevant_cells_returns_root_sources_after_propagate() {
 }
 
 #[test]
+/// Checks relevance union across requirements on different Out cells.
 fn requirement_relevant_cells_unions_across_multiple_out_cells() {
     // Unlike the old `output_relevant_cells` (relevant for *any* out cell,
     // unconditionally), `requirement_relevant_cells` is scoped to cells with at least
@@ -2501,6 +2584,7 @@ fn requirement_relevant_cells_unions_across_multiple_out_cells() {
 }
 
 #[test]
+/// Checks relevance updates after conditional activation changes producers.
 fn requirement_relevant_cells_updates_when_a_different_relationship_becomes_active() {
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
@@ -2537,12 +2621,14 @@ fn requirement_relevant_cells_updates_when_a_different_relationship_becomes_acti
 }
 
 #[test]
+/// Checks empty violation contributors without requirements.
 fn requirement_violation_cells_empty_when_sheet_has_no_requirements() {
     let sheet = Sheet::new();
     assert_eq!(sheet.requirement_violation_cells(), HashSet::new());
 }
 
 #[test]
+/// Checks empty violation contributors when every requirement passes.
 fn requirement_violation_cells_empty_when_all_requirements_hold() {
     let (mut sheet, _out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
@@ -2552,6 +2638,7 @@ fn requirement_violation_cells_empty_when_all_requirements_hold() {
 }
 
 #[test]
+/// Checks root contributors of a failed requirement.
 fn requirement_violation_cells_returns_contributing_cells_for_the_failing_requirement() {
     let (mut sheet, out, width, height, max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
@@ -2565,6 +2652,7 @@ fn requirement_violation_cells_returns_contributing_cells_for_the_failing_requir
 }
 
 #[test]
+/// Checks union of contributors across multiple failed requirements.
 fn requirement_violation_cells_unions_across_multiple_violated_requirements() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
@@ -2602,6 +2690,7 @@ fn requirement_violation_cells_unions_across_multiple_violated_requirements() {
 }
 
 #[test]
+/// Checks refreshed violation contributors after later propagation.
 fn requirement_violation_cells_updates_across_propagate_calls() {
     let (mut sheet, _out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
@@ -2615,6 +2704,7 @@ fn requirement_violation_cells_updates_across_propagate_calls() {
 }
 
 #[test]
+/// Checks preservation of a constraint-consistent edit in issue 182's inequality chain.
 fn issue_182_inequality_chain_preserves_a_consistent_edit() {
     // a<=b<=c via two self-referencing relationships (the inequality.adm2 tutorial
     // shape). Writing a=25 then c=40 is jointly consistent (any b in [25,40] satisfies
@@ -2648,6 +2738,7 @@ fn issue_182_inequality_chain_preserves_a_consistent_edit() {
 }
 
 #[test]
+/// Checks the inequality-chain result that distinguishes the correct seed choice.
 fn issue_182_inequality_chain_discriminating_case_unchanged() {
     // The case that must stay correct: stays are already consistent (11 <= 20 <= 100),
     // so nothing needs to move.
@@ -2682,6 +2773,7 @@ fn issue_182_inequality_chain_discriminating_case_unchanged() {
 }
 
 #[test]
+/// Checks repropagation when a later inequality-chain edit falls below an earlier one.
 fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
     // a<=b<=c again. Writing a=25 raises b to 25 too. Writing c=24 then makes the
     // chain jointly inconsistent unless a also moves down: r2's min-method is
@@ -2720,6 +2812,7 @@ fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
 }
 
 #[test]
+/// Checks seed-method selection against the release elimination state.
 fn seed_method_selection_follows_elimination_state() {
     let mut sheet = Sheet::new();
     let x = sheet.add_cell(0_i32);
@@ -2761,11 +2854,9 @@ fn seed_method_selection_follows_elimination_state() {
         ])
         .unwrap();
     sheet
-        .add_relationship(vec![Method::from_fn_1_1(
-            x,
-            x,
-            |value: &i32| Ok(*value + 1),
-        )])
+        .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| {
+            Ok((*value).max(14))
+        })])
         .unwrap();
 
     sheet.propagate().unwrap();
@@ -2774,6 +2865,7 @@ fn seed_method_selection_follows_elimination_state() {
 }
 
 #[test]
+/// Checks stable inequality propagation across repeated edits to one cell.
 fn issue_182_inequality_chain_survives_two_consecutive_edits_to_the_same_cell() {
     // a<=b<=c again. Writing a=25 raises b to 25. Writing c=24 correctly pulls a and b
     // down to 24 (issue_182_inequality_chain_later_edit_below_earlier_one_repropagates).
@@ -2814,6 +2906,7 @@ fn issue_182_inequality_chain_survives_two_consecutive_edits_to_the_same_cell() 
 }
 
 #[test]
+/// Checks aspiration restoration when a previously raising bound is lowered.
 fn issue_182_inequality_chain_springs_back_when_the_raising_edit_is_lowered() {
     // a<=b<=c. Writing a=100 raises b and c to 100 (a pushes the whole chain up). Then
     // writing a=0 releases that pressure: b and c must spring back to their own
@@ -2853,6 +2946,7 @@ fn issue_182_inequality_chain_springs_back_when_the_raising_edit_is_lowered() {
 }
 
 #[test]
+/// Checks inequality-chain spring-back without history-dependent hysteresis.
 fn issue_182_inequality_chain_has_no_spring_back_hysteresis_when_dragging_a_bound() {
     // Simulates dragging the `c` slider in the a<=b<=c tutorial after writing a=25:
     // down through the point where the chain fully collapses (a=b=c=20), then back up.
@@ -2893,6 +2987,7 @@ fn issue_182_inequality_chain_has_no_spring_back_hysteresis_when_dragging_a_boun
 }
 
 #[test]
+/// Checks retention of a middle-cell edit after editing a previously untouched endpoint.
 fn issue_182_inequality_chain_writing_the_middle_cell_then_an_untouched_endpoint_keeps_its_edit() {
     // a<=b<=c again, but this time the *middle* cell is written directly, unlike every
     // other issue_182 case above (which only ever writes the two endpoints). write(a,
@@ -2938,6 +3033,7 @@ fn issue_182_inequality_chain_writing_the_middle_cell_then_an_untouched_endpoint
 }
 
 #[test]
+/// Checks strength-ordered folding of sibling seed contributions.
 fn sibling_seed_fold_uses_strength_order() {
     // Build the cells in x,a,b,c order so the values stay the required 4,5,3,10 while
     // the explicit strengths satisfy a < b < c and both sibling inputs outrank x. That
@@ -3011,7 +3107,9 @@ fn sibling_seed_fold_uses_strength_order() {
 }
 
 #[test]
+/// Checks insertion-order independence when sibling seed strengths tie.
 fn sibling_seed_fold_ties_ignore_relationship_insertion_order() {
+    /// Creates an integer maximum method with a declared but value-irrelevant third input.
     fn max_with_phantom(lhs: CellId, rhs: CellId, phantom: CellId, output: CellId) -> Method {
         Method::new(
             vec![lhs, rhs, phantom],
@@ -3034,6 +3132,7 @@ fn sibling_seed_fold_ties_ignore_relationship_insertion_order() {
         )
     }
 
+    /// Creates an integer minimum method with a declared but value-irrelevant third input.
     fn min_with_phantom(lhs: CellId, rhs: CellId, phantom: CellId, output: CellId) -> Method {
         Method::new(
             vec![lhs, rhs, phantom],
@@ -3056,6 +3155,7 @@ fn sibling_seed_fold_ties_ignore_relationship_insertion_order() {
         )
     }
 
+    /// Builds equivalent sibling constraints in the requested insertion order.
     fn build_sheet(reverse_siblings: bool) -> (Sheet, CellId) {
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(4_i32);
@@ -3123,6 +3223,7 @@ fn inequality_chain() -> (Sheet, CellId, CellId, CellId) {
 }
 
 #[test]
+/// Checks retention of another cell's aspiration after a redundant write.
 fn inequality_chain_redundant_write_does_not_discard_another_cells_edit() {
     // a<=b<=c. write(b, 100) raises c to 100 and leaves a alone (10, 100, 100). A
     // *redundant* write of a's own current value (10) -- what a slider drag or arrow-key
@@ -3152,6 +3253,7 @@ fn inequality_chain_redundant_write_does_not_discard_another_cells_edit() {
 }
 
 #[test]
+/// Checks retention of a middle-cell aspiration while dragging the lower endpoint.
 fn inequality_chain_dragging_the_low_end_keeps_the_middle_cells_edit() {
     // a<=b<=c after write(b, 100): dragging a across many intermediate values (the
     // stream of writes a slider emits) must leave b and c pinned at b's edit of 100
@@ -3270,6 +3372,7 @@ fn conditional_seed_cycle_preserves_completed_queries_and_recovers() {
 }
 
 #[test]
+/// Checks the exact cell and relationship sites of a seed cycle.
 fn seed_cycle_reports_exact_sites() {
     let (mut sheet, a, b, _c, _d, _s, rel1, rel2) = seed_cycle_sheet();
 
@@ -3289,6 +3392,7 @@ fn seed_cycle_reports_exact_sites() {
 }
 
 #[test]
+/// Checks that seed-cycle rejection exposes no uncommitted value or changed membership.
 fn seed_cycle_leaves_values_and_changed_state_unchanged() {
     let (mut sheet, a, b, c, d, _s, _rel1, _rel2) = seed_cycle_sheet();
 
@@ -3303,6 +3407,7 @@ fn seed_cycle_leaves_values_and_changed_state_unchanged() {
 }
 
 #[test]
+/// Checks that a conditional seed cycle cannot publish staged prerequisite changes.
 fn conditional_seed_cycle_leaves_preplan_mutations_unexposed() {
     let (mut sheet, mode, selected, a, b, c, d) = conditional_seed_cycle_sheet();
     sheet.write(mode, 0_i32).unwrap();
@@ -3331,6 +3436,7 @@ fn conditional_seed_cycle_leaves_preplan_mutations_unexposed() {
 }
 
 #[test]
+/// Checks propagation against current prerequisite and conditional values.
 fn propagation_uses_current_preplan_and_conditional_values() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(1_i32);
@@ -3363,6 +3469,7 @@ fn propagation_uses_current_preplan_and_conditional_values() {
 }
 
 #[test]
+/// Checks preservation of published values after conditional seed-cycle rejection.
 fn conditional_seed_cycle_leaves_sheet_unchanged() {
     let (mut sheet, a, b, c, d, _s, rel1, rel2) = seed_cycle_sheet();
     let mode = sheet.add_cell(0_i32);
@@ -3392,6 +3499,7 @@ fn conditional_seed_cycle_leaves_sheet_unchanged() {
     assert_eq!(sheet.changed().count(), 0);
 }
 
+/// Builds the mutually dependent self-reference seed fixture and returns its diagnostic handles.
 fn seed_cycle_sheet() -> (
     Sheet,
     CellId,
@@ -3441,7 +3549,7 @@ fn seed_cycle_sheet() -> (
                 vec![TypeId::of::<i32>()],
                 |args| {
                     Ok(vec![Box::new(
-                        *args[2].downcast_ref::<i32>().unwrap() + 1000,
+                        (*args[2].downcast_ref::<i32>().unwrap()).max(1000),
                     )])
                 },
             ),
@@ -3471,7 +3579,7 @@ fn seed_cycle_sheet() -> (
                 vec![TypeId::of::<i32>()],
                 |args| {
                     Ok(vec![Box::new(
-                        *args[2].downcast_ref::<i32>().unwrap() + 2000,
+                        (*args[2].downcast_ref::<i32>().unwrap()).max(2000),
                     )])
                 },
             ),
@@ -3480,6 +3588,7 @@ fn seed_cycle_sheet() -> (
     (sheet, a, b, c, d, s, rel1, rel2)
 }
 
+/// Builds a conditional seed-cycle fixture and identifies its published-value cells.
 fn conditional_seed_cycle_sheet() -> (Sheet, CellId, CellId, CellId, CellId, CellId, CellId) {
     let (mut sheet, a, b, c, d, _s, rel1, rel2) = seed_cycle_sheet();
     let mode = sheet.add_cell(1_i32);

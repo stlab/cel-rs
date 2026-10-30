@@ -32,7 +32,9 @@ thread_local! {
 ///
 /// This owner deallocates storage but does not destroy its contents.
 pub(crate) struct Allocation {
+    /// Points to the allocation or a layout-aligned dangling address for a ZST.
     pub(crate) pointer: NonNull<u8>,
+    /// Retains the exact layout required to release this allocation.
     pub(crate) layout: Layout,
 }
 
@@ -78,8 +80,11 @@ impl Drop for Allocation {
 /// assert_eq!(owner.try_into_typed::<Leaf<String>>().unwrap(), "hello");
 /// ```
 pub struct OwnedValue {
+    /// Owns storage matching the frozen value layout.
     allocation: Allocation,
+    /// Binds complete representation, ownership, and optional capability plans.
     value_type: ValueType,
+    /// Records whether this allocation currently contains an initialized owner.
     live: bool,
 }
 
@@ -98,6 +103,7 @@ pub struct OwnedValue {
 /// ```
 #[derive(Clone)]
 pub struct ValueFormatter {
+    /// Retains the exact shape and recursive formatting capabilities checked at preparation.
     value_type: ValueType,
 }
 
@@ -630,8 +636,11 @@ impl Children<'_> {
 
 /// Destroys a live child prefix backwards, including remaining children on unwind.
 pub(crate) struct Prefix<'a> {
+    /// Points to the caller-owned tuple or element allocation.
     pub(crate) base: *mut u8,
+    /// Supplies source-ordered child layouts and ownership operations.
     pub(crate) children: Children<'a>,
+    /// Counts the live child prefix still requiring destruction.
     pub(crate) initialized: usize,
 }
 
@@ -862,5 +871,125 @@ unsafe fn debug_raw(value_type: &ValueType, pointer: *const u8, output: &mut Str
             output.push(']');
         }
         ValueKind::Leaf(_) | ValueKind::Callable { .. } => unreachable!("missing debug plan"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Reuses prepared formatting for matching owners and rejects unavailable or mismatched shapes.
+    #[test]
+    fn prepared_formatter_contract() -> anyhow::Result<()> {
+        let plain = super::OwnedValue::new::<crate::Leaf<String>>(String::from("first"));
+        assert!(plain.prepare_debug().is_err());
+        let owner = plain.with_value_type(
+            crate::ValueType::leaf::<String>().with_debug::<crate::Leaf<String>>()?,
+        )?;
+        let formatter = owner.prepare_debug()?;
+        let other = super::OwnedValue::new::<crate::Leaf<String>>(String::from("second"));
+        assert_eq!(formatter.format(&owner)?, "\"first\"");
+        assert_eq!(formatter.clone().format(&other)?, "\"second\"");
+        let mismatch = super::OwnedValue::new::<crate::Leaf<u32>>(7);
+        assert!(formatter.format(&mismatch).is_err());
+        assert_eq!(formatter.format(&owner)?, "\"first\"");
+        assert_eq!(mismatch.try_into_typed::<crate::Leaf<u32>>()?, 7);
+        Ok(())
+    }
+
+    use super::*;
+    use crate::{Array, ArrayOf, Cons, IntoCStackList, IntoRustTuple, Leaf, Nil};
+    use std::{cell::Cell, rc::Rc};
+
+    /// Preserves recursive equality and isolates cloned mutable leaf storage.
+    #[test]
+    fn recursive_clone_is_an_independent_equal_value() {
+        type Row = Cons<ArrayOf<Leaf<String>>, Nil>;
+        let descriptor = ValueType::tuple(vec![AssociatedType {
+            offset: 0,
+            value_type: ValueType::array(
+                ValueType::cloneable_leaf::<String>()
+                    .with_equality::<Leaf<String>>()
+                    .unwrap()
+                    .with_debug::<Leaf<String>>()
+                    .unwrap(),
+            ),
+        }])
+        .unwrap();
+        let original = OwnedValue::new::<Row>(
+            (Array::from_vec(vec![String::from("leaf")]),).into_c_stack_list(),
+        )
+        .with_value_type(descriptor)
+        .unwrap();
+        let cloned = original.try_clone().unwrap();
+        assert!(original.try_eq(&cloned).unwrap());
+        assert!(cloned.try_eq(&original).unwrap());
+        assert!(original.try_eq(&original).unwrap());
+        let formatter = original.prepare_debug().unwrap();
+        assert_eq!(formatter.format(&cloned).unwrap(), "([\"leaf\"],)");
+        assert_eq!(original.try_debug().unwrap(), "([\"leaf\"],)");
+        let (original,) = original.try_into_typed::<Row>().unwrap().into_rust_tuple();
+        let (cloned,) = cloned.try_into_typed::<Row>().unwrap().into_rust_tuple();
+        let mut original = original.into_vec();
+        let mut cloned = cloned.into_vec();
+        original[0].push_str(" original");
+        assert_eq!(cloned, ["leaf"]);
+        cloned[0].push_str(" clone");
+        assert_eq!(original, ["leaf original"]);
+    }
+
+    /// Leaves a borrowed original available when optional capabilities are absent.
+    #[test]
+    fn missing_capabilities_preserve_value() {
+        let original = OwnedValue::new::<Leaf<String>>(String::from("owned"));
+        assert!(original.try_clone().is_err());
+        assert!(original.try_eq(&original).is_err());
+        assert!(original.try_debug().is_err());
+        assert!(original.prepare_debug().is_err());
+        assert_eq!(original.try_into_typed::<Leaf<String>>().unwrap(), "owned");
+    }
+
+    /// Destroys the consumed owner exactly once after a checked conversion mismatch.
+    #[test]
+    fn consuming_shape_error_releases_original() {
+        /// Records the release of a move-only leaf.
+        struct Tracked(Rc<Cell<usize>>);
+        impl Drop for Tracked {
+            /// Records this leaf's release.
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let drops = Rc::new(Cell::new(0));
+        let owner = OwnedValue::new::<Leaf<Tracked>>(Tracked(drops.clone()));
+        assert!(owner.try_into_typed::<Leaf<u8>>().is_err());
+        assert_eq!(drops.get(), 1);
+    }
+
+    /// Splits tuple fields in source order without reallocating nested payloads.
+    #[test]
+    fn tuple_split_preserves_nested_allocation() {
+        type Row = Cons<Leaf<u8>, Cons<ArrayOf<Leaf<String>>, Nil>>;
+        let array = Array::from_vec(vec![String::from("owned")]);
+        let pointer = array.as_slice().as_ptr();
+        let owner = OwnedValue::new::<Row>((7u8, array).into_c_stack_list());
+        let mut fields = owner.into_fields().unwrap().into_iter();
+        assert_eq!(
+            fields.next().unwrap().try_into_typed::<Leaf<u8>>().unwrap(),
+            7
+        );
+        let array = fields
+            .next()
+            .unwrap()
+            .try_into_typed::<ArrayOf<Leaf<String>>>()
+            .unwrap();
+        assert_eq!(array.as_slice().as_ptr(), pointer);
+        assert_eq!(array.as_slice(), ["owned"]);
+        assert!(fields.next().is_none());
+        assert!(
+            OwnedValue::new::<Nil>(().into_c_stack_list())
+                .into_fields()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(OwnedValue::new::<Leaf<u8>>(7).into_fields().is_err());
     }
 }

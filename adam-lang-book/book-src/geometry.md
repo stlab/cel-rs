@@ -9,7 +9,6 @@ dependency. Enable `cel-euclid`'s `adam` Cargo feature, call
 Pass the same registry and lookup to `adam_lang::check_sheet` for editor checking.
 The checker uses exact record/member metadata where types are known, visits
 closure bodies, and defers unresolved call-result and tuple shapes to runtime.
-It does not claim complete inference.
 
 Geometry uses concrete `f64` / `UnknownUnit` aliases, not generic Adam types.
 Write `1.0` or `1 as f64` rather than passing `i32` fields implicitly.
@@ -19,11 +18,14 @@ for fields, supported operand types, checked errors, and containment semantics.
 
 ## Crop and straighten
 
-This is the **actual library example**, included rather than copied. Run
-`cargo run -p cel-euclid --features adam --example adam_geometry` to execute it.
-`cargo test -p adam-lang-book --test geometry` verifies these same included
-sheets through the book's parser. These cross-library demonstrations are
-executable Rust-driven examples, not live inspector mounts or a crop UI.
+Run `cargo run -p cel-euclid --features adam --example adam_geometry` to execute
+this library example. The geometry examples use a Rust host rather than live inspectors.
+
+<!-- [knowledge]
+Include the library sheets rather than copying them so the book and host examples
+stay synchronized. Run cargo test -p adam-lang-book --test geometry after edits;
+it verifies these sheets through the book's parser.
+-->
 
 ```rust
 {{#include ../../cel-euclid/examples/crop_straighten.adm2}}
@@ -41,8 +43,13 @@ an origin-centered anchor.
 The relationship reads and writes `crop`. Adam preserves the user's source
 aspiration while it recomputes the effective value. Tightening the angle shrinks
 the crop uniformly; loosening it springs back. An explicit crop write replaces
-the aspiration. There is no extra requested-crop cell or helper-owned memory.
-Every typed, noncapturing IIFE forwards its needed values explicitly.
+the aspiration.
+
+<!-- [knowledge]
+Use Adam's source aspiration rather than adding requested-crop cells or host-owned
+memory. Keep each noncapturing IIFE's inputs explicit so the sheet owns all changing
+dependencies.
+-->
 
 The expression maps the requested center and the four-corner outer bounds
 through the inverse transform. It divides each nearest-image-edge distance by
@@ -79,7 +86,6 @@ cancellation can move the anchor or distort the overlay.
 The named `sufficient_fit_and_presentation_precision` requirement reports
 insufficient precision, even when fitting, coverage, and coefficient finiteness
 pass. The `precise` flag is validation metadata, not another requested rectangle.
-The expression contains these policies openly, without a crop-specific operation.
 
 Acceptance uses a `64*f64::EPSILON` scale-relative tolerance for closed-edge
 coverage, center preservation, maximality, and repeated application. For image
@@ -121,7 +127,7 @@ fail the precision requirement under the same transform. All presentation
 coefficients remain finite, but the anchor maps to `0.10000228881835938`
 instead of the requested `0.09999999997671694`, exceeding the approximately
 `1.42e-8` overlay budget. Rejection preserves the source aspiration; it does not
-translate the crop or silently narrow support to rotations or uniform scales.
+translate the crop.
 
 For a `[0,100] × [0,100]` image, a centered square at 45 degrees has side
 `100 / sqrt(2)` within `1e-12`. For `[0,100] × [0,80]` with a requested

@@ -12,6 +12,9 @@ use crate::type_expr::{BuiltinTypeResolver, ResolvedType, TypeExpr, TypeResolver
 use crate::{Expr, ExprSpan, Literal, OpLookup, ParseError, ResolvedLeafType};
 
 /// A complete recursive source type, or an unresolved editor value.
+///
+/// # Examples
+/// See [`Self::unify`] for recursive compatibility and result construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ty {
     /// `i8`.
@@ -245,7 +248,7 @@ impl Ty {
 
     /// Returns a human-readable name for diagnostics, borrowing primitive and leaf names.
     ///
-    /// - Complexity: O(n * l) time and O(l) space for n recursive nodes and l output bytes;
+    /// - Complexity: O(n + b) time and O(b + d) space for n recursive nodes, b output bytes and depth d;
     ///   primitive and registered leaf names take O(1).
     ///
     /// # Examples
@@ -275,33 +278,54 @@ impl Ty {
             Ty::F64 => "f64",
             Ty::Bool => "bool",
             Ty::String => "String",
-            Ty::Array(element) => return Cow::Owned(format!("[{}]", element.name())),
-            Ty::Tuple(elements) => {
-                return Cow::Owned(format!(
-                    "({}{})",
-                    elements
-                        .iter()
-                        .map(|ty| ty.name())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    if elements.len() == 1 { "," } else { "" }
-                ));
-            }
-            Ty::Callable(parameters, result) => {
-                return Cow::Owned(format!(
-                    "Fn(({}{}), {})",
-                    parameters
-                        .iter()
-                        .map(|ty| ty.name())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    if parameters.len() == 1 { "," } else { "" },
-                    result.name()
-                ));
+            Ty::Array(_) | Ty::Tuple(_) | Ty::Callable(..) => {
+                let mut output = String::new();
+                self.write_name(&mut output);
+                return Cow::Owned(output);
             }
             Ty::Registered(leaf) => leaf.type_name(),
             Ty::Any => "<any>",
         })
+    }
+
+    /// Appends diagnostic syntax without allocating intermediate child names.
+    ///
+    /// - Complexity: O(n + b) time and O(d) stack space for n nodes, b bytes and depth d.
+    fn write_name(&self, output: &mut String) {
+        match self {
+            Ty::Array(element) => {
+                output.push('[');
+                element.write_name(output);
+                output.push(']');
+            }
+            Ty::Tuple(elements) => Self::write_tuple_name(elements, output),
+            Ty::Callable(parameters, result) => {
+                output.push_str("Fn(");
+                Self::write_tuple_name(parameters, output);
+                output.push_str(", ");
+                result.write_name(output);
+                output.push(')');
+            }
+            leaf => output.push_str(&leaf.name()),
+        }
+    }
+
+    /// Appends tuple syntax, retaining the required singleton comma.
+    ///
+    /// - Complexity: O(n + b) time and O(d) stack space for n descendant nodes, b bytes and depth d.
+    fn write_tuple_name(elements: &[Ty], output: &mut String) {
+        output.push('(');
+        // Emit child names directly into the shared output.
+        for (index, element) in elements.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            element.write_name(output);
+        }
+        if elements.len() == 1 {
+            output.push(',');
+        }
+        output.push(')');
     }
 
     /// Maps a type's bare name (as written in source, e.g. in a cast's target position) to its
@@ -343,7 +367,7 @@ impl Ty {
     /// load-bearing property that lets unresolved inputs produce zero false-positive diagnostics.
     /// Registered leaves unify only when their complete descriptors agree, regardless of aliases.
     ///
-    /// - Complexity: O(n + l) time and space for n recursive nodes and l registered name bytes.
+    /// - Complexity: O(n) time and O(d) stack space for n recursive nodes at depth d.
     ///
     /// # Examples
     ///
@@ -356,7 +380,22 @@ impl Ty {
     /// assert!(!Ty::Array(Box::new(Ty::I32)).unifies_with(&Ty::Array(Box::new(Ty::F64))));
     /// ```
     pub fn unifies_with(&self, other: &Ty) -> bool {
-        self.unify(other).is_some()
+        match (self, other) {
+            (Ty::Any, _) | (_, Ty::Any) => true,
+            (Ty::Array(lhs), Ty::Array(rhs)) => lhs.unifies_with(rhs),
+            (Ty::Tuple(lhs), Ty::Tuple(rhs)) => {
+                lhs.len() == rhs.len() && lhs.iter().zip(rhs).all(|(a, b)| a.unifies_with(b))
+            }
+            (Ty::Callable(lhs, lr), Ty::Callable(rhs, rr)) => {
+                lhs.len() == rhs.len()
+                    && lhs.iter().zip(rhs).all(|(a, b)| a.unifies_with(b))
+                    && lr.unifies_with(rr)
+            }
+            (Ty::Registered(lhs), Ty::Registered(rhs)) => {
+                lhs.element_type().same_shape(rhs.element_type())
+            }
+            (lhs, rhs) => lhs == rhs,
+        }
     }
 
     /// The most specific type both `self` and `other` describe, or `None` if they're
@@ -415,7 +454,9 @@ impl Ty {
 /// annotation), returning the expression's inferred type plus every type diagnostic found.
 ///
 /// Uses an empty [`OpLookup`]; metadata-aware hosts use [`check_expr_with_type_resolver`].
-/// Checks every child, including closure bodies under parameter-local bindings.
+/// Checks every child, including noncapturing closure bodies under parameter-local bindings.
+/// Closure bodies ignore the outer value resolver; registered library metadata remains visible.
+/// Duplicate or reserved parameter names produce diagnostics, including in hand-built syntax.
 /// Arrays require homogeneous complete shapes, tuples retain source order, and `if` joins
 /// compatible branch types. Callable applications check parameter and result types.
 /// Calls without metadata and free identifiers without declarations remain unresolved.
@@ -423,7 +464,7 @@ impl Ty {
 /// using the alias's spelling to select a signature. Builtin range expressions retain their
 /// concrete range result, not their endpoint type.
 ///
-/// - Complexity: O(n) in the number of nodes in `expr`.
+/// - Complexity: Matches [`check_expr_with_type_resolver`] with no registered overloads or schemas.
 ///
 /// # Examples
 ///
@@ -733,7 +774,7 @@ pub fn check_expr_with_type_resolver(
             (ty, diagnostics)
         }
         Expr::Closure { params, body, .. } => {
-            let mut annotation_errors = Vec::new();
+            let mut annotation_errors = crate::ast::closure_parameter_diagnostics(params);
             let parameters: Vec<_> = params
                 .iter()
                 .map(|p| match p.type_expr.resolve(resolve_type) {
@@ -748,7 +789,8 @@ pub fn check_expr_with_type_resolver(
                 if let Some(index) = params.iter().position(|p| p.name == name) {
                     parameters[index].clone()
                 } else {
-                    resolve_ident(name)
+                    // Noncapturing bodies can use registered library metadata, not outer bindings.
+                    Ty::Any
                 }
             };
             let (result, mut diagnostics) =
@@ -1142,6 +1184,19 @@ fn check_logical(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Diagnostic names borrow leaves and preserve recursive callable and singleton syntax.
+    #[test]
+    fn diagnostic_names_borrow_leaves_and_preserve_nested_syntax() {
+        assert!(matches!(Ty::I32.name(), Cow::Borrowed("i32")));
+        let alias = Ty::Registered(crate::ResolvedLeafType::leaf::<i32>("Alias").unwrap());
+        assert!(matches!(alias.name(), Cow::Borrowed("Alias")));
+        let callable = Ty::Callable(
+            vec![Ty::Array(Box::new(alias))],
+            Box::new(Ty::Tuple(vec![Ty::I32])),
+        );
+        assert_eq!(callable.name(), "Fn(([Alias],), (i32,))");
+    }
     use crate::LogicalOp;
 
     #[test]

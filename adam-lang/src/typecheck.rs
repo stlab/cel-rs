@@ -289,7 +289,9 @@ struct DeclaredTypes {
 /// other `out`s' inferred types — see this function's own note above), and is never present in
 /// the `TypeShape` map (only annotated cells/outs are).
 ///
-/// - Complexity: O(n) sheet traversal plus annotation resolution and output-body checking.
+/// - Complexity: O(n) sheet traversal plus annotation resolution and output-body checking;
+///   O(c + s + h + d) space for copied cell-name bytes, resolved shape nodes, expression
+///   recursion height, and transient diagnostics.
 fn declared_cell_types(
     sheet: &Sheet,
     registry: &TypeRegistry,
@@ -426,9 +428,7 @@ fn expr_matches_shape(
             },
             TypeShape::Tuple(_),
         ) => {
-            let (_, cond_diags) =
-                check_expr_with_type_resolver(cond, resolve, resolve_type, lookup);
-            diagnostics.extend(cond_diags);
+            check_condition(cond, resolve, resolve_type, lookup, diagnostics);
             expr_matches_shape(
                 then_branch,
                 shape,
@@ -566,7 +566,8 @@ fn check_cell_initializer(
 /// structural walk, not built on `check_expr`'s identifier resolution, so checking for `_`'s
 /// presence never runs type-checking a second time over any part of `expr`.
 ///
-/// - Complexity: O(n) in the number of sub-expressions in `expr`.
+/// - Complexity: O(nk) time for n sub-expressions and maximum compared identifier length k;
+///   O(h) stack space for expression height h.
 fn expr_references_ident(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Literal { .. } => false,
@@ -730,9 +731,7 @@ fn check_tuple_output_body(
             else_branch,
             ..
         } => {
-            let (_, cond_diags) =
-                check_expr_with_type_resolver(cond, resolve, resolve_type, lookup);
-            diagnostics.extend(cond_diags);
+            check_condition(cond, resolve, resolve_type, lookup, diagnostics);
             check_tuple_output_body(
                 then_branch,
                 outputs,
@@ -792,6 +791,28 @@ fn check_tuple_output_body(
     }
 }
 
+/// Checks a CEL condition once and reports a non-Boolean result at its own span.
+///
+/// - Complexity: O(n) traversal time and O(h + d) space for expression height and diagnostics.
+fn check_condition(
+    cond: &Expr,
+    resolve: &impl Fn(&str) -> Ty,
+    resolve_type: &impl cel_parser::TypeResolver,
+    lookup: &cel_parser::OpLookup,
+    diagnostics: &mut Vec<ParseError>,
+) {
+    let (ty, nested) = check_expr_with_type_resolver(cond, resolve, resolve_type, lookup);
+    let valid = nested.is_empty();
+    diagnostics.extend(nested);
+    if valid && !ty.unifies_with(&Ty::Bool) {
+        diagnostics.push(ParseError::new_range(
+            "if condition must produce `bool`",
+            cond.span().start,
+            cond.span().end,
+        ));
+    }
+}
+
 /// Checks one `binding`'s body against its declared outputs, dispatching on
 /// [`BindingDecl::destructure`]: a destructuring binding (`(a, b) := ...` or the single-element
 /// `(a,) := ...`) is checked recursively via [`check_tuple_output_body`] against each output
@@ -822,6 +843,7 @@ fn check_binding(
         );
         return;
     }
+
     let Some((name, _)) = binding.outputs.first() else {
         let (_, body_diags) =
             check_expr_with_type_resolver(&binding.body, resolve, resolve_type, lookup);
@@ -843,7 +865,10 @@ fn check_binding(
     let (body_ty, body_diags) =
         check_expr_with_type_resolver(&binding.body, resolve, resolve_type, lookup);
     diagnostics.extend(body_diags);
-    if let Expr::Tuple { elements, .. } = &binding.body {
+    let declared = resolve(name);
+    if let Expr::Tuple { elements, .. } = &binding.body
+        && declared != Ty::Any
+    {
         let n = elements.len();
         diagnostics.push(ParseError::new_range(
             format!("binding declares 1 output but its body is a {n}-tuple"),
@@ -852,7 +877,6 @@ fn check_binding(
         ));
         return;
     }
-    let declared = resolve(name);
     if !declared.unifies_with(&body_ty) {
         diagnostics.push(ParseError::new_range(
             format!(
@@ -978,13 +1002,18 @@ mod tests {
     use super::*;
     use crate::AdamAstParser;
 
+    /// Parses a semantic fixture without accepting syntax-recovery placeholders.
     fn parse(source: &str) -> Sheet {
-        AdamAstParser::new().parse_str(source).unwrap()
+        let sheet = AdamAstParser::new().parse_str(source).unwrap();
+        assert!(sheet.errors.is_empty(), "{:?}", sheet.errors);
+        sheet
     }
 
+    /// Supplies a registered leaf distinct from the built-in scalar types.
     #[derive(Clone, Debug, PartialEq)]
     struct Custom(i32);
 
+    /// Accepts an initializer matching its cell annotation.
     #[test]
     fn cell_initializer_matching_its_annotation_has_no_diagnostic() {
         let sheet = parse("sheet s { cell x: i32 = 1; }");
@@ -992,6 +1021,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses a cell initializer that conflicts with its annotation.
     #[test]
     fn cell_initializer_mismatched_with_its_annotation_is_a_diagnostic() {
         // Unsuffixed float literal defaults to f64, not i32.
@@ -1000,6 +1030,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses a source initializer that conflicts with its annotation.
     #[test]
     fn source_initializer_mismatched_with_its_annotation_is_a_diagnostic() {
         // Unsuffixed float literal defaults to f64, not i32.
@@ -1008,6 +1039,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
     }
 
+    /// Resolves registered custom leaves within array annotations.
     #[test]
     fn custom_array_annotations_use_the_registry_type_resolver() {
         let sheet = parse(
@@ -1023,6 +1055,7 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
+    /// Rejects differing custom leaf types despite matching array structure.
     #[test]
     fn custom_array_annotations_reject_exact_scalar_type_mismatches() {
         let sheet = parse("sheet s { out values := [1]: [Custom]; }");
@@ -1040,6 +1073,7 @@ mod tests {
         );
     }
 
+    /// Diagnoses an unknown custom leaf in an array annotation.
     #[test]
     fn unknown_custom_array_annotation_type_is_reported() {
         let sheet = parse("sheet s { out values := []: [Missing]; }");
@@ -1052,6 +1086,7 @@ mod tests {
         );
     }
 
+    /// Accepts arrays whose elements have tuple annotations.
     #[test]
     fn tuple_typed_array_annotations_are_accepted_by_cel_checking() {
         let sheet = parse("sheet s { out values := []: [(i32, f64)]; }");
@@ -1059,6 +1094,7 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
+    /// Diagnoses a non-Boolean cell requirement.
     #[test]
     fn cell_requirement_non_bool_body_is_a_diagnostic() {
         let sheet = parse("sheet s { cell x: i32 = 5 require { @positive x; }; }");
@@ -1066,6 +1102,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
     }
 
+    /// Checks non-literal cell initializer expressions.
     #[test]
     fn cell_initializer_non_literal_expression_is_checked() {
         let sheet = parse("sheet s { cell x: f64 = 1 + 2; }");
@@ -1077,6 +1114,7 @@ mod tests {
         );
     }
 
+    /// Retains CEL array-annotation diagnostics in cell initializers.
     #[test]
     fn cell_initializer_array_annotation_diagnostics_still_surface() {
         // The initializer's own body diagnostics (here, a CEL typed-array annotation mismatch)
@@ -1090,6 +1128,7 @@ mod tests {
         );
     }
 
+    /// Accepts an annotation-only cell without inventing initializer diagnostics.
     #[test]
     fn cell_with_only_an_annotation_has_nothing_to_cross_check() {
         let sheet = parse("sheet s { cell x: i32; }");
@@ -1097,6 +1136,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses a default signed integer literal assigned to an unsigned cell.
     #[test]
     fn cell_initializer_unsuffixed_int_literal_mismatched_with_a_declared_unsigned_type_is_a_diagnostic()
      {
@@ -1109,6 +1149,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses an integer literal assigned to a floating-point cell.
     #[test]
     fn cell_initializer_unsuffixed_int_literal_mismatched_with_a_declared_float_type_is_a_diagnostic()
      {
@@ -1119,6 +1160,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses character literals incompatible with registered cell types.
     #[test]
     fn cell_initializer_char_literal_against_any_registered_type_is_a_diagnostic() {
         // adam-lang's real parser has no rule accepting a char literal against any registered
@@ -1128,6 +1170,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Leaves unknown cell annotations to the registry-aware validation phase.
     #[test]
     fn cell_annotated_with_an_unregistered_type_name_is_never_flagged() {
         let sheet = parse("sheet s { cell x: WidgetHandle = 1; }");
@@ -1135,6 +1178,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Accepts a scalar binding matching its declared output type.
     #[test]
     fn binding_single_output_matching_declared_type_has_no_diagnostic() {
         let sheet = parse(
@@ -1145,6 +1189,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses a scalar binding that conflicts with its declared output.
     #[test]
     fn binding_single_output_mismatched_with_declared_type_is_a_diagnostic() {
         let sheet = parse(
@@ -1155,6 +1200,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts a destructuring binding with matching tuple elements.
     #[test]
     fn binding_multi_output_matching_tuple_has_no_diagnostic() {
         let sheet = parse(
@@ -1196,6 +1242,7 @@ mod tests {
         }
     }
 
+    /// Diagnoses destructuring with the wrong tuple arity.
     #[test]
     fn binding_multi_output_arity_mismatch_is_a_diagnostic() {
         let sheet = parse(
@@ -1206,6 +1253,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses a tuple body assigned to a declared scalar output.
     #[test]
     fn binding_single_output_with_a_tuple_shaped_body_is_a_diagnostic() {
         // Body is a 2-tuple but only 1 output is declared: `check_expr` would otherwise infer
@@ -1218,6 +1266,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses incompatible element types in a destructured result.
     #[test]
     fn binding_multi_output_per_element_type_mismatch_is_a_diagnostic() {
         let sheet = parse(
@@ -1228,6 +1277,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Retains operator diagnostics from relationship expressions.
     #[test]
     fn an_operator_error_inside_a_binding_body_surfaces() {
         let sheet = parse(
@@ -1238,19 +1288,30 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts valid branch bodies and diagnoses a distinct mismatch in each branch.
     #[test]
     fn conditional_branch_and_default_bindings_are_both_checked() {
         let sheet = parse(
             "sheet s { cell mode: i32; cell a: i32; cell b: i32; cell out: i32; \
              conditional mode { \
-                 0i32 => { relationship { out := a; } }, \
-                 _ => { relationship { out := b; } }, \
+                 0i32 => { relationship { out := a; } } \
+                 _ => { relationship { out := b; } } \
              } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
+        let invalid = parse(
+            "sheet s { cell mode: i32; cell a: bool; cell b: f64; cell out: i32; \
+             conditional mode { \
+                 0i32 => { relationship { out := a; } } \
+                 _ => { relationship { out := b; } } \
+             } }",
+        );
+        let diags = check_sheet(&invalid, &TypeRegistry::new(), &cel_parser::OpLookup::new());
+        assert_eq!(diags.len(), 2);
     }
 
+    /// Permits bindings to cells without explicit type annotations.
     #[test]
     fn a_cell_with_no_type_annotation_unifies_with_anything_used_in_a_binding() {
         // `cell a = 1;` has an initializer but no `: type_name` — declared_cell_types maps it to
@@ -1263,10 +1324,14 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Skips syntax-recovery placeholders during semantic checking.
     #[test]
     fn recovered_error_items_are_skipped_without_panicking() {
-        let sheet =
-            parse("sheet s { cell good: i32 = 1; cell bad unknown_syntax cell after: i32 = 2; }");
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                "sheet s { cell good: i32 = 1; cell bad unknown_syntax cell after: i32 = 2; }",
+            )
+            .unwrap();
         assert!(
             !sheet.errors.is_empty(),
             "fixture must actually recover an error item"
@@ -1275,6 +1340,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Accepts an output body matching its explicit annotation.
     #[test]
     fn out_body_matching_its_annotation_has_no_diagnostic() {
         let sheet = parse(
@@ -1285,6 +1351,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses an output body that conflicts with its annotation.
     #[test]
     fn out_body_mismatched_with_its_annotation_is_a_diagnostic() {
         let sheet = parse(
@@ -1295,6 +1362,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts an output whose type is inferred from its body.
     #[test]
     fn out_with_no_annotation_infers_its_type_and_has_no_diagnostic() {
         // No `: type_name` to cross-check against — nothing to flag, and a later reference to
@@ -1307,6 +1375,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Accepts a Boolean requirement body.
     #[test]
     fn requirement_with_bool_body_has_no_diagnostic() {
         let sheet = parse(
@@ -1319,6 +1388,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses a non-Boolean labeled requirement.
     #[test]
     fn requirement_with_non_bool_body_is_a_diagnostic() {
         let sheet = parse(
@@ -1331,6 +1401,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses a non-Boolean unlabeled requirement.
     #[test]
     fn unlabeled_requirement_with_non_bool_body_is_a_diagnostic() {
         let sheet = parse(
@@ -1343,6 +1414,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts a tuple initializer matching its annotation.
     #[test]
     fn cell_tuple_initializer_matching_its_annotation_has_no_diagnostic() {
         let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5); }");
@@ -1350,6 +1422,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses tuple initializer arity mismatch.
     #[test]
     fn cell_tuple_initializer_arity_mismatch_is_a_diagnostic() {
         let sheet = parse("sheet s { cell a: (i32, f64, i32) = (1, 2.5); }");
@@ -1357,6 +1430,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses tuple initializer element-type mismatch.
     #[test]
     fn cell_tuple_initializer_element_type_mismatch_is_a_diagnostic() {
         let sheet = parse("sheet s { cell a: (i32, i32) = (1, 2.5); }");
@@ -1364,6 +1438,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts a nested tuple initializer matching its recursive annotation.
     #[test]
     fn cell_nested_tuple_initializer_matching_its_annotation_has_no_diagnostic() {
         let sheet = parse("sheet s { cell a: (i32, (f64, String)) = (1, (2.5, \"x\")); }");
@@ -1371,6 +1446,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Accepts a cell filter with matching candidate and result types.
     #[test]
     fn filter_with_matching_types_has_no_diagnostic() {
         let sheet = parse("sheet s { cell a: i32 = 1 filter _; }");
@@ -1378,6 +1454,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Accepts a source filter with matching candidate and result types.
     #[test]
     fn filter_with_matching_types_on_a_source_has_no_diagnostic() {
         let sheet = parse("sheet s { source a: i32 = 1 filter _; }");
@@ -1385,6 +1462,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Resolves named cell dependencies within filters.
     #[test]
     fn filter_referencing_a_cell_has_no_diagnostic() {
         let sheet = parse(
@@ -1394,6 +1472,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses a cell filter returning an incompatible type.
     #[test]
     fn filter_body_type_mismatch_is_a_diagnostic() {
         // Body is `bool`-typed (a comparison), but `a` is declared `i32`.
@@ -1402,6 +1481,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses a non-range cell filter without a candidate reference.
     #[test]
     fn filter_without_underscore_is_a_diagnostic() {
         let sheet = parse("sheet s { cell a: i32 = 1 filter 1; }");
@@ -1450,6 +1530,7 @@ mod tests {
         }
     }
 
+    /// Diagnoses an output filter returning an incompatible type.
     #[test]
     fn filter_body_type_mismatch_on_an_out_is_a_diagnostic() {
         // Mirrors `filter_body_type_mismatch_is_a_diagnostic`, but for an `out`'s filter clause:
@@ -1459,6 +1540,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses a non-range output filter without a candidate reference.
     #[test]
     fn filter_without_underscore_on_an_out_is_a_diagnostic() {
         // Mirrors `filter_without_underscore_is_a_diagnostic`, but for an `out`'s filter clause.
@@ -1467,6 +1549,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses a source filter returning an incompatible type.
     #[test]
     fn filter_body_type_mismatch_on_a_source_is_a_diagnostic() {
         // Mirrors `filter_body_type_mismatch_is_a_diagnostic`, but for a `source`'s filter
@@ -1476,6 +1559,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses a non-range source filter without a candidate reference.
     #[test]
     fn filter_without_underscore_on_a_source_is_a_diagnostic() {
         // Mirrors `filter_without_underscore_is_a_diagnostic`, but for a `source`'s filter
@@ -1485,6 +1569,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts a filter on a tuple-valued cell.
     #[test]
     fn filter_on_a_tuple_typed_cell_is_supported() {
         let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0, _.1); }");
@@ -1492,6 +1577,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Recognizes candidate references nested inside calls.
     #[test]
     fn filter_references_underscore_nested_inside_a_call_has_no_missing_underscore_diagnostic() {
         // `_` appears only inside an `if`'s then-branch, not as the whole body or a bare
@@ -1518,6 +1604,7 @@ mod tests {
         );
     }
 
+    /// Accepts a direct binding with a matching tuple-valued body.
     #[test]
     fn binding_single_tuple_typed_output_matching_body_has_no_diagnostic() {
         let sheet = parse(
@@ -1528,6 +1615,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses an element mismatch in a directly assigned tuple.
     #[test]
     fn binding_single_tuple_typed_output_element_type_mismatch_is_a_diagnostic() {
         let sheet = parse(
@@ -1538,6 +1626,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts matching tuple shapes in both conditional-expression arms.
     #[test]
     fn binding_single_tuple_typed_output_if_else_body_matching_both_branches_has_no_diagnostic() {
         let sheet = parse(
@@ -1550,6 +1639,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Checks the tuple-valued then arm when a conditional expression has no else.
     #[test]
     fn binding_single_tuple_typed_output_if_without_else_matching_then_branch_has_no_diagnostic() {
         let sheet = parse(
@@ -1562,6 +1652,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Accepts matching tuple shapes throughout an else-if chain.
     #[test]
     fn binding_single_tuple_typed_output_if_else_if_chain_matching_all_branches_has_no_diagnostic()
     {
@@ -1575,6 +1666,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Reports independent tuple-element mismatches from both conditional arms.
     #[test]
     fn binding_single_tuple_typed_output_if_else_body_element_mismatch_in_each_branch_is_two_diagnostics()
      {
@@ -1594,6 +1686,7 @@ mod tests {
         assert_eq!(diags.len(), 2);
     }
 
+    /// Accepts matching destructured tuple shapes in both conditional arms.
     #[test]
     fn binding_multi_output_if_else_body_matching_both_branches_has_no_diagnostic() {
         let sheet = parse(
@@ -1606,6 +1699,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses a destructured element mismatch in one conditional arm.
     #[test]
     fn binding_multi_output_if_else_body_element_mismatch_in_a_branch_is_a_diagnostic() {
         let sheet = parse(
@@ -1619,6 +1713,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts singleton tuple destructuring with a matching element.
     #[test]
     fn binding_single_element_tuple_destructure_has_no_diagnostic() {
         let sheet =
@@ -1627,6 +1722,7 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    /// Diagnoses the wrong element type in singleton tuple destructuring.
     #[test]
     fn binding_single_element_tuple_destructure_type_mismatch_is_a_diagnostic() {
         let sheet =
@@ -1635,6 +1731,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Diagnoses the wrong arity in singleton tuple destructuring.
     #[test]
     fn binding_single_element_tuple_destructure_arity_mismatch_is_a_diagnostic() {
         let sheet = parse("sheet s { cell a: i32; cell out: i32; relationship { (out,) := a; } }");
@@ -1642,6 +1739,7 @@ mod tests {
         assert_eq!(diags.len(), 1);
     }
 
+    /// Accepts range filters without requiring a candidate placeholder.
     #[test]
     fn filter_range_inclusive_body_does_not_require_underscore() {
         let sheet = parse("sheet s { cell a: i32 filter 0..=100; }");

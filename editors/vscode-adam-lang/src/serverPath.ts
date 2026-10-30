@@ -30,9 +30,14 @@ function binaryName(platform: NodeJS.Platform): string {
  *    that doesn't exist is a user error and must not silently fall through to auto-detection. A
  *    whitespace-only setting is treated as unset and falls through to step 2.
  * 2. `<workspaceRoot>/target/debug/<binary>`, then `<workspaceRoot>/target/release/<binary>`.
- * 3. Each directory in `options.pathEnv` (in order), joined with `<binary>`.
+ * 3. Each directory in `options.pathEnv` (in order), trimmed and joined with `<binary>`.
  *
  * Returns `undefined` if none of the above exist.
+ * Time: O(p) path bytes, plus the injected filesystem checks. Space: O(l) for the
+ * longest candidate path, in addition to the split PATH entries.
+ *
+ * Example: resolveServerPath({ configuredPath: '/tools/adam-lsp', platform: 'linux',
+ *   workspaceRoot: undefined, pathEnv: undefined, fileExists: (file) => file === '/tools/adam-lsp' }).
  */
 export function resolveServerPath(options: ResolveServerPathOptions): string | undefined {
   const { configuredPath, workspaceRoot, platform, pathEnv, fileExists } = options;

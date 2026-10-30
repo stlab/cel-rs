@@ -7,6 +7,11 @@ use slotmap::Key;
 
 /// Node kind tag used in the D3 graph.
 #[derive(Serialize, Clone, PartialEq, Eq)]
+///
+/// # Examples
+///
+/// A cell snapshot carries `NodeKind::Cell`; a multi-relationship branch junction
+/// carries `NodeKind::Branch`.
 pub enum NodeKind {
     /// A value cell — rendered as a `<rect>`.
     Cell,
@@ -21,6 +26,11 @@ pub enum NodeKind {
 
 /// A single node in the D3 graph.
 #[derive(Serialize, Clone, PartialEq)]
+///
+/// # Examples
+///
+/// Inspect a cell entry in `to_graph_data(&sheet, &labels).nodes` to display its
+/// registered label and formatted value alongside its stable graph ID.
 pub struct NodeData {
     /// Stable string ID: `"c{ffi}"` for cells, `"r{ffi}"` for relationships, `"cond{ffi}"` for
     /// conditionals, `"br{ffi}_{branch}"` for a named branch's junction node, `"br{ffi}_def"`
@@ -37,6 +47,11 @@ pub struct NodeData {
 
 /// Link kind tag used in the D3 graph.
 #[derive(Serialize, Clone, PartialEq, Eq)]
+///
+/// # Examples
+///
+/// Conditional activation links use `LinkKind::Control`; data dependencies use
+/// `LinkKind::Constraint`.
 pub enum LinkKind {
     /// A regular constraint edge (cell ↔ relationship, or match cell → conditional node).
     Constraint,
@@ -61,6 +76,11 @@ pub enum LinkKind {
 /// the conditional to an intermediate `Branch` node and from that node to each relationship —
 /// and styled by `branch_index` and `branch_active`.
 #[derive(Serialize, Clone, PartialEq)]
+///
+/// # Examples
+///
+/// A control link whose `branch_active` is `None` represents an unknown conditional
+/// evaluation, not a successfully selected default branch.
 pub struct LinkData {
     /// Stable string ID of the source node.
     pub source: String,
@@ -72,12 +92,17 @@ pub struct LinkData {
     pub directed: bool,
     /// Branch index for `Control` links; `None` for `Constraint` links and default-branch control links.
     pub branch_index: Option<usize>,
-    /// `true` if this branch is currently active; `None` for `Constraint` links.
+    /// `true` if active, `false` if inactive; `None` for constraints or failed evaluation.
     pub branch_active: Option<bool>,
 }
 
 /// Complete graph snapshot ready for JSON serialization and delivery to D3.
 #[derive(Serialize, Clone, PartialEq)]
+///
+/// # Examples
+///
+/// `to_graph_data(&sheet, &labels)` returns a serializable snapshot whose `changed`
+/// IDs identify the runtime's changed cells.
 pub struct GraphData {
     /// All nodes in the graph snapshot.
     pub nodes: Vec<NodeData>,
@@ -95,14 +120,17 @@ pub struct GraphData {
     pub forced_relationships: Vec<String>,
 }
 
+/// Returns the cell's stable, kind-prefixed graph ID.
 fn cell_node_id(id: CellId) -> String {
     format!("c{}", id.data().as_ffi())
 }
 
+/// Returns the relationship's stable, kind-prefixed graph ID.
 fn rel_node_id(id: RelationshipId) -> String {
     format!("r{}", id.data().as_ffi())
 }
 
+/// Returns the conditional's stable, kind-prefixed graph ID.
 fn cond_node_id(id: ConditionalId) -> String {
     format!("cond{}", id.data().as_ffi())
 }
@@ -131,7 +159,7 @@ fn push_branch_links(
     cond_id_str: &str,
     cond_id: ConditionalId,
     branch_index: Option<usize>,
-    branch_active: bool,
+    branch_active: Option<bool>,
     rels: &[RelationshipId],
 ) {
     if rels.len() >= 2 {
@@ -148,7 +176,7 @@ fn push_branch_links(
             kind: LinkKind::Control,
             directed: true,
             branch_index,
-            branch_active: Some(branch_active),
+            branch_active,
         });
         for &rel_id in rels {
             links.push(LinkData {
@@ -157,7 +185,7 @@ fn push_branch_links(
                 kind: LinkKind::Control,
                 directed: true,
                 branch_index,
-                branch_active: Some(branch_active),
+                branch_active,
             });
         }
     } else {
@@ -168,7 +196,7 @@ fn push_branch_links(
                 kind: LinkKind::Control,
                 directed: true,
                 branch_index,
-                branch_active: Some(branch_active),
+                branch_active,
             });
         }
     }
@@ -176,8 +204,8 @@ fn push_branch_links(
 
 /// Serializes `sheet` and `labels` into a [`GraphData`] snapshot for D3.
 ///
-/// Constraint links: when a relationship has a cached plan (`sheet.selected_method` returns
-/// `Some`) its links are directed (inputs → relationship → outputs, [`LinkData::directed`]
+/// Constraint links: when `sheet.selected_method` supplies a relationship method,
+/// its links are directed (inputs → relationship → outputs, [`LinkData::directed`]
 /// `true`). Otherwise all cells adjacent to that relationship are emitted as undirected
 /// source→relationship edges (`directed` `false`) — this is decided per relationship, so one
 /// relationship having a plan never marks another relationship's links as directed.
@@ -192,8 +220,17 @@ fn push_branch_links(
 /// `branch_index` and `branch_active` for rendering, shared identically across both hops of a
 /// junction-routed branch.
 ///
-/// - Complexity: O(c + r + e + cond·b·k) where c = cells, r = relationships, e = adjacency pairs,
-///   cond = conditionals, b = branches per conditional, k = keys per branch.
+/// - Complexity: O(c + r + e + t) traversal/copy work for cells, relationships,
+///   emitted links, and copied text; cell formatting, conditional matching/evaluation,
+///   and sheet classification queries add their own costs.
+///
+/// # Examples
+///
+/// ```
+/// let sheet = adam_rs::Sheet::new();
+/// let data = adam_web_ui::to_graph_data(&sheet, &adam_web_ui::Labels::new());
+/// assert!(data.nodes.is_empty());
+/// ```
 pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
     let mut nodes = Vec::new();
     let mut links = Vec::new();
@@ -288,17 +325,12 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
             }
         }
 
-        // `to_graph_data` is read-only display code, not the `propagate()` path: by the
-        // time it runs, `propagate()` has already evaluated this same expression
-        // successfully, so a fresh failure here would itself be a precondition violation.
-        // Treat it as "no active branch" for rendering rather than threading Result through
-        // graph construction.
-        let active_branch = sheet.conditional_active_branch(cond_id).ok().flatten();
+        let active_branch = sheet.conditional_active_branch(cond_id).ok();
 
         // Control links for named branches
         let branch_count = sheet.conditional_branch_count(cond_id).unwrap_or(0);
         for branch in 0..branch_count {
-            let is_active = active_branch == Some(branch);
+            let is_active = active_branch.map(|active| active == Some(branch));
             if let Some(rels) = sheet.conditional_branch_relationships(cond_id, branch) {
                 push_branch_links(
                     &mut nodes,
@@ -313,7 +345,7 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
         }
 
         // Control links for default relationships
-        let default_active = active_branch.is_none();
+        let default_active = active_branch.map(|active| active.is_none());
         if let Some(default_rels) = sheet.conditional_default_relationships(cond_id) {
             push_branch_links(
                 &mut nodes,
@@ -343,8 +375,37 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Evaluation failure leaves every branch's activity explicitly unknown.
+    #[test]
+    fn conditional_evaluation_error_does_not_activate_default() {
+        let source = r#"sheet s {
+            source divisor: i64 = 1i64;
+            cell a: i64;
+            cell b: i64;
+            conditional 1i64 / divisor {
+                1i64 => { relationship { a := b; } }
+                _ => { relationship { b := a; } }
+            }
+        }"#;
+        let outcome = crate::build_sheet(source, "s.adm2", &crate::Renderer::plain());
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let (mut sheet, labels) = outcome.sheet_labels.unwrap();
+        let divisor = sheet.cell_names["divisor"].0;
+        sheet.write(divisor, 0i64).unwrap();
+        assert!(sheet.propagate().is_err());
+        let data = to_graph_data(&sheet, &labels);
+        let controls = data
+            .links
+            .iter()
+            .filter(|link| link.kind == LinkKind::Control)
+            .collect::<Vec<_>>();
+        assert_eq!(controls.len(), 2);
+        assert!(controls.iter().all(|link| link.branch_active.is_none()));
+    }
     use adam_rs::{MatchExpr, Method};
 
+    /// Builds an unpropagated three-cell product relationship and scalar labels.
     fn demo_sheet() -> (Sheet, Labels) {
         let mut sheet = Sheet::new();
         let mut labels = Labels::new();
@@ -365,7 +426,7 @@ mod tests {
         (sheet, labels)
     }
 
-    // Separate helper that adds the output cell first so propagation succeeds.
+    /// Builds an unpropagated product sheet with its output cell inserted first.
     fn demo_sheet_with_plan() -> (Sheet, Labels) {
         let mut sheet = Sheet::new();
         let mut labels = Labels::new();
@@ -387,6 +448,7 @@ mod tests {
         (sheet, labels)
     }
 
+    /// Builds one reversible relationship enabled by an integer selector's zero branch.
     fn sheet_with_conditional() -> (Sheet, Labels) {
         let mut sheet = Sheet::new();
         let mut labels = Labels::new();
@@ -412,6 +474,7 @@ mod tests {
         (sheet, labels)
     }
 
+    /// Builds one one-way relationship enabled by an integer selector's zero branch.
     fn sheet_with_forced_conditional() -> (Sheet, Labels) {
         let mut sheet = Sheet::new();
         let mut labels = Labels::new();
@@ -434,6 +497,7 @@ mod tests {
         (sheet, labels)
     }
 
+    /// Builds two one-way relationships sharing a named conditional branch.
     fn sheet_with_multi_relationship_branch() -> (Sheet, Labels) {
         let mut sheet = Sheet::new();
         let mut labels = Labels::new();
@@ -465,6 +529,7 @@ mod tests {
         (sheet, labels)
     }
 
+    /// Builds two one-way relationships sharing an unconditional default branch.
     fn sheet_with_multi_relationship_default() -> (Sheet, Labels) {
         let mut sheet = Sheet::new();
         let mut labels = Labels::new();
@@ -493,6 +558,7 @@ mod tests {
     }
 
     #[test]
+    /// Single-relationship branches connect directly without a junction node.
     fn to_graph_data_omits_branch_node_for_single_relationship_branch() {
         let (sheet, labels) = sheet_with_conditional();
         let data = to_graph_data(&sheet, &labels);
@@ -503,6 +569,7 @@ mod tests {
     }
 
     #[test]
+    /// Multi-relationship named branches route both control hops through a junction.
     fn to_graph_data_routes_multi_relationship_branch_through_branch_node() {
         let (sheet, labels) = sheet_with_multi_relationship_branch();
         let data = to_graph_data(&sheet, &labels);
@@ -553,6 +620,7 @@ mod tests {
     }
 
     #[test]
+    /// Multi-relationship defaults route both control hops through a junction.
     fn to_graph_data_routes_multi_relationship_default_through_branch_node() {
         let (sheet, labels) = sheet_with_multi_relationship_default();
         let data = to_graph_data(&sheet, &labels);
@@ -603,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    /// Serialization emits one node per cell and relationship in the fixture.
     fn to_graph_data_produces_correct_node_counts() {
         let (sheet, labels) = demo_sheet();
         let data = to_graph_data(&sheet, &labels);
@@ -623,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    /// Serialization emits every relationship membership link.
     fn to_graph_data_produces_correct_link_count() {
         let (sheet, labels) = demo_sheet();
         let data = to_graph_data(&sheet, &labels);
@@ -630,6 +700,7 @@ mod tests {
     }
 
     #[test]
+    /// Cell graph nodes preserve registered labels.
     fn to_graph_data_cell_nodes_have_labels() {
         let (sheet, labels) = demo_sheet();
         let data = to_graph_data(&sheet, &labels);
@@ -645,6 +716,7 @@ mod tests {
     }
 
     #[test]
+    /// Anonymous relationship graph nodes have empty labels.
     fn to_graph_data_relationship_nodes_have_empty_labels() {
         let (sheet, labels) = demo_sheet();
         let data = to_graph_data(&sheet, &labels);
@@ -658,6 +730,7 @@ mod tests {
     }
 
     #[test]
+    /// Changed graph IDs exactly represent the runtime's changed-cell set without duplicates.
     fn to_graph_data_changed_contains_changed_cell_ids() {
         let (mut sheet, labels) = demo_sheet();
         let a_id = sheet
@@ -673,10 +746,19 @@ mod tests {
         sheet.propagate().unwrap();
 
         let data = to_graph_data(&sheet, &labels);
-        assert!(!data.changed.is_empty());
+        let expected: std::collections::HashSet<_> = sheet.changed().map(cell_node_id).collect();
+        assert_eq!(
+            data.changed
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+        assert_eq!(data.changed.len(), expected.len());
     }
 
     #[test]
+    /// Relationships without a selected plan render undirected membership links.
     fn to_graph_data_constraint_links_undirected_before_propagate() {
         let (sheet, labels) = demo_sheet_with_plan();
         let data = to_graph_data(&sheet, &labels);
@@ -690,6 +772,7 @@ mod tests {
     }
 
     #[test]
+    /// Selected relationship methods produce directed dependency links.
     fn to_graph_data_constraint_links_directed_after_propagate() {
         let (mut sheet, labels) = demo_sheet_with_plan();
         sheet.propagate().unwrap();
@@ -704,6 +787,7 @@ mod tests {
     }
 
     #[test]
+    /// Selector dependencies remain directed when their conditional branch is inactive.
     fn to_graph_data_match_cell_link_is_directed_even_when_conditional_branch_is_inactive() {
         // Reproduces adam-lang-book's constrain.adm2: a sheet whose only relationship
         // lives inside a conditional, currently not matching any branch. No relationship
@@ -733,6 +817,7 @@ mod tests {
     }
 
     #[test]
+    /// One relationship's selected plan does not direct another unplanned relationship's links.
     fn to_graph_data_undirected_relationship_link_is_independent_of_other_relationships() {
         // R1 (a -> b) is unconditional and always planned; R2 (x <-> y, two methods) lives
         // in a conditional that currently doesn't match any branch, so R2 has no plan. R1
@@ -783,6 +868,7 @@ mod tests {
     }
 
     #[test]
+    /// Selected input dependencies point toward the relationship.
     fn to_graph_data_directed_input_links_target_relationship() {
         let (mut sheet, labels) = demo_sheet_with_plan();
         sheet.propagate().unwrap();
@@ -804,6 +890,7 @@ mod tests {
     }
 
     #[test]
+    /// Selected output dependencies point away from the relationship.
     fn to_graph_data_directed_output_links_source_relationship() {
         let (mut sheet, labels) = demo_sheet_with_plan();
         sheet.propagate().unwrap();
@@ -825,6 +912,7 @@ mod tests {
     }
 
     #[test]
+    /// Conditional selectors produce conditional graph nodes.
     fn to_graph_data_emits_conditional_node() {
         let (sheet, labels) = sheet_with_conditional();
         let data = to_graph_data(&sheet, &labels);
@@ -835,6 +923,7 @@ mod tests {
     }
 
     #[test]
+    /// Conditional selectors retain their match-cell dependency links.
     fn to_graph_data_emits_constraint_link_from_match_cell_to_conditional() {
         let (sheet, labels) = sheet_with_conditional();
         let data = to_graph_data(&sheet, &labels);
@@ -853,18 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn to_graph_data_emits_control_link_for_branch_relationship() {
-        let (sheet, labels) = sheet_with_conditional();
-        let data = to_graph_data(&sheet, &labels);
-        assert!(
-            data.links
-                .iter()
-                .any(|l| matches!(l.kind, LinkKind::Control)),
-            "expected at least one Control link"
-        );
-    }
-
-    #[test]
+    /// Active branch relationships retain their branch index and active control state.
     fn to_graph_data_active_branch_control_link_is_active() {
         let (sheet, labels) = sheet_with_conditional();
         let data = to_graph_data(&sheet, &labels);
@@ -880,6 +958,7 @@ mod tests {
     }
 
     #[test]
+    /// Serialized graph snapshots omit the obsolete groups field.
     fn to_graph_data_no_groups_field() {
         let (sheet, labels) = sheet_with_conditional();
         let data = to_graph_data(&sheet, &labels);
@@ -891,6 +970,7 @@ mod tests {
     }
 
     #[test]
+    /// Forced active cells appear in the graph's forced-cell IDs.
     fn to_graph_data_forced_field_contains_forced_cell() {
         let (mut sheet, labels) = sheet_with_forced_conditional();
         sheet.propagate().unwrap();
@@ -905,6 +985,7 @@ mod tests {
     }
 
     #[test]
+    /// Inactive conditional relationships do not force their former output cells.
     fn to_graph_data_forced_field_excludes_cell_when_branch_inactive() {
         let (mut sheet, labels) = sheet_with_forced_conditional();
         let p_id = sheet
@@ -924,6 +1005,7 @@ mod tests {
     }
 
     #[test]
+    /// Forced active relationships appear in the graph's forced-relationship IDs.
     fn to_graph_data_forced_relationships_field_contains_forced_relationship() {
         let (mut sheet, labels) = sheet_with_forced_conditional();
         let rel_id = sheet.relationships().next().unwrap();
@@ -934,6 +1016,7 @@ mod tests {
     }
 
     #[test]
+    /// Inactive relationships do not appear in forced-relationship IDs.
     fn to_graph_data_forced_relationships_field_excludes_relationship_when_branch_inactive() {
         let (mut sheet, labels) = sheet_with_forced_conditional();
         let rel_id = sheet.relationships().next().unwrap();

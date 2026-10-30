@@ -11,6 +11,17 @@
 ///
 /// A name in this list is never given a live-mount `<div>` by the `mdbook-live-examples`
 /// preprocessor, and never given a manifest entry by `xtask`'s live-book asset preparation —
-/// both read this same list, so a mount `<div>` can never be emitted with no matching manifest
-/// entry.
+/// both read this same list. Other missing example inputs still require validation
+/// by the consuming build.
+///
+/// # Examples
+///
+/// ```
+/// let examples = ["cells/example", "expressions/no_standard_library"];
+/// for name in examples.into_iter().filter(|name|
+///     !adam_lang_book_live_config::NO_LIVE_MOUNT.contains(name)
+/// ) {
+///     println!("Mount {name}");
+/// }
+/// ```
 pub const NO_LIVE_MOUNT: &[&str] = &["expressions/no_standard_library"];

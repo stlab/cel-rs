@@ -1,6 +1,7 @@
 //! Examples backing `book-src/relationships.md` (Chapter 7). See `src/lib.rs` for how these
 //! `.adm2` files are wired into the book.
 
+/// Keeps the stronger shared cells as sources and computes both weaker cells.
 #[test]
 fn shared_cell_example() {
     let mut parser = adam_lang_book::support::parser();

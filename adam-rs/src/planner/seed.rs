@@ -953,7 +953,7 @@ mod tests {
             .unwrap();
         let claimant = sheet
             .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| {
-                Ok(value.checked_add(1).unwrap())
+                Ok((*value).max(1))
             })])
             .unwrap();
 
@@ -1021,7 +1021,7 @@ mod tests {
             .unwrap();
         let claimant = sheet
             .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| {
-                Ok(value.checked_add(1).unwrap())
+                Ok((*value).max(1))
             })])
             .unwrap();
 
@@ -1348,14 +1348,14 @@ mod tests {
             .add_relationship(vec![Method::from_fn_2_1(
                 [x, a],
                 x,
-                |value: &i32, _: &i32| Ok(value.checked_add(1).unwrap()),
+                |value: &i32, _: &i32| Ok((*value).max(1)),
             )])
             .unwrap();
         let second = sheet
             .add_relationship(vec![Method::from_fn_2_1(
                 [x, a],
                 x,
-                |value: &i32, _: &i32| Ok(value.checked_mul(2).unwrap()),
+                |value: &i32, _: &i32| Ok((*value).min(2)),
             )])
             .unwrap();
         let claimant = sheet

@@ -15,7 +15,8 @@
 //!   that can be pushed and popped as needed.
 //! - **Type optimization**: Most built-in operations are homogeneous (both operands share
 //!   a type), so signatures store a primary `TypeId` plus arity. Heterogeneous binary ops
-//!   (e.g. shifts, where the RHS is always `u32`) additionally store an RHS `TypeId` index.
+//!   (e.g. shifts, which accept every signed and unsigned integer RHS) additionally store an RHS
+//!   `TypeId` index.
 //!
 //! # Semantics
 //!
@@ -54,6 +55,9 @@ fn span_err(_span: SourceSpan, e: anyhow::Error) -> anyhow::Error {
 /// Receives the segment and the source span of the expression that triggered
 /// this operation. This is a simple function pointer since built-in operations
 /// have no state.
+///
+/// # Examples
+/// See [`OpLookup::register_tuple_op`] for an operation emitter.
 pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 
 /// A signature for an operator/function whose selected operand is a tuple.
@@ -75,6 +79,9 @@ pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 /// tuple at that position regardless of its inner arity or element types.
 /// Two registrations that would only differ by that inner shape are not
 /// distinguishable — do not rely on nested-tuple precision at this level.
+///
+/// # Examples
+/// See [`OpLookup::register_tuple_op`].
 pub struct TupleOpSignature {
     /// Operator/function name this signature is registered under.
     pub name: String,
@@ -99,6 +106,9 @@ pub struct TupleOpSignature {
 ///
 /// Error messages returned by scope functions surface verbatim to the user. They should be
 /// lowercase, end without a period, and wrap identifiers and type names in backticks.
+///
+/// # Examples
+/// See [`OpLookup::push_scope`] for callback ownership and dispatch.
 pub type ScopeFn =
     Box<dyn Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync>;
 
@@ -1036,6 +1046,9 @@ static BUILTINS: phf::Map<&'static str, &'static [OpSignature]> = phf_map! {
 
 /// A single built-in overload's declared operand types, exposed for the static type checker
 /// (`cel_parser::ty::check_expr`) — never `op_fn`, which is execution-only and stays private.
+///
+/// # Examples
+/// See [`builtin_operand_types`] for inspecting overload metadata.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OperandTypes {
     /// Number of operands this overload accepts (1 or 2).
@@ -1424,8 +1437,8 @@ fn complete_builtin_leaf<T: Clone + PartialEq + std::fmt::Debug + 'static>()
         .expect("same concrete leaf")
 }
 
-/// Declares the one built-in scalar table every built-in name lookup reads: the name list
-/// [`BUILTIN_SCALAR_NAMES`] exposes and the descriptors [`builtin_scalar_type`] resolves, so a
+/// Declares the one built-in scalar table every built-in name lookup reads: the test-only name list
+/// `BUILTIN_SCALAR_NAMES` exposes and the descriptors [`builtin_scalar_type`] resolves, so a
 /// name can never be recognized by one and missed by the other.
 macro_rules! builtin_scalars {
     ($($name:literal => $ty:ty),* $(,)?) => {
@@ -1685,6 +1698,29 @@ impl OpLookup {
     /// Registers a tuple-shaped operator signature, matched by element
     /// `TypeId` sequence the same way built-in operators are matched by flat
     /// `TypeId`.
+    ///
+    /// - Complexity: Amortized O(1) registration, transferring the owned signature.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::op_table::{OpLookup, TupleOpSignature};
+    /// use cel_runtime::DynSegment;
+    /// use proc_macro2::Span;
+    /// use std::any::TypeId;
+    /// let mut lookup = OpLookup::new();
+    /// lookup.register_tuple_op(TupleOpSignature {
+    ///     name: "first".into(),
+    ///     shape: vec![TypeId::of::<i32>()],
+    ///     tuple_operand_index: 0,
+    ///     operand_type_ids: Vec::new(),
+    ///     op_fn: |segment, _| segment.tuple_index(0),
+    /// });
+    /// let mut segment = DynSegment::new::<()>();
+    /// segment.just(42i32);
+    /// segment.make_tuple(1, 0).unwrap();
+    /// lookup.lookup("first", &mut segment, 1, Span::call_site(), Span::call_site()).unwrap();
+    /// assert_eq!(segment.call0::<i32>().unwrap(), 42);
+    /// ```
     pub fn register_tuple_op(&mut self, signature: TupleOpSignature) {
         self.tuple_signatures.push(signature);
     }
@@ -1738,6 +1774,29 @@ impl OpLookup {
     /// `Ok(true)` if it handled the operation, `Ok(false)` to pass to the next scope,
     /// or `Err` on error. Error messages surface verbatim; they should be lowercase, end
     /// without a period, and wrap identifiers and type names in backticks.
+    ///
+    /// - Complexity: Amortized O(1) registration, including owned callback storage.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::OpLookup;
+    /// use cel_runtime::DynSegment;
+    /// use proc_macro2::Span;
+    /// let mut lookup = OpLookup::new();
+    /// lookup.push_library_scope(|name, segment, arity, _| {
+    ///     if name == "answer" && arity == 0 {
+    ///         segment.just(42i32);
+    ///         Ok(true)
+    ///     } else {
+    ///         Ok(false)
+    ///     }
+    /// });
+    /// lookup.push_scope(|_, _, _, _| Ok(false));
+    /// assert!(lookup.pop_scope().is_some());
+    /// let mut segment = DynSegment::new::<()>();
+    /// lookup.lookup("answer", &mut segment, 0, Span::call_site(), Span::call_site()).unwrap();
+    /// assert_eq!(segment.call0::<i32>().unwrap(), 42);
+    /// ```
     pub fn push_scope<F>(&mut self, scope: F)
     where
         F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,
@@ -1752,6 +1811,9 @@ impl OpLookup {
     /// - Precondition: must not remove a library scope registered via
     ///   [`push_library_scope`](Self::push_library_scope) — those are permanent setup-time
     ///   registrations that must survive across multiple parses.
+    ///
+    /// # Examples
+    /// See [`Self::push_scope`] for adding and removing a transient scope without removing a library.
     pub fn pop_scope(&mut self) -> Option<ScopeFn> {
         debug_assert!(
             self.scopes.len() > self.library_scope_count,
@@ -1771,7 +1833,11 @@ impl OpLookup {
     /// Do not use for scopes tied to a single parse's lifetime — use [`push_scope`](Self::push_scope)
     /// for those, which can be isolated during nested body compilation (closures).
     ///
-    /// - Complexity: O(1).
+    /// - Precondition: no transient scopes are installed.
+    /// - Complexity: Amortized O(1) registration, including owned callback storage.
+    ///
+    /// # Examples
+    /// See [`Self::push_scope`] for permanent and transient registrations.
     pub fn push_library_scope<F>(&mut self, scope: F)
     where
         F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,
@@ -2781,13 +2847,21 @@ mod tests {
     fn scope_fn_accepts_source_span_parameter() {
         let mut lookup = OpLookup::new();
         lookup.push_scope(
-            |_name: &str, _seg: &mut DynSegment, _n: usize, span: crate::SourceSpan| {
-                // span is available for forwarding to op closures
-                let _ = span;
-                Ok(false)
+            |name: &str, segment: &mut DynSegment, arity: usize, span: crate::SourceSpan| {
+                if name != "value" || arity != 0 {
+                    return Ok(false);
+                }
+                assert_eq!(span, crate::SourceSpan::new(1, 4, 1, 9));
+                segment.just(span.start.column);
+                Ok(true)
             },
         );
-        // If this compiles, the ScopeFn signature correctly includes SourceSpan.
+        let span = crate::ExprSpan::for_text("    value");
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup("value", &mut segment, 0, span.start, span.end)
+            .unwrap();
+        assert_eq!(segment.call0::<usize>().unwrap(), 4);
     }
 
     /// Verifies that `FormatRustcStyle` on an `anyhow::Error` without a `SpanContext`
@@ -2798,7 +2872,18 @@ mod tests {
         use crate::FormatRustcStyle;
         use annotate_snippets::Renderer;
 
-        let err = anyhow::anyhow!("custom domain error");
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _| {
+            if name != "failure" || arity != 0 {
+                return Ok(false);
+            }
+            segment.just(0i32);
+            segment
+                .op1r(|_: i32| -> anyhow::Result<i32> { anyhow::bail!("custom domain error") })?;
+            Ok(true)
+        });
+        let mut segment = crate::CELParser::new(lookup).parse_str("failure").unwrap();
+        let err = segment.call0::<i32>().unwrap_err();
         let output = err.format_rustc_style("unused source", "unused.cel", 1, &Renderer::plain());
         assert_eq!(output, "custom domain error");
     }
@@ -2966,12 +3051,35 @@ mod tests {
 
     #[test]
     fn builtin_operand_types_covers_heterogeneous_shift_signatures() {
-        let sigs = builtin_operand_types("<<");
-        assert!(
-            sigs.iter().any(|s| s.arity == 2
-                && s.lhs == TypeId::of::<u64>()
-                && s.rhs == TypeId::of::<u32>())
-        );
+        let integers = [
+            TypeId::of::<u8>(),
+            TypeId::of::<u16>(),
+            TypeId::of::<u32>(),
+            TypeId::of::<u64>(),
+            TypeId::of::<u128>(),
+            TypeId::of::<usize>(),
+            TypeId::of::<i8>(),
+            TypeId::of::<i16>(),
+            TypeId::of::<i32>(),
+            TypeId::of::<i64>(),
+            TypeId::of::<i128>(),
+            TypeId::of::<isize>(),
+        ];
+        for operator in ["<<", ">>"] {
+            let signatures = builtin_operand_types(operator);
+            assert_eq!(signatures.len(), integers.len() * integers.len());
+            for lhs in integers {
+                for rhs in integers {
+                    assert_eq!(
+                        signatures
+                            .iter()
+                            .filter(|s| s.arity == 2 && s.lhs == lhs && s.rhs == rhs)
+                            .count(),
+                        1
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -3019,22 +3127,27 @@ mod tests {
 
     #[test]
     fn builtin_generic_type_resolves_every_range_family_member_for_every_numeric_type() {
-        for generic in [
-            "Range",
-            "RangeInclusive",
-            "RangeFrom",
-            "RangeTo",
-            "RangeToInclusive",
-        ] {
-            for arg in [
-                "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
-                "isize", "f32", "f64",
-            ] {
-                let resolved = builtin_generic_type(generic, arg)
-                    .unwrap_or_else(|| panic!("expected `{generic}({arg})` to resolve"));
-                assert_eq!(resolved.type_name, format!("{generic}({arg})"));
-            }
+        macro_rules! check {
+            ($($ty:ty),* $(,)?) => {$(
+                for (generic, identity, size, align) in [
+                    ("Range", TypeId::of::<std::ops::Range<$ty>>(), std::mem::size_of::<std::ops::Range<$ty>>(), std::mem::align_of::<std::ops::Range<$ty>>()),
+                    ("RangeInclusive", TypeId::of::<std::ops::RangeInclusive<$ty>>(), std::mem::size_of::<std::ops::RangeInclusive<$ty>>(), std::mem::align_of::<std::ops::RangeInclusive<$ty>>()),
+                    ("RangeFrom", TypeId::of::<std::ops::RangeFrom<$ty>>(), std::mem::size_of::<std::ops::RangeFrom<$ty>>(), std::mem::align_of::<std::ops::RangeFrom<$ty>>()),
+                    ("RangeTo", TypeId::of::<std::ops::RangeTo<$ty>>(), std::mem::size_of::<std::ops::RangeTo<$ty>>(), std::mem::align_of::<std::ops::RangeTo<$ty>>()),
+                    ("RangeToInclusive", TypeId::of::<std::ops::RangeToInclusive<$ty>>(), std::mem::size_of::<std::ops::RangeToInclusive<$ty>>(), std::mem::align_of::<std::ops::RangeToInclusive<$ty>>()),
+                ] {
+                    let resolved = builtin_generic_type(generic, stringify!($ty)).unwrap();
+                    let descriptor = (resolved.value_type)();
+                    assert_eq!(resolved.type_name, format!("{generic}({})", stringify!($ty)));
+                    assert_eq!(descriptor.type_id(), identity);
+                    assert_eq!(descriptor.size(), size);
+                    assert_eq!(descriptor.align(), align);
+                }
+            )*};
         }
+        check!(
+            u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+        );
     }
 
     #[test]
@@ -3124,19 +3237,37 @@ mod tests {
     #[test]
     fn isolate_scopes_leaves_library_scopes_reachable() {
         let mut lookup = OpLookup::new();
+        lookup.push_library_scope(|name, segment, arity, _| {
+            if name != "persistent" || arity != 0 {
+                return Ok(false);
+            }
+            segment.just(42i32);
+            Ok(true)
+        });
         let mut segment = DynSegment::new::<()>();
         let isolated = lookup.isolate_scopes();
         lookup
             .lookup(
-                "range_full",
+                "persistent",
                 &mut segment,
                 0,
                 proc_macro2::Span::call_site(),
                 proc_macro2::Span::call_site(),
             )
-            .expect("range_full is a library scope and must survive isolation");
+            .expect("installed library callbacks survive isolation");
+        assert_eq!(segment.call0::<i32>().unwrap(), 42);
         lookup.restore_scopes(isolated);
-        assert_eq!(segment.peek_stack_infos(1).len(), 1);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "persistent",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .unwrap();
+        assert_eq!(segment.call0::<i32>().unwrap(), 42);
     }
 
     #[test]

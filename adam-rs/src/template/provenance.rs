@@ -24,6 +24,8 @@ use crate::{CellId, RelationshipId};
 /// Identifies an immutable recipe without retaining its factories or inclusion edges.
 ///
 /// Clones share identity. Equality and hashing compare ownership, not structure.
+///
+/// # Examples
 /// See the [occurrence example](InstanceOccurrence).
 #[derive(Clone, Debug)]
 pub struct TemplateId(pub(super) Rc<()>);
@@ -47,6 +49,8 @@ impl Hash for TemplateId {
 /// Identifies one inclusion occurrence within exactly one live expansion.
 ///
 /// The retained token keeps identity distinct after the instance is dropped.
+///
+/// # Examples
 /// See the [occurrence example](InstanceOccurrence).
 #[derive(Clone, Debug)]
 pub struct OccurrenceId {
@@ -156,6 +160,8 @@ impl InstanceOccurrence {
 ///
 /// Private output writers have authored index zero. Source specialization leaves
 /// gaps in authored indices without changing compact runtime indices.
+///
+/// # Examples
 /// See [`Instance::method_origin`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MethodOrigin {
@@ -218,7 +224,9 @@ impl Instance {
                     })
             })
     }
+}
 
+impl Instance {
     /// Borrows occurrences in depth-first inclusion order, beginning with the root.
     ///
     /// Filtering by immediate parent yields children in authored inclusion order.
@@ -338,5 +346,105 @@ impl Instance {
             },
             authored_index,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Method, MethodRecipe, Sheet, TemplateBuilder};
+    use std::collections::HashSet;
+
+    /// Preserves clone/hash identity laws and rejects foreign owners and out-of-range mappings.
+    #[test]
+    fn identity_and_mapping_boundaries() {
+        let mut builder = TemplateBuilder::new();
+        let input = builder.cell("input", || Ok(3_i32)).unwrap();
+        let output = builder.cell("output", || Ok(0_i32)).unwrap();
+        let relationship = builder
+            .relationship(vec![
+                MethodRecipe::new(
+                    std::slice::from_ref(&input),
+                    std::slice::from_ref(&output),
+                    |i, o| Ok(Method::from_fn_1_1(i[0], o[0], |v: &i32| Ok(*v))),
+                )
+                .unwrap(),
+            ])
+            .unwrap();
+        let template = builder.finish().unwrap();
+        let other = TemplateBuilder::new().finish().unwrap();
+        assert_eq!(
+            HashSet::from([template.id(), template.id().clone(), other.id()]).len(),
+            2
+        );
+        let mut sheet = Sheet::new();
+        let instance = template.instantiate(&mut sheet, &[]).unwrap();
+        let foreign = other.instantiate(&mut sheet, &[]).unwrap();
+        let root = &instance.occurrences()[0];
+        assert_eq!(root.template(), &template.id());
+        assert!(root.parent().is_none());
+        assert!(root.inclusion_site().is_none());
+        assert!(root.conditionals().is_empty());
+        assert_eq!(
+            HashSet::from([
+                root.id().clone(),
+                root.id().clone(),
+                foreign.occurrences()[0].id().clone()
+            ])
+            .len(),
+            2
+        );
+        assert!(instance.occurrence(foreign.occurrences()[0].id()).is_none());
+        let invalid = OccurrenceId {
+            owner: root.id.owner.clone(),
+            index: 1,
+        };
+        assert!(instance.occurrence(&invalid).is_none());
+        assert_eq!(instance.cell(root.id(), &input), Some(instance.cells()[0]));
+        assert_eq!(instance.cell(root.id(), &output), Some(instance.cells()[1]));
+        let invalid_slot = CellSlot {
+            owner: template.owner.clone(),
+            index: 2,
+        };
+        assert!(instance.cell(root.id(), &invalid_slot).is_none());
+        let foreign_slot = CellSlot {
+            owner: other.owner.clone(),
+            index: 0,
+        };
+        assert!(instance.cell(root.id(), &foreign_slot).is_none());
+        assert_eq!(
+            instance.relationship_group(root.id(), &relationship),
+            Some(instance.relationships())
+        );
+        let invalid_group = RelationshipSlot {
+            owner: template.owner.clone(),
+            index: 1,
+        };
+        assert!(
+            instance
+                .relationship_group(root.id(), &invalid_group)
+                .is_none()
+        );
+        let foreign_group = RelationshipSlot {
+            owner: other.owner.clone(),
+            index: 0,
+        };
+        assert!(
+            instance
+                .relationship_group(root.id(), &foreign_group)
+                .is_none()
+        );
+        for (rel, live, origin) in instance.method_origins() {
+            assert_eq!(instance.method_origin(rel, live), Some(origin));
+            assert!(instance.method_origin(rel, live + 1).is_none());
+        }
+        assert!(
+            instance
+                .method_origin(RelationshipId::default(), 0)
+                .is_none()
+        );
+        assert!(foreign.cells().is_empty());
+        assert!(foreign.relationships().is_empty());
+        assert_eq!(foreign.method_origins().count(), 0);
     }
 }

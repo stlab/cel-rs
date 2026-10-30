@@ -3,6 +3,9 @@
 use adam_lang::ParsedSheet;
 use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
+#[cfg(test)]
+#[path = "inspector_tests.rs"]
+mod component_tests;
 
 use crate::labels::{Labels, Renderer, format_adam_error, format_rounded};
 use crate::spectrum::{
@@ -11,7 +14,7 @@ use crate::spectrum::{
 };
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 /// Aggregate out-cell status for the whole sheet, computed once per render and shared by
 /// every `CellRow` so `Sheet::requirement_relevant_cells`/`requirement_violation_cells` run
@@ -127,6 +130,8 @@ fn compute_output_status(parsed: &ParsedSheet) -> OutputStatus {
 
 /// Formats a diagnostic message for `label`'s filter `violation`, for
 /// `crate::diagnostics::report_error`.
+///
+/// - Complexity: O(label/output bytes) formatting work, plus underlying error display.
 fn format_filter_violation(label: &str, violation: &FilterViolation) -> String {
     match violation {
         FilterViolation::NotConformed => {
@@ -203,25 +208,33 @@ fn toggled_bool_value(current: &str) -> &'static str {
     if current == "true" { "false" } else { "true" }
 }
 
-/// Returns a decimal digit string derived from `source_name`, for namespacing a cell's DOM
-/// `id` so it stays unique across independently-mounted sheets on the same page.
+/// Returns a stable DOM namespace unique among live inspector owners.
 ///
-/// `CellId` numbering restarts from its first value in every independent `Sheet`, so two
-/// different `.adm2` examples mounted on the same book page (each its own `SheetInspector`
-/// instance) can and do produce identical `CellId` debug strings; without this namespace,
-/// `document.getElementById` — used throughout this module's JS bridges instead of
-/// `event.target`, since custom elements never populate that — would silently resolve to
-/// whichever mount's element happens to appear first in the document, corrupting reads and
-/// writes for every other mount. Hashing (rather than embedding `source_name` verbatim) keeps
-/// the result composed only of ASCII digits, safe to interpolate directly into the JS string
-/// literals built via `format!` elsewhere in this module.
-///
-/// - Postcondition: the same `source_name` always yields the same result; only ASCII digits
-///   appear in the result.
-fn dom_id_namespace(source_name: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    source_name.hash(&mut hasher);
-    hasher.finish()
+/// The hook retains the allocation until its controls unmount. Diagnostic names
+/// and document-local cell keys do not establish instance identity.
+fn dom_id_namespace(owner: &Rc<()>) -> usize {
+    Rc::as_ptr(owner) as usize
+}
+
+/// Identifies one source installation without comparing document-local keys.
+#[derive(Clone)]
+struct InputOwner(Rc<()>);
+
+impl PartialEq for InputOwner {
+    /// Compares installation identity rather than the allocation's unit value.
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Authorizes only the latest request belonging to the current source installation.
+fn input_reply_is_current(
+    requested_source: &InputOwner,
+    current_source: &InputOwner,
+    requested_revision: u64,
+    current_revision: u64,
+) -> bool {
+    requested_source == current_source && requested_revision == current_revision
 }
 
 /// Returns the `min`/`max` bounds to pass to a range-filtered numeric cell's [`SpSlider`]:
@@ -240,6 +253,8 @@ fn dom_id_namespace(source_name: &str) -> u64 {
 /// at the cost of its handle/stepper not disabling exactly at the filter's true limit while a
 /// cell sits outside it, until the cell's own next write brings it back in range and the true
 /// bounds resume being enforced.
+///
+/// - Complexity: O(current.len()) parsing work; endpoint formatting is bounded by f64 size.
 fn slider_bounds(current: &str, range: (f64, f64)) -> (String, String) {
     let (lo, hi) = range;
     let current = current.parse::<f64>().unwrap_or(lo);
@@ -285,13 +300,23 @@ fn sync_input(is_numeric: bool, input: &str, focused: bool, previous: &str, curr
     }
 }
 
-/// Reads a normalized numeric draft from a Spectrum field or a slider's editable field.
+/// Builds a normalized draft reader for a Spectrum number/text field or editable slider.
 ///
 /// Consumes the localized `adamNumericDraft` installed by [`SpSlider`] once, preserving blanks
 /// and partial edits. Slider dragging reads the canonical host value without locale normalization.
 /// The script sends `1|value` while the host is focused and `0|value` otherwise.
-/// - Complexity: O(n) in the field ID and edited text lengths.
-fn numeric_input_script(field_id: &str, slider: bool) -> String {
+/// Text-valued numeric controls use inherited-language `Intl` normalization without numeric coercion.
+///
+/// - Complexity: O(field ID bytes) construction; O(draft bytes) JavaScript normalization,
+///   excluding standard `Intl` formatter construction for text fields.
+///
+/// # Examples
+///
+/// ```
+/// let script = adam_web_ui::numeric_input_script("width", false);
+/// // Pass script to Dioxus document::eval and receive one String payload.
+/// ```
+pub fn numeric_input_script(field_id: &str, slider: bool) -> String {
     format!(
         r#"
         {bridge}
@@ -311,6 +336,8 @@ fn numeric_input_script(field_id: &str, slider: bool) -> String {
 ///
 /// - Postcondition: returns `false` whenever `typed` doesn't parse as `f64` — a non-numeric
 ///   cell's write is never treated as clamped.
+///
+/// - Complexity: O(typed.len() + actual.len()) numeric parsing work.
 fn clamped_away(typed: &str, actual: &str) -> bool {
     match typed.parse::<f64>() {
         Ok(v) => format_rounded(v) != actual,
@@ -363,10 +390,23 @@ fn write_and_propagate(
     match propagate_result {
         Ok(()) => {
             let labels_r = labels.read();
-            let clamped = labels_r
-                .cells
-                .get(&id)
-                .is_some_and(|m| clamped_away(val, &(m.display)(&parsed_w)));
+            let clamped = labels_r.cells.get(&id).is_some_and(|m| {
+                if !m.is_numeric || parsed_w.filter_kind(id).is_none() {
+                    return false;
+                }
+                let actual = (m.display)(&parsed_w);
+                if m.is_integer {
+                    match (val.parse::<i128>(), actual.parse::<i128>()) {
+                        (Ok(typed), Ok(actual)) => typed != actual,
+                        _ => match (val.parse::<u128>(), actual.parse::<u128>()) {
+                            (Ok(typed), Ok(actual)) => typed != actual,
+                            _ => false,
+                        },
+                    }
+                } else {
+                    clamped_away(val, &actual)
+                }
+            });
             has_error.set(clamped);
             for violated_id in parsed_w.filter_violated_cells().collect::<Vec<_>>() {
                 let Some(violation) = parsed_w.filter_violation(violated_id) else {
@@ -406,8 +446,18 @@ fn write_and_propagate(
 /// Editing an input immediately writes the parsed value to the sheet and propagates
 /// constraints. If parsing or propagation fails (for example, non-numeric input or division
 /// by zero), the field renders in its invalid state until the user blurs, and the formatted
-/// diagnostic is printed to stderr. A field's input is not reset while it is focused; it
+/// diagnostic is reported through the renderer's diagnostic sink. A field's input is not reset while it is focused; it
 /// syncs back to the computed value on blur, keeping non-edited cells up to date.
+///
+/// Each mounted source owns distinct DOM IDs and retires pending responses on replacement.
+///
+/// - Complexity: O(c) row construction for c labeled cells, plus output-status evaluation
+///   and each row's formatting/rendering costs.
+///
+/// # Examples
+///
+/// Inside a Dioxus scope, `rsx! { SheetInspector { parsed, labels, source_text, source_name } }`
+/// binds a parsed-sheet signal and its labels to source-diagnostic memos.
 #[component]
 pub fn SheetInspector(
     parsed: Signal<ParsedSheet>,
@@ -415,6 +465,11 @@ pub fn SheetInspector(
     source_text: Memo<String>,
     source_name: Memo<String>,
 ) -> Element {
+    let source_owner = use_memo(move || {
+        let _labels = labels.read();
+        InputOwner(Rc::new(()))
+    });
+    let namespace = dom_id_namespace(&source_owner.read().0);
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
     let output_status = use_memo(move || compute_output_status(&parsed.read()));
 
@@ -424,15 +479,21 @@ pub fn SheetInspector(
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, parsed, labels, source_text, source_name, output_status }
+                CellRow { key: "{namespace}-{id:?}", id, namespace, source_owner, parsed, labels, source_text, source_name, output_status }
             }
         }
     }
 }
 
+/// Renders one source-owned control and discards obsolete asynchronous input replies.
+///
+/// - Complexity: O(l + v + d) per render in label, displayed value, and diagnostic bytes,
+///   plus the registered formatter's cost; edits additionally parse and propagate.
 #[component]
 fn CellRow(
     id: CellId,
+    namespace: usize,
+    source_owner: Memo<InputOwner>,
     parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
     source_text: Memo<String>,
@@ -493,12 +554,21 @@ fn CellRow(
             .unwrap_or(false)
     });
 
+    let number_input_safe = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .is_some_and(|meta| meta.number_input_safe)
+    });
+
     let forced = use_memo(move || parsed.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
     let mut previous_value = use_signal(|| value.peek().clone());
     let mut is_focused = use_signal(|| false);
     let mut has_error = use_signal(|| false);
+    let mut revision = use_signal(|| 0u64);
 
     let errors = ErrorContext {
         source_text,
@@ -543,12 +613,12 @@ fn CellRow(
         previous_value.set(value.peek().clone());
     });
 
-    let field_id = format!("cell-{}-{id:?}", dom_id_namespace(&source_name.read()));
+    let field_id = format!("cell-{namespace}-{id:?}");
 
     rsx! {
         div {
             style: "margin-bottom: 8px;",
-            if let Some((lo, hi)) = *range.read() {
+            if let Some((lo, hi)) = (*range.read()).filter(|_| *number_input_safe.read()) {
                 {
                     let slider_value = slider_field_value(&input.read(), &value.read()).to_string();
                     let (min, max) = slider_bounds(&slider_value, (lo, hi));
@@ -565,7 +635,10 @@ fn CellRow(
                             editable: true,
                             disabled: flags.read().disabled,
                             oninput: move |_: FormEvent| {
-                                let ns = dom_id_namespace(&source_name.read());
+                                let ns = namespace;
+                                let request_source = source_owner.peek().clone();
+                                let request_revision = revision.peek().checked_add(1).expect("input revision overflow");
+                                revision.set(request_revision);
                                 spawn(async move {
                                     // Dragging needs no focus; inline typing reads its raw draft
                                     // instead of the slider's last committed numeric value.
@@ -574,6 +647,7 @@ fn CellRow(
                                         true,
                                     ));
                                     let Ok(payload) = eval.recv::<String>().await else { return; };
+                                    if !input_reply_is_current(&request_source, &source_owner.peek(), request_revision, *revision.peek()) { return; }
                                     let Some((focused, val)) = payload.split_once('|') else { return; };
                                     is_focused.set(focused == "1");
                                     input.set(val.to_string());
@@ -582,6 +656,8 @@ fn CellRow(
                             },
                             onfocus: move |_| is_focused.set(true),
                             onblur: move |_| {
+                                let next = revision.peek().checked_add(1).expect("input revision overflow");
+                                revision.set(next);
                                 is_focused.set(false);
                                 has_error.set(false);
                             },
@@ -624,7 +700,7 @@ fn CellRow(
                         // leaving the visual checkbox desynced from the sheet. Force the
                         // element back to the actual committed value here.
                         let checked = *value.read() == "true";
-                        let ns = dom_id_namespace(&source_name.read());
+                        let ns = namespace;
                         spawn(async move {
                             let _ = document::eval(&format!(
                                 r#"document.getElementById("cell-{ns}-{id:?}").checked = {checked};"#
@@ -636,7 +712,7 @@ fn CellRow(
                 }
             } else {
                 SpFieldLabel { for_: field_id.clone(), "{label}" }
-                if *is_numeric.read() {
+                if *number_input_safe.read() {
                     SpNumberfield {
                         id: field_id,
                         value: number_field_value(&input.read()).to_string(),
@@ -653,7 +729,10 @@ fn CellRow(
                         disabled: flags.read().disabled && !flags.read().readonly,
                         readonly: flags.read().readonly,
                         oninput: move |_: FormEvent| {
-                            let ns = dom_id_namespace(&source_name.read());
+                            let ns = namespace;
+                            let request_source = source_owner.peek().clone();
+                            let request_revision = revision.peek().checked_add(1).expect("input revision overflow");
+                            revision.set(request_revision);
                             spawn(async move {
                                 // Reads the shadow-DOM `<input>`'s raw text, not the host's
                                 // `value` property: once `min`/`max` are set, `sp-number-field`
@@ -694,6 +773,7 @@ fn CellRow(
                                     false,
                                 ));
                                 let Ok(payload) = eval.recv::<String>().await else { return; };
+                                if !input_reply_is_current(&request_source, &source_owner.peek(), request_revision, *revision.peek()) { return; }
                                 let Some((still_focused, val)) = payload.split_once('|') else { return; };
                                 if still_focused != "1" {
                                     return;
@@ -705,6 +785,8 @@ fn CellRow(
                         },
                         onfocus: move |_| is_focused.set(true),
                         onblur: move |_| {
+                            let next = revision.peek().checked_add(1).expect("input revision overflow");
+                            revision.set(next);
                             is_focused.set(false);
                             has_error.set(false);
                         },
@@ -730,32 +812,44 @@ fn CellRow(
                         id: field_id,
                         value: input.read().clone(),
                         invalid: flags.read().invalid,
-                        disabled: flags.read().disabled,
+                        disabled: flags.read().disabled && !flags.read().readonly,
+                        readonly: flags.read().readonly,
                         // Dioxus's event serializer only reads event.target.value for
                         // HTMLInputElement — custom elements (sp-textfield) always give "".
                         // Use dioxus.send() in JS and eval.recv() to read the live value.
                         oninput: move |_: FormEvent| {
-                            let ns = dom_id_namespace(&source_name.read());
+                            let ns = namespace;
+                            let request_source = source_owner.peek().clone();
+                            let request_revision = revision.peek().checked_add(1).expect("input revision overflow");
+                            revision.set(request_revision);
                             spawn(async move {
-                                let mut eval = document::eval(&format!(
-                                    r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value)"#
-                                ));
+                                let numeric = *is_numeric.peek();
+                                let field_id = format!("cell-{ns}-{id:?}");
+                                let script = text_input_script(&field_id, numeric);
+                                let mut eval = document::eval(&script);
                                 let Ok(val) = eval.recv::<String>().await else { return; };
+                                if !input_reply_is_current(&request_source, &source_owner.peek(), request_revision, *revision.peek()) { return; }
+                                let Some(val) = text_field_draft(&val, numeric) else { return; };
                                 // Discard the result if the user blurred while the round-trip was
                                 // in flight; blur already cleared the error and use_effect will
                                 // restore the last valid computed value.
                                 if !*is_focused.read() {
                                     return;
                                 }
-                                input.set(val.clone());
-                                write_and_propagate(parsed, labels, id, &val, has_error, errors);
+                                input.set(val.to_string());
+                                write_and_propagate(parsed, labels, id, val, has_error, errors);
                             });
                         },
                         onfocus: move |_| is_focused.set(true),
                         onblur: move |_| {
+                            let next = revision.peek().checked_add(1).expect("input revision overflow");
+                            revision.set(next);
                             is_focused.set(false);
                             has_error.set(false);
                         },
+                        if let Some(names) = violated_requirement_names.read().clone() {
+                            SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
+                        }
                     }
                 }
             }
@@ -764,9 +858,58 @@ fn CellRow(
     }
 }
 
+/// Builds the live-value reader for normalized numeric text or literal string content.
+///
+/// - Complexity: O(field ID bytes) construction; numeric execution follows [`numeric_input_script`].
+fn text_input_script(field_id: &str, numeric: bool) -> String {
+    if numeric {
+        numeric_input_script(field_id, false)
+    } else {
+        format!(r#"dioxus.send(document.getElementById({field_id:?}).value)"#)
+    }
+}
+
+/// Returns literal text or a focused numeric text field's normalized draft.
+///
+/// Unfocused or malformed numeric wire replies do not authorize an edit.
+///
+/// - Complexity: O(payload.len()) worst-case numeric validation; O(1) for literal text.
+fn text_field_draft(payload: &str, numeric: bool) -> Option<&str> {
+    if numeric {
+        match payload.split_once('|') {
+            Some(("1", draft)) => Some(draft),
+            _ => None,
+        }
+    } else {
+        Some(payload)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only numeric text fields consume focus envelopes; literal strings stay unchanged.
+    #[test]
+    fn text_field_wire_preserves_strings_and_authorizes_focused_numeric_drafts() {
+        assert_eq!(
+            text_input_script("cell-123", true),
+            numeric_input_script("cell-123", false)
+        );
+        assert_eq!(
+            text_input_script("cell-123", false),
+            r#"dioxus.send(document.getElementById("cell-123").value)"#
+        );
+        assert_eq!(text_field_draft("1|001", false), Some("1|001"));
+        assert_eq!(text_field_draft("", false), Some(""));
+        assert_eq!(
+            text_field_draft("1|9007199254740997", true),
+            Some("9007199254740997")
+        );
+        assert_eq!(text_field_draft("1|", true), Some(""));
+        assert_eq!(text_field_draft("0|9007199254740997", true), None);
+        assert_eq!(text_field_draft("9007199254740997", true), None);
+    }
 
     /// Verifies blank numeric drafts stay blank through blur and unrelated recomputation.
     #[test]
@@ -1078,6 +1221,9 @@ mod tests {
         }
     }
 
+    /// Builds status sets for pure control-policy tests.
+    ///
+    /// - Complexity: expected O(total supplied IDs) time and space.
     fn status(
         has_outputs: bool,
         relevant: &[CellId],
@@ -1093,6 +1239,9 @@ mod tests {
         )
     }
 
+    /// Builds status sets including explicit filter violations.
+    ///
+    /// - Complexity: expected O(total supplied IDs) time and space.
     fn status_with_filter_violated(
         has_outputs: bool,
         relevant: &[CellId],
@@ -1111,6 +1260,9 @@ mod tests {
         )
     }
 
+    /// Builds all supplied status sets without evaluating another policy implementation.
+    ///
+    /// - Complexity: expected O(total supplied IDs) time and space.
     fn status_full(
         has_outputs: bool,
         relevant: &[CellId],
@@ -1135,6 +1287,7 @@ mod tests {
     }
 
     #[test]
+    /// Status identifies the cell whose own filter rejected its computed value.
     fn compute_output_status_filter_violated_includes_the_cell_whose_own_filter_failed() {
         use adam_rs::{Filter, Method};
 
@@ -1156,6 +1309,7 @@ mod tests {
     }
 
     #[test]
+    /// Satisfied filters leave the violation set empty.
     fn compute_output_status_filter_violated_empty_when_no_filter_is_violated() {
         use adam_rs::{Filter, Method};
 
@@ -1177,6 +1331,7 @@ mod tests {
     }
 
     #[test]
+    /// Output classification includes the output cell itself.
     fn compute_output_status_output_cells_contains_the_outputs_own_cell() {
         use adam_rs::Method;
 
@@ -1193,6 +1348,7 @@ mod tests {
     }
 
     #[test]
+    /// Sheets without outputs produce no output-cell classifications.
     fn compute_output_status_output_cells_empty_when_no_outputs() {
         let sheet = Sheet::new();
         let status = compute_output_status(&parsed_with_sheet(sheet));
@@ -1200,6 +1356,7 @@ mod tests {
     }
 
     #[test]
+    /// Named failing requirements appear in output diagnostics.
     fn compute_output_status_invalid_output_requirement_names_names_the_failing_requirement() {
         let mut parsed = parse(
             "sheet s { cell input: i32 = 2000; out area := input require { @not_too_big area <= 300i32; }; }",
@@ -1214,6 +1371,7 @@ mod tests {
     }
 
     #[test]
+    /// Satisfied requirements produce no failure names.
     fn compute_output_status_invalid_output_requirement_names_empty_when_requirement_holds() {
         let mut parsed = parse(
             "sheet s { cell input: i32 = 200; out area := input require { @not_too_big area <= 300i32; }; }",
@@ -1224,6 +1382,7 @@ mod tests {
     }
 
     #[test]
+    /// Diagnostics join failing named requirements without including passing ones.
     fn compute_output_status_invalid_output_requirement_names_joins_multiple_violated_names() {
         let mut parsed = parse(
             "sheet s { cell input: i32 = 101; out result := input require {
@@ -1265,6 +1424,7 @@ mod tests {
     }
 
     #[test]
+    /// Requirement classification also covers ordinary cells with requirements.
     fn compute_output_status_covers_a_plain_cells_requirement_violation() {
         use adam_rs::Requirement;
 
@@ -1285,6 +1445,7 @@ mod tests {
     }
 
     #[test]
+    /// Output contributors remain relevant even when the output has no requirements.
     fn compute_output_status_relevant_includes_an_out_cells_contributor_even_without_requirements()
     {
         // Regression test for the `relevant`-set narrowing: `requirement_relevant_cells()`
@@ -1306,6 +1467,7 @@ mod tests {
     }
 
     #[test]
+    /// Nonconformance diagnostics identify the affected cell.
     fn format_filter_violation_not_conformed_names_the_cell() {
         let msg = format_filter_violation("a", &FilterViolation::NotConformed);
         assert!(msg.contains('a'));
@@ -1313,6 +1475,7 @@ mod tests {
     }
 
     #[test]
+    /// Filter-failure diagnostics retain the underlying error message.
     fn format_filter_violation_failed_includes_the_underlying_error() {
         let msg = format_filter_violation(
             "a",
@@ -1322,12 +1485,14 @@ mod tests {
         assert!(msg.contains("out of range"));
     }
 
+    /// Returns an isolated cell key for pure identity-based policy tests.
     fn dummy_cell() -> CellId {
         let mut sheet = Sheet::new();
         sheet.add_cell(0_i32)
     }
 
     #[test]
+    /// Slider diagnostics prefer a named failing requirement.
     fn slider_invalid_message_prefers_a_requirement_name_when_present() {
         let sheet = Sheet::new();
         let id = dummy_cell();
@@ -1339,6 +1504,7 @@ mod tests {
     }
 
     #[test]
+    /// Slider diagnostics report filter violations when no named requirement takes precedence.
     fn slider_invalid_message_reports_a_filter_violation_when_no_requirement_name_applies() {
         use adam_rs::{Filter, Method};
 
@@ -1360,6 +1526,7 @@ mod tests {
     }
 
     #[test]
+    /// Invalid contributors receive a generic slider diagnostic.
     fn slider_invalid_message_falls_back_to_a_generic_message_for_a_mere_contributor() {
         let sheet = Sheet::new();
         let id = dummy_cell();
@@ -1371,6 +1538,7 @@ mod tests {
     }
 
     #[test]
+    /// Unnamed output failures receive a generic slider diagnostic.
     fn slider_invalid_message_falls_back_to_a_generic_message_for_an_unnamed_invalid_output() {
         let sheet = Sheet::new();
         let id = dummy_cell();
@@ -1382,6 +1550,7 @@ mod tests {
     }
 
     #[test]
+    /// Valid slider cells have no diagnostic message.
     fn slider_invalid_message_none_when_nothing_flags_the_cell() {
         let sheet = Sheet::new();
         let id = dummy_cell();
@@ -1390,6 +1559,7 @@ mod tests {
     }
 
     #[test]
+    /// Sheets without outputs do not disable otherwise editable irrelevant cells.
     fn cell_flags_enabled_when_no_outputs_even_if_not_relevant() {
         let id = dummy_cell();
         let flags = cell_flags(id, false, false, &status(false, &[], &[], &[]));
@@ -1397,6 +1567,7 @@ mod tests {
     }
 
     #[test]
+    /// Forced cells remain disabled independently of output presence.
     fn cell_flags_disabled_when_forced_regardless_of_outputs() {
         let id = dummy_cell();
         let flags = cell_flags(id, true, false, &status(false, &[], &[], &[]));
@@ -1404,6 +1575,7 @@ mod tests {
     }
 
     #[test]
+    /// Cells irrelevant to existing outputs are disabled.
     fn cell_flags_disabled_when_has_outputs_and_cell_not_relevant() {
         // Both ids must come from the same Sheet: two fresh Sheets' first added cell
         // return equal CellId values (slotmap's key generation is deterministic per
@@ -1416,6 +1588,7 @@ mod tests {
     }
 
     #[test]
+    /// Relevant nonforced cells remain editable.
     fn cell_flags_enabled_when_has_outputs_and_cell_is_relevant() {
         let id = dummy_cell();
         let flags = cell_flags(id, false, false, &status(true, &[id], &[], &[]));
@@ -1423,6 +1596,7 @@ mod tests {
     }
 
     #[test]
+    /// Local input errors mark the control invalid.
     fn cell_flags_invalid_when_has_error() {
         let id = dummy_cell();
         let flags = cell_flags(id, false, true, &status(false, &[], &[], &[]));
@@ -1430,6 +1604,7 @@ mod tests {
     }
 
     #[test]
+    /// Invalid outputs retain their invalid control state.
     fn cell_flags_invalid_when_cell_is_an_invalid_output() {
         let id = dummy_cell();
         let flags = cell_flags(id, false, false, &status(true, &[id], &[], &[id]));
@@ -1437,6 +1612,7 @@ mod tests {
     }
 
     #[test]
+    /// Filter violations mark the affected control invalid.
     fn cell_flags_invalid_when_cell_is_filter_violated() {
         let id = dummy_cell();
         let flags = cell_flags(
@@ -1449,6 +1625,7 @@ mod tests {
     }
 
     #[test]
+    /// Output cells render read-only controls.
     fn cell_flags_readonly_when_cell_is_an_output_cell() {
         let id = dummy_cell();
         let flags = cell_flags(
@@ -1461,6 +1638,7 @@ mod tests {
     }
 
     #[test]
+    /// Nonoutput cells do not inherit output-only read-only state.
     fn cell_flags_not_readonly_when_cell_is_not_an_output_cell() {
         let id = dummy_cell();
         let flags = cell_flags(id, false, false, &status(false, &[], &[], &[]));
@@ -1468,6 +1646,7 @@ mod tests {
     }
 
     #[test]
+    /// Read-only outputs retain invalid state when their requirements fail.
     fn cell_flags_readonly_and_invalid_together_when_an_output_cell_fails_its_requirement() {
         let id = dummy_cell();
         let flags = cell_flags(
@@ -1481,6 +1660,7 @@ mod tests {
     }
 
     #[test]
+    /// Contributors implicated in invalid outputs are marked invalid.
     fn cell_flags_invalid_when_cell_is_an_invalid_contributor() {
         // A cell that merely contributes to a failing out-cell condition renders
         // `invalid` too — Spectrum has no softer "implicated but not itself invalid"
@@ -1491,26 +1671,234 @@ mod tests {
     }
 
     #[test]
+    /// Matching typed and displayed values do not imply clamping.
     fn clamped_away_false_when_typed_matches_actual() {
         assert!(!clamped_away("42", "42"));
     }
 
     #[test]
+    /// Different numeric values reveal a range-clamped edit.
     fn clamped_away_true_when_a_range_filter_clamped_the_value() {
         assert!(clamped_away("150", "100"));
     }
 
     #[test]
+    /// Display rounding alone does not imply clamping.
     fn clamped_away_ignores_display_rounding_differences() {
         assert!(!clamped_away("1.005", &format_rounded(1.005)));
     }
 
     #[test]
+    /// Nonnumeric text does not produce a numeric clamp diagnostic.
     fn clamped_away_false_for_non_numeric_input() {
         assert!(!clamped_away("not a number", "0"));
     }
 
+    /// Edits a real sheet and returns its stored display and field error flag.
+    ///
+    /// - Complexity: source build/propagation plus draft parsing and edited-sheet propagation.
+    fn edit(source: &str, value: &str) -> (String, bool) {
+        let source = source.to_string();
+        let value = value.to_string();
+        /// Observes an independently owned edit result.
+        type Outcome = std::rc::Rc<std::cell::RefCell<(String, bool)>>;
+        /// Runs one write through the framework-owned signals.
+        ///
+        /// - Complexity: source building, draft parsing, propagation and value formatting.
+        fn host((source, value, result): (String, String, Outcome)) -> Element {
+            let outcome = crate::build_sheet(&source, "test.adm2", &Renderer::plain());
+            let (sheet, labels) = outcome.sheet_labels.unwrap();
+            let id = sheet.cell_names["x"].0;
+            let parsed = use_signal(|| sheet);
+            let labels = use_signal(|| labels);
+            let flag = use_signal(|| false);
+            let source_text = use_memo(move || source.clone());
+            let source_name = use_memo(|| "test.adm2".to_string());
+            write_and_propagate(
+                parsed,
+                labels,
+                id,
+                &value,
+                flag,
+                ErrorContext {
+                    source_text,
+                    source_name,
+                    parsed,
+                },
+            );
+            let display = (labels.read().cells[&id].display)(&parsed.read());
+            *result.borrow_mut() = (display, *flag.read());
+            rsx! {}
+        }
+        let result = std::rc::Rc::new(std::cell::RefCell::new((String::new(), false)));
+        let mut dom = VirtualDom::new_with_props(host, (source, value, result.clone()));
+        dom.rebuild_in_place();
+        result.take()
+    }
+
+    /// String and integer writes retain their exact semantics.
     #[test]
+    fn successful_nonfloat_writes_do_not_look_clamped() {
+        assert_eq!(
+            edit("sheet s { cell x: String; }", "001"),
+            ("001".into(), false)
+        );
+        assert_eq!(
+            edit("sheet s { cell x: i64; }", "9007199254740993"),
+            ("9007199254740993".into(), false)
+        );
+    }
+
+    /// Opaque numeric filters report actual clamping after propagation.
+    #[test]
+    fn opaque_numeric_clamps_report_the_changed_value() {
+        assert_eq!(
+            edit(
+                "sheet s { cell x: i32 filter if _ < 0 { 0 } else { _ }; }",
+                "-1"
+            ),
+            ("0".into(), true)
+        );
+        assert_eq!(
+            edit(
+                "sheet s { cell x: f64 filter if _ < 0.0 { 0.0 } else { _ }; }",
+                "-1.0"
+            ),
+            ("0".into(), true)
+        );
+        assert!(
+            !edit(
+                "sheet s { cell x: f64 filter if _ < 0.0 { 0.0 } else { _ }; }",
+                "1.005"
+            )
+            .1
+        );
+    }
+
+    /// Range-filtered integers compare exact digits above binary64's integer domain.
+    #[test]
+    fn ranged_wide_integer_clamps_compare_exact_values() {
+        for ty in ["i64", "u64"] {
+            let source = format!(
+                "sheet s {{ cell x: {ty} filter 9007199254740992{ty}..=9007199254740994{ty}; }}"
+            );
+            assert_eq!(
+                edit(&source, "9007199254740993"),
+                ("9007199254740993".into(), false),
+                "{ty}"
+            );
+            assert_eq!(
+                edit(&source, "9007199254740999"),
+                ("9007199254740994".into(), true),
+                "{ty}"
+            );
+        }
+        let negative =
+            "sheet s { cell x: i64 filter -9007199254740994i64..=-9007199254740992i64; }";
+        assert_eq!(
+            edit(negative, "-9007199254740993"),
+            ("-9007199254740993".into(), false)
+        );
+        assert_eq!(
+            edit(negative, "-9007199254740999"),
+            ("-9007199254740994".into(), true)
+        );
+        let unsigned = "sheet s { cell x: u128 filter 170141183460469231731687303715884105728u128..=170141183460469231731687303715884105730u128; }";
+        assert_eq!(
+            edit(unsigned, "170141183460469231731687303715884105729"),
+            ("170141183460469231731687303715884105729".into(), false)
+        );
+        assert_eq!(
+            edit(unsigned, "170141183460469231731687303715884105737"),
+            ("170141183460469231731687303715884105730".into(), true)
+        );
+    }
+
+    /// Old source owners and out-of-order replies cannot authorize writes.
+    #[test]
+    fn input_reply_requires_current_source_and_revision() {
+        let source = InputOwner(Rc::new(()));
+        let replacement = InputOwner(Rc::new(()));
+        assert!(input_reply_is_current(&source, &source, 2, 2));
+        assert!(!input_reply_is_current(&source, &replacement, 2, 2));
+        assert!(!input_reply_is_current(&source, &source, 1, 2));
+        assert!(!input_reply_is_current(&source, &source, 2, 3));
+    }
+
+    /// Fixture relevance follows real Inspector policy, including all conditional inputs.
+    #[test]
+    fn image_resize_relevance_survives_strength_changes() {
+        let source = include_str!("../../begin/examples/image_resize.adm2");
+        let outcome = crate::build_sheet(source, "image_resize.adm2", &Renderer::plain());
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let (mut parsed, _) = outcome.sheet_labels.unwrap();
+        for width in [1600i32, 1920i32] {
+            let id = parsed.cell_names["width_pixels"].0;
+            parsed.write(id, width).unwrap();
+            parsed.propagate().unwrap();
+            let relevant = compute_output_status(&parsed).relevant;
+            for name in [
+                "width_pixels",
+                "width_pixels_percent",
+                "width_inches",
+                "resolution",
+                "original_width_pixels",
+                "resample",
+                "constrain",
+                "auto_quality",
+                "screen_lpi",
+            ] {
+                assert!(relevant.contains(&parsed.cell_names[name].0), "{name}");
+            }
+        }
+    }
+
+    /// Two independently mounted inspectors never share control identities.
+    #[test]
+    fn same_source_inspectors_have_distinct_control_ids() {
+        /// Renders the public inspector with a constant diagnostic name.
+        fn inspector_host() -> Element {
+            let mut pair = use_signal(|| {
+                crate::build_sheet("sheet s { cell x: i64; }", "same.adm2", &Renderer::plain())
+                    .sheet_labels
+            });
+            let parsed = use_signal(|| pair.write().take().unwrap().0);
+            let labels = use_signal(|| {
+                crate::build_sheet("sheet s { cell x: i64; }", "same.adm2", &Renderer::plain())
+                    .sheet_labels
+                    .unwrap()
+                    .1
+            });
+            let source_text = use_memo(|| "sheet s { cell x: i64; }".to_string());
+            let source_name = use_memo(|| "same.adm2".to_string());
+            rsx! { SheetInspector { parsed, labels, source_text, source_name } }
+        }
+        let mut a = VirtualDom::new(inspector_host);
+        let mut b = VirtualDom::new(inspector_host);
+        a.rebuild_in_place();
+        b.rebuild_in_place();
+        let a = dioxus_ssr::render(&a);
+        let b = dioxus_ssr::render(&b);
+        let id_a = a
+            .split("id=\"cell-")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let id_b = b
+            .split("id=\"cell-")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        assert_ne!(id_a, id_b);
+        assert!(a.contains("sp-textfield") && !a.contains("sp-number-field"));
+    }
+
+    #[test]
+    /// An in-range displayed value preserves slider bounds.
     fn slider_bounds_returns_range_unchanged_when_current_is_within_it() {
         assert_eq!(
             slider_bounds("50", (0.0, 100.0)),
@@ -1519,6 +1907,7 @@ mod tests {
     }
 
     #[test]
+    /// Slider display bounds include a value above the filter maximum.
     fn slider_bounds_widens_max_to_include_a_current_value_above_it() {
         assert_eq!(
             slider_bounds("150", (0.0, 100.0)),
@@ -1527,6 +1916,7 @@ mod tests {
     }
 
     #[test]
+    /// Slider display bounds include a value below the filter minimum.
     fn slider_bounds_widens_min_to_include_a_current_value_below_it() {
         assert_eq!(
             slider_bounds("-50", (0.0, 100.0)),
@@ -1535,6 +1925,7 @@ mod tests {
     }
 
     #[test]
+    /// Unparseable displayed values preserve the filter's original bounds.
     fn slider_bounds_falls_back_to_the_unwidened_range_when_current_does_not_parse() {
         assert_eq!(
             slider_bounds("not a number", (0.0, 100.0)),
@@ -1543,34 +1934,37 @@ mod tests {
     }
 
     #[test]
+    /// Toggling true produces false.
     fn toggled_bool_value_true_becomes_false() {
         assert_eq!(toggled_bool_value("true"), "false");
     }
 
     #[test]
+    /// Toggling false produces true.
     fn toggled_bool_value_false_becomes_true() {
         assert_eq!(toggled_bool_value("false"), "true");
     }
 
     #[test]
-    fn dom_id_namespace_is_deterministic_for_the_same_name() {
-        assert_eq!(
-            dom_id_namespace("tutorial/first_sheet.adm2"),
-            dom_id_namespace("tutorial/first_sheet.adm2")
-        );
+    /// A retained live owner has a stable DOM namespace.
+    fn dom_id_namespace_is_stable_for_the_same_owner() {
+        let owner = Rc::new(());
+        assert_eq!(dom_id_namespace(&owner), dom_id_namespace(&owner.clone()));
     }
 
     #[test]
-    fn dom_id_namespace_differs_for_different_names() {
+    /// Distinct live owners have distinct DOM namespaces.
+    fn dom_id_namespace_differs_for_different_owners() {
         assert_ne!(
-            dom_id_namespace("tutorial/first_sheet.adm2"),
-            dom_id_namespace("tutorial/multiplication_triangle.adm2")
+            dom_id_namespace(&Rc::new(())),
+            dom_id_namespace(&Rc::new(()))
         );
     }
 
     #[test]
+    /// Namespace formatting remains safe in generated DOM IDs.
     fn dom_id_namespace_contains_only_ascii_digits() {
-        let ns = dom_id_namespace("tutorial/first_sheet.adm2").to_string();
+        let ns = dom_id_namespace(&Rc::new(())).to_string();
         assert!(ns.chars().all(|c| c.is_ascii_digit()));
     }
 }

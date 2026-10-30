@@ -1,11 +1,11 @@
 ---
 title: "Four-Layer Stack Runtime Architecture"
 entity_type: concept
-confidence: 0.80
+confidence: 0.72
 created: 2026-10-08T18:52:02Z
-last_accessed: 2026-10-08T18:52:02Z
+last_accessed: 2026-10-28T20:36:03Z
 last_reinforced: 2026-10-08T18:52:02Z
-access_count: 1
+access_count: 2
 sources:
   - "cel-runtime/src/raw_stack.rs:6-35"
   - "cel-runtime/src/raw_segment.rs:12-35"

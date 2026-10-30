@@ -293,6 +293,7 @@ fn generic_site_label(site: &ErrorSite, cell_name: &impl Fn(CellId) -> Option<St
 mod tests {
     use super::*;
 
+    /// Describes relationship sites as participants in a cycle.
     #[test]
     fn site_label_describes_cycle_relationship_steps() {
         let e = adam_rs::Error::Cycle {
@@ -304,10 +305,12 @@ mod tests {
         let name = |_id: adam_rs::CellId| Some("x".to_string());
         let l0 = site_label(&e, 0, &name);
         let l1 = site_label(&e, 1, &name);
-        assert!(!l0.is_empty());
+        assert!(l0.contains("relationship"));
+        assert!(l0.contains("cycle"));
         assert!(l1.contains("x")); // the cell step names the cell
     }
 
+    /// Names dependency-cycle cells as cycle participants.
     #[test]
     fn dependency_cycle_cell_sites_are_labelled_as_part_of_the_cycle() {
         let cell = CellId::default();
@@ -318,6 +321,7 @@ mod tests {
         assert_eq!(label, "cell `mode` is part of the cycle");
     }
 
+    /// Distinguishes seed dependency cycles in source labels.
     #[test]
     fn seed_cycle_sites_are_labelled_as_part_of_the_seed_cycle() {
         let relationship = adam_rs::RelationshipId::default();
@@ -334,6 +338,7 @@ mod tests {
         assert_eq!(cell_label, "cell `x` is part of the seed dependency cycle");
     }
 
+    /// Distinguishes the mismatched method, baseline method, and extra cells.
     #[test]
     fn site_label_describes_mismatched_method_cells() {
         let e = adam_rs::Error::MismatchedMethodCells {
@@ -349,6 +354,7 @@ mod tests {
         assert!(site_label(&e, 2, &name).contains("c"));
     }
 
+    /// Labels conflicting methods and multiply claimed output cells.
     #[test]
     fn site_label_describes_invalid_method_outputs() {
         let e = adam_rs::Error::InvalidMethodOutputs {
@@ -370,6 +376,7 @@ mod tests {
     // sites, with `sites[1]` a `Cell`, not a second method. Labelling `index == 1` by raw
     // position (as the cross-method case does) would wrongly print "collides with this earlier
     // method" onto the cell caret, even though there is no earlier method here.
+    /// Labels a method's repeated output as a multiply claimed cell, not a second method.
     #[test]
     fn site_label_describes_invalid_method_outputs_self_duplicate() {
         let e = adam_rs::Error::InvalidMethodOutputs {
@@ -389,12 +396,15 @@ mod tests {
         );
     }
 
+    /// Uses generic cell wording when no declared name is available.
     #[test]
     fn site_label_falls_back_to_generic_wording_for_unnamed_cells() {
         let e = adam_rs::Error::Cycle {
             sites: vec![adam_rs::ErrorSite::Cell(adam_rs::CellId::default())],
         };
         let name = |_id: adam_rs::CellId| None;
-        assert!(!site_label(&e, 0, &name).is_empty());
+        let label = site_label(&e, 0, &name);
+        assert!(label.contains("this cell"));
+        assert!(label.contains("cycle"));
     }
 }

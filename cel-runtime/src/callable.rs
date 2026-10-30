@@ -34,7 +34,9 @@ use crate::{ArgumentList, DynClosure, PreparedSegment, ValueRepr};
 /// ```
 #[repr(transparent)]
 pub struct Callable<Args, R> {
+    /// Shares the exact native or interpreted body under its trusted binding.
     carrier: DynClosure,
+    /// Associates the carrier with its validated canonical argument/result witnesses.
     signature: PhantomData<fn(&Args) -> R>,
 }
 
@@ -156,11 +158,166 @@ impl<Args: 'static, R: 'static> Callable<Args, R> {
 mod tests {
     use super::*;
     use crate::{Array, ArrayOf, Cons, DynSegment, FnOf, IntoCStackList, Leaf, Nil, ValueType};
+    use std::cell::OnceCell;
+    use std::rc::{Rc, Weak};
+
+    /// Describes source-ordered arguments with distinct sizes, alignments, and ownership.
+    type MixedArguments = Cons<Leaf<u8>, Cons<Leaf<u64>, Cons<Leaf<String>, Nil>>>;
+    /// Stores the canonical borrowed frame for the mixed-layout argument contract.
+    type MixedFrame = <MixedArguments as ValueRepr>::Value;
+    /// Describes a mixed-layout callable that returns an independently owned string.
+    type MixedFunction = FnOf<MixedArguments, Leaf<String>>;
+
+    /// Builds an ordered rendering body with a zero-tag error and reserved panic tag.
+    fn mixed_closure() -> DynClosure {
+        let mut body = DynSegment::new::<()>();
+        body.push_argument(0, ValueType::cloneable_leaf::<u8>())
+            .unwrap();
+        body.push_argument(1, ValueType::cloneable_leaf::<u64>())
+            .unwrap();
+        body.push_argument(2, ValueType::cloneable_leaf::<String>())
+            .unwrap();
+        body.op3r(|tag: u8, word: u64, text: String| {
+            anyhow::ensure!(tag != 0, "zero tag");
+            assert_ne!(tag, u8::MAX, "typed interpreted body panic");
+            Ok(format!("{tag}/{word}/{text}"))
+        })
+        .unwrap();
+        DynClosure::typed(
+            vec![
+                ValueType::cloneable_leaf::<u8>(),
+                ValueType::cloneable_leaf::<u64>(),
+                ValueType::cloneable_leaf::<String>(),
+            ],
+            body,
+        )
+        .unwrap()
+    }
+
+    /// Emits an invocation that borrows all three mixed-layout arguments.
+    fn mixed_invocation(closure: DynClosure) -> PreparedSegment<MixedArguments, Leaf<String>> {
+        let mut body = DynSegment::new::<()>();
+        body.push_closure(closure).unwrap();
+        body.push_argument(0, ValueType::cloneable_leaf::<u8>())
+            .unwrap();
+        body.push_argument(1, ValueType::cloneable_leaf::<u64>())
+            .unwrap();
+        body.push_argument(2, ValueType::cloneable_leaf::<String>())
+            .unwrap();
+        body.invoke_closure(3).unwrap();
+        body.prepare::<MixedArguments, Leaf<String>>().unwrap()
+    }
+
+    /// Escapes a typed interpreted carrier through its public canonical callable witness.
+    fn mixed_callable(closure: DynClosure) -> Callable<MixedFrame, String> {
+        let mut factory = DynSegment::new::<()>();
+        factory.push_closure(closure).unwrap();
+        factory
+            .prepare::<Nil, MixedFunction>()
+            .unwrap()
+            .call(&().into_c_stack_list())
+            .unwrap()
+    }
+
+    /// Rebinds borrowed frames through direct/emitted calls and recovers after errors and panic.
+    #[test]
+    fn typed_interpreted_frames_rebind_and_recover() {
+        let closure = mixed_closure();
+        let direct = mixed_callable(closure.clone());
+        let mut emitted = mixed_invocation(closure);
+        let first = (7u8, 1001u64, String::from("alpha")).into_c_stack_list();
+        let second = (9u8, 7002u64, String::from("second-longer")).into_c_stack_list();
+        let rejected = (0u8, 3003u64, String::from("reject")).into_c_stack_list();
+        let panicking = (u8::MAX, 4004u64, String::from("panic")).into_c_stack_list();
+        let recovered = (11u8, 9004u64, String::from("recovered")).into_c_stack_list();
+
+        assert_eq!(direct.call(&first).unwrap(), "7/1001/alpha");
+        assert_eq!(emitted.call(&second).unwrap(), "9/7002/second-longer");
+        assert!(direct.call(&rejected).is_err());
+        assert!(emitted.call(&rejected).is_err());
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                emitted.call(&panicking)
+            }))
+            .is_err()
+        );
+        assert_eq!(emitted.call(&recovered).unwrap(), "11/9004/recovered");
+        assert_eq!(direct.call(&second).unwrap(), "9/7002/second-longer");
+        for (frame, expected) in [
+            (&first, (7, 1001, "alpha")),
+            (&second, (9, 7002, "second-longer")),
+            (&rejected, (0, 3003, "reject")),
+            (&panicking, (u8::MAX, 4004, "panic")),
+            (&recovered, (11, 9004, "recovered")),
+        ] {
+            assert_eq!((frame.1, frame.0.1, frame.0.0.1.as_str()), expected);
+        }
+    }
+
+    /// Restores outer arguments after typed nested calls and rejects same-carrier reentry.
+    #[test]
+    fn typed_interpreted_nested_frames_and_reentry() {
+        let target = Rc::new(OnceCell::<Weak<Callable<MixedFrame, String>>>::new());
+        let reentrant = target.clone();
+        let mut body = DynSegment::new::<()>();
+        body.push_closure(mixed_closure()).unwrap();
+        body.just(5u8);
+        body.just(600u64);
+        body.just(String::from("nested"));
+        body.invoke_closure(3).unwrap();
+        body.push_argument(2, ValueType::cloneable_leaf::<String>())
+            .unwrap();
+        body.op2(|nested: String, outer: String| format!("{nested}|parent:{outer}"))
+            .unwrap();
+        body.push_argument(0, ValueType::cloneable_leaf::<u8>())
+            .unwrap();
+        body.push_argument(1, ValueType::cloneable_leaf::<u64>())
+            .unwrap();
+        body.op3r(move |rendered: String, tag: u8, word: u64| {
+            if tag == 13 {
+                let function = reentrant.get().unwrap().upgrade().unwrap();
+                return function
+                    .call(&(99u8, 999u64, String::from("reentrant")).into_c_stack_list());
+            }
+            Ok(format!("{tag}/{word}:{rendered}"))
+        })
+        .unwrap();
+        let closure = DynClosure::typed(
+            vec![
+                ValueType::cloneable_leaf::<u8>(),
+                ValueType::cloneable_leaf::<u64>(),
+                ValueType::cloneable_leaf::<String>(),
+            ],
+            body,
+        )
+        .unwrap();
+        let direct = Rc::new(mixed_callable(closure.clone()));
+        target.set(Rc::downgrade(&direct)).unwrap();
+        let mut emitted = mixed_invocation(closure);
+        let first = (7u8, 1001u64, String::from("alpha")).into_c_stack_list();
+        let recursive = (13u8, 2002u64, String::from("recursive")).into_c_stack_list();
+        let after = (9u8, 7002u64, String::from("after")).into_c_stack_list();
+        assert_eq!(
+            emitted.call(&first).unwrap(),
+            "7/1001:5/600/nested|parent:alpha"
+        );
+        let error = emitted.call(&recursive).unwrap_err();
+        assert!(error.to_string().contains("already executing"));
+        assert_eq!(
+            direct.call(&after).unwrap(),
+            "9/7002:5/600/nested|parent:after"
+        );
+        assert_eq!(first.0.0.1, "alpha");
+        assert_eq!(recursive.0.0.1, "recursive");
+        assert_eq!(after.0.0.1, "after");
+    }
 
     /// Both typed body kinds and emitted invocation perform zero descriptor comparisons.
     #[test]
     fn trusted_callable_calls_never_compare_descriptors() {
+        /// Describes the borrowed array argument shared by the compared call routes.
         type Args = Cons<ArrayOf<Leaf<i32>>, Nil>;
+        /// Describes the callable's argument and independently owned array result.
         type Function = FnOf<Args, ArrayOf<Leaf<i32>>>;
         /// Returns an independently owned copy of the borrowed array.
         fn native(args: &<Args as ValueRepr>::Value) -> anyhow::Result<Array<i32>> {

@@ -3,8 +3,8 @@
 //! [`resolve`] greedily releases cells in descending strength order, checking at each
 //! step whether a matching + acyclic assignment still exists with that cell (and every
 //! previously released cell) forbidden from being claimed. Self-referencing methods need
-//! no special handling here: a self-referencing output places no exclusive claim
-//! ([`super::matching::pure_outputs`]) and draws no self-dependency edge
+//! no special handling here: a self-referencing output is exclusively claimed but
+//! draws no self-dependency edge
 //! ([`super::digraph::build_digraph`]), so the same strength-lexicographic release finds
 //! the right *assignment*; the correct *values* then come from [`super::seed::evaluate_seeds`]
 //! at execution time, not from a value-aware planning choice (see
@@ -78,9 +78,11 @@ pub(crate) enum ReleaseFailure {
 /// - [`ReleaseFailure::NoAcyclicAssignment`] -- a method assignment exists, but none of
 ///   them is acyclic.
 ///
-/// - Complexity: O(C · `solve_acyclic`) where C = cells -- each cell triggers one
-///   `solve_acyclic` attempt, itself exponential in the number of active relationships
-///   in the worst case (see its own doc comment).
+/// - Complexity: O(C · log(C + 1)) sorting plus C + 1 sequential
+///   [`Assignment::solve_acyclic`] searches, whose bounds include partial checks and
+///   the relationship-storage scan. A failed initial search additionally invokes
+///   [`Assignment::solve`] once to classify the failure. C is cells; storage is
+///   O(C) plus the auxiliary storage of one search and one retained assignment.
 pub(crate) fn resolve(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
@@ -98,14 +100,12 @@ pub(crate) fn resolve(
     cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
 
     for &cell in &cells_sorted {
-        let mut candidate_released = released.clone();
-        candidate_released.insert(cell);
+        released.insert(cell);
 
-        if let Some(candidate) =
-            Assignment::solve_acyclic(relationships, active, &candidate_released)
-        {
-            released = candidate_released;
+        if let Some(candidate) = Assignment::solve_acyclic(relationships, active, &released) {
             current = candidate;
+        } else {
+            released.remove(&cell);
         }
     }
 
@@ -121,6 +121,7 @@ mod tests {
     use crate::{Method, Sheet};
 
     #[test]
+    /// Checks classification of infeasible exclusive output claims.
     fn no_assignment_returns_no_assignment_failure() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -140,6 +141,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks classification of a feasible assignment with an unavoidable cycle.
     fn genuinely_unsolvable_cycle_returns_no_acyclic_assignment_failure() {
         // x = f(y); y = g(x), each with only one method and no other cell involved:
         // no acyclic assignment exists no matter which cell is released.
@@ -160,6 +162,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preference for releasing the stronger cell.
     fn strength_prefers_the_higher_strength_cell_as_source() {
         // Triangle a,b,c: a and b are written (higher strength) after c is added, so
         // a and b must remain sources and c must be derived, regardless of method
@@ -187,6 +190,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks acyclic release through a diamond's competing output claims.
     fn diamond_collision_pattern_resolves_instead_of_failing() {
         // R1{a,b,c}, R2{b,c,d}: a and d outrank b and c (the collision pattern from
         // begin/examples/diamond.adm2). {a, d} can never both be sources for this
@@ -238,6 +242,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks strength-optimal source release in a self-referencing chain.
     fn resolve_releases_the_highest_strength_cell_in_a_self_referencing_chain() {
         // The issue #182 shape. Method selection is purely strength-based: c, written
         // last, is the highest-strength cell and is released as the source; a and b are
@@ -276,6 +281,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks compatible release across self-referencing and diamond components.
     fn resolve_merges_a_self_referencing_pair_with_a_functional_diamond() {
         // A self-referencing pair (x,y) fully disjoint from a functional diamond
         // (p,q,r): the single strength-based release handles both together.
@@ -315,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that strength determines elimination order independently of method order.
     fn elimination_order_follows_strength_order_not_method_declaration_order() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -340,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that rejected releases remain in the recorded elimination sequence.
     fn elimination_order_retains_cells_whose_tentative_release_is_rejected() {
         // This is the same collision pattern as the diamond test above: d is released,
         // a is considered next but rejected because {d, a} cannot both stay sources,
@@ -381,6 +389,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that an infeasible component takes precedence over a separate cycle.
     fn resolve_reports_no_assignment_when_any_component_lacks_one_even_if_another_only_fails_acyclically()
      {
         // Two disjoint connected components, active together: a plain one that's a

@@ -72,7 +72,12 @@ fn canonical_unit_nested_arrays() {
     body.make_array(2, 0).unwrap();
     let mut prepared = body.prepare::<Nil, ArrayOf<Item>>().unwrap();
     let result = prepared.call(&().into_c_stack_list()).unwrap().into_vec();
-    assert_eq!(result[1].clone().into_rust_tuple().1.into_vec(), [2]);
+    assert_eq!(result.len(), 2);
+    for (record, expected) in result.into_iter().zip([[1], [2]]) {
+        let (unit, values) = record.into_rust_tuple();
+        let (): () = unit.into_rust_tuple();
+        assert_eq!(values.into_vec(), expected);
+    }
 
     let mut empty = DynSegment::new::<()>();
     empty

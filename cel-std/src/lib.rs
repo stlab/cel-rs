@@ -20,10 +20,8 @@ mod math;
 /// transient, per-declaration scopes (pushed via [`cel_parser::OpLookup::push_scope`])
 /// are isolated during nested body compilation.
 ///
-/// # Panics
-/// Panics if a standard numeric signature is already installed. Install once per lookup;
-/// independent libraries may add disjoint overloads before or after installation.
-///
+/// - Precondition: No standard numeric signature is already installed.
+///   Independent libraries may add disjoint overloads before or after installation.
 /// - Complexity: O(s²) in the number of installed operation signatures.
 ///
 /// # Examples

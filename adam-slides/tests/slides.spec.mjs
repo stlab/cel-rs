@@ -379,6 +379,19 @@ test("text and deck-local example slides render independently", async ({ page })
 test("the authored deck mounts every selected example", async ({ page }) => {
   await page.goto("authored.html");
   const iframes = page.locator("iframe[data-example]");
+  await expect(iframes).toHaveCount(10);
+  expect(await iframes.evaluateAll((frames) => frames.map((frame) => frame.dataset.example))).toEqual([
+    "tutorial/first_sheet",
+    "tutorial/clamp_demo",
+    "tutorial/basic_output",
+    "tutorial/basic_relationship",
+    "tutorial/inequality",
+    "tutorial/constrain",
+    "tutorial/conditional_forced",
+    "tutorial/requirements_filter_diagnostic",
+    "tutorial/area_with_requirement",
+    "local/three_way",
+  ]);
   for (let index = 0; index < await iframes.count(); index++) {
     const frame = iframes.nth(index).contentFrame();
     await expect(frame.locator("#status")).toHaveCount(0);

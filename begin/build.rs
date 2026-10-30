@@ -11,21 +11,18 @@
 //! here into `$OUT_DIR/example_manifest.rs`, which `example_source.rs`
 //! splices in via `include!`.
 //!
-//! Deliberately watches only `build.rs` itself (`cargo:rerun-if-changed=
-//! build.rs` below), not the `examples/` directory: watching the directory
-//! would make Cargo treat every `.adm2` file as a build-script input, so
-//! editing an *existing* example's content would force a full rebuild on
-//! every edit for the platforms that read this generated manifest. Adding or
-//! removing an example file still requires a rebuild for those platforms
-//! (unavoidable - they have no live filesystem to notice the change), but
-//! that trade-off doesn't apply to desktop, which never reads this manifest
-//! at all.
+//! Tracks the examples directory so ordinary Cargo builds notice additions and
+//! removals as well as content edits. Desktop still reads live files at runtime.
 use std::env;
 use std::fs;
 use std::path::Path;
 
+/// Regenerates the sorted embedded fixture manifest when its directory changes.
+///
+/// - Complexity: O(n log n + t) for n filenames and t emitted path/name bytes.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=examples");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("set by cargo");
     let examples_dir = Path::new(&manifest_dir).join("examples");

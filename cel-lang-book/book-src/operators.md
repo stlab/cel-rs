@@ -14,6 +14,7 @@ comparison and range forms do not chain.
 ## Syntax
 
 ```text
+expression = closure_expression | range_expression .
 range_expression = ".." [ or_expression ]
                  | "..=" or_expression
                  | or_expression [ ".." [ or_expression ] | "..=" or_expression ] .
@@ -29,9 +30,8 @@ additive_expression = multiplicative_expression { ("+" | "-") multiplicative_exp
 multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
 cast_expression = unary_expression { "as" identifier } .
 unary_expression = (("-" | "!") unary_expression) | postfix_expression .
-postfix_expression = primary_expression {
-    "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ argument_list ] ")" ])
-} .
+postfix_expression = primary_expression { postfix_suffix } .
+postfix_suffix = "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier) .
 argument_list = expression { "," expression } .
 ```
 
@@ -80,8 +80,8 @@ not chain.
 - Hosts supply member signatures, not a fixed set of receiver types. The checker
   rejects known incompatible operands and preserves registered result types.
   Calls without metadata remain best-effort and still check every argument.
-- Postfix calls and tuple indices bind more tightly than unary and binary
-  operators.
+- A bare closure is a complete expression, not an operator operand. Group it
+  before applying an operator or postfix suffix: `(|x: i32| x + 1)(2)`.
 - `+` accepts homogeneous numeric operands and `String + String`.
   Unsigned integer addition wraps. Signed integer addition reports
   `arithmetic overflow` on overflow.
@@ -105,10 +105,11 @@ not chain.
   or homogeneous `String`.
 - `<`, `<=`, `>`, and `>=` accept homogeneous numeric operands or
   homogeneous `String`.
-- Range forms bind more loosely than every other operator. The valid forms
+- The valid range forms
   are `a..b`, `a..=b`, `a..`, `..b`, `..=b`, and `..`.
 - `..=` always requires a right endpoint.
-- Range endpoints are full expressions.
+- Range endpoints are `or_expression`s. Group a closure or nested range used
+  as an endpoint; endpoint types must still satisfy the operator's requirements.
 - Range expressions do not chain, so `1..2..3` is not valid.
 - `1 + 2..3 * 4` means `(1 + 2)..(3 * 4)`.
 - `as` converts a value to one of the sixteen built-in scalar type names:
@@ -121,16 +122,12 @@ not chain.
   Floating-point-to-integer casts require a finite, in-range source and
   truncate toward zero. `f64 as f32` checks finite range before narrowing.
 - `true` casts to integer `1`, and `false` casts to integer `0`.
-- CEL limits cast targets to the sixteen built-in scalar type names.
 - `char`, byte-string, C-string, unit, array, tuple, range, and closure
   values are not additional cast target names.
 - Number-to-`bool`, `bool`-to-float, and `String`-to-number or
   `String`-to-`bool` casts are not valid.
 - Casts associate from left to right, so `x as T as U` applies the first
   cast before the second.
-- See [Conditional expressions](conditional-expressions.md) for `if`
-  expressions, and the
-  [Reference Manual](reference.md) for a summary.
 
 ## Edge cases
 

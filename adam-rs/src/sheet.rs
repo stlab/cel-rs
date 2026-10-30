@@ -2,6 +2,77 @@
 //!
 //! All cells and relationships are created through the sheet and are
 //! destroyed when the sheet is dropped.
+//!
+//! Queries borrow declarations or describe a completed propagation; they do not
+//! propagate implicitly. This graph combines a conditional relationship, a fixed
+//! writer, a live source filter and a requirement.
+//!
+//! ```
+//! use adam_rs::{CellKind, Filter, MatchExpr, Method, Requirement, Sheet};
+//! use std::any::TypeId;
+//! let mut sheet = Sheet::default();
+//! let mode = sheet.add_source(true);
+//! let limit = sheet.add_source(100_i32);
+//! let a = sheet.add_cell(7_i32);
+//! let b = sheet.add_cell(0_i32);
+//! let out = sheet.add_cell(0_i32);
+//! sheet.add_filter(a, Filter::range(TypeId::of::<i32>(), vec![limit],
+//!     vec![TypeId::of::<i32>()],
+//!     |v, args| Ok(Box::new((*v.downcast_ref::<i32>().unwrap())
+//!         .clamp(0, *args[0].downcast_ref::<i32>().unwrap()))),
+//!     |args| Some((Box::new(0_i32), Box::new(*args[0].downcast_ref::<i32>()?)))))?;
+//! let rel = sheet.add_relationship(vec![Method::from_fn_1_1(a, b, |v: &i32| Ok(*v))])?;
+//! let conditional = sheet.add_conditional(MatchExpr::cell(mode),
+//!     vec![(vec![true], vec![rel])], vec![])?;
+//! sheet.add_out(Method::from_fn_1_1(b, out, |v: &i32| Ok(*v)), vec![])?;
+//! let check = sheet.add_requirement(b, Requirement::from_fn_1(b, |v: &i32| Ok(*v >= 0)))?;
+//! sheet.validate()?;
+//! sheet.write(a, 9_i32)?;
+//! sheet.propagate()?;
+//! assert_eq!(*sheet.read::<i32>(out)?, 9);
+//! assert_eq!(*sheet.source::<i32>(a)?, 9);
+//! assert_eq!(sheet.cell_type_id(a), Some(TypeId::of::<i32>()));
+//! assert_eq!(sheet.cell_kind(out), Some(CellKind::Out));
+//! assert_eq!(sheet.cells().count(), 5);
+//! assert_eq!(sheet.relationships().count(), 2);
+//! assert_eq!(sheet.cell_adj(b).unwrap().len(), 2);
+//! assert_eq!(sheet.relationship_adj(rel), Some([a, b].as_slice()));
+//! assert_eq!(sheet.method_inputs(rel, 0), Some([a].as_slice()));
+//! assert_eq!(sheet.method_outputs(rel, 0), Some([b].as_slice()));
+//! assert_eq!(sheet.selected_method(rel), Some(0));
+//! assert!(sheet.is_source(a));
+//! assert!(sheet.is_forced(b));
+//! assert!(sheet.forced_cells().any(|id| id == b));
+//! assert!(sheet.is_relationship_forced(rel));
+//! assert!(sheet.forced_relationships().any(|id| id == rel));
+//! assert_eq!(sheet.conditionals().collect::<Vec<_>>(), [conditional]);
+//! assert_eq!(sheet.out_cells().collect::<Vec<_>>(), [out]);
+//! assert_eq!(sheet.conditional_match_cells(conditional), Some([mode].as_slice()));
+//! assert_eq!(sheet.conditional_branch_count(conditional), Some(1));
+//! assert_eq!(sheet.conditional_branch_relationships(conditional, 0), Some([rel].as_slice()));
+//! assert_eq!(sheet.conditional_default_relationships(conditional), Some([].as_slice()));
+//! assert_eq!(sheet.conditional_active_branch(conditional)?, Some(0));
+//! assert_eq!(sheet.filter_args(a), Some([limit].as_slice()));
+//! assert_eq!(sheet.filter_dependents(limit), [a]);
+//! assert!(matches!(sheet.filter_kind(a), Some(adam_rs::FilterKind::Range { .. })));
+//! assert_eq!(sheet.filter_range::<i32>(a), Some((0, 100)));
+//! assert!(sheet.filter_violation(a).is_none());
+//! assert_eq!(sheet.filter_violated_cells().count(), 0);
+//! assert!(sheet.filter_violation_cells().is_empty());
+//! assert_eq!(sheet.cell_requirements(b), Some([check].as_slice()));
+//! assert_eq!(sheet.requirement_cell(check), Some(b));
+//! assert_eq!(sheet.requirement_inputs(check), Some([b].as_slice()));
+//! assert!(sheet.cell_requirements_valid(b));
+//! assert_eq!(sheet.violated_requirements(b).count(), 0);
+//! assert!(sheet.contributing_cells(b).contains(&limit));
+//! assert!(sheet.requirement_contributing_cells(check).contains(&a));
+//! assert!(sheet.requirement_relevant_cells().contains(&a));
+//! assert!(sheet.requirement_violation_cells().is_empty());
+//! assert!(sheet.changed().any(|id| id == out));
+//! sheet.clear_changed();
+//! assert_eq!(sheet.changed().count(), 0);
+//! # Ok::<(), adam_rs::Error>(())
+//! ```
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -138,6 +209,11 @@ struct PlanProvenance {
 }
 
 /// Transactional propagation state whose writes remain private until commit.
+///
+/// Staged derived values override staged sources, which override live sources.
+/// Each replaced source receives a fresh version; absent sources have version zero.
+/// `changed` contains each written cell exactly once and has the same members as
+/// `changed_set`. Dropping an uncommitted stage discards every owned result.
 #[derive(Default)]
 struct PropagationStage {
     sources: HashMap<CellId, Box<dyn Any>>,
@@ -192,7 +268,7 @@ impl PropagationStage {
         self.sources.insert(id, value);
     }
 
-    /// Applies a staged write using the same shadow/non-shadow rule as `execute_plan`.
+    /// Shadows the source for derived writes or replaces it for ordinary writes.
     fn write(&mut self, id: CellId, value: Box<dyn Any>, shadow: bool) {
         if shadow {
             self.derived.insert(id, value);
@@ -222,6 +298,9 @@ impl PropagationStage {
 
 impl Sheet {
     /// Creates an empty sheet with no cells or relationships.
+    ///
+    /// # Examples
+    /// See [`Sheet`]'s example.
     pub fn new() -> Self {
         Sheet {
             cells: SlotMap::with_key(),
@@ -256,6 +335,9 @@ impl Sheet {
     ///
     /// - Complexity: Amortized O(1), plus O(A) when invalidation releases the final
     ///   owners of prepared artifacts of total size A.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn add_cell<T: Any + PartialEq + 'static>(&mut self, value: T) -> CellId {
         self.invalidate_prepared_plans();
         self.next_strength += 1;
@@ -279,6 +361,9 @@ impl Sheet {
     ///
     /// - Complexity: Amortized O(1), plus O(A) when invalidation releases the final
     ///   owners of prepared artifacts of total size A.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn add_source<T: Any + PartialEq + 'static>(&mut self, value: T) -> CellId {
         let id = self.add_cell(value);
         self.cells[id].kind = CellKind::Source;
@@ -304,6 +389,9 @@ impl Sheet {
     /// Returns `id`'s fixed cell kind.
     ///
     /// Returns `None` if `id` is not a live cell in this sheet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn cell_kind(&self, id: CellId) -> Option<CellKind> {
         self.cells.get(id).map(|c| c.kind)
     }
@@ -330,7 +418,7 @@ impl Sheet {
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
-    /// - `Error::InvalidCellKind` — a method's output cell is `Source`-kind.
+    /// - `Error::InvalidCellKind` — a method's output cell is `Source`- or `Out`-kind.
     ///
     /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
     /// not by this mutator.
@@ -339,6 +427,9 @@ impl Sheet {
     ///   maximum number of cells per method, due to pairwise output-set comparison,
     ///   plus O(A) when invalidation releases the final owners of prepared artifacts
     ///   of total size A.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod { sites: vec![] });
@@ -373,7 +464,7 @@ impl Sheet {
 
             for (&cell_id, &declared) in method.outputs.iter().zip(method.output_types.iter()) {
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
-                if cell.kind == CellKind::Source {
+                if cell.kind != CellKind::Cell {
                     return Err(Error::InvalidCellKind {
                         sites: vec![ErrorSite::MethodIndex(idx), ErrorSite::Cell(cell_id)],
                     });
@@ -464,12 +555,9 @@ impl Sheet {
         }
 
         self.invalidate_prepared_plans();
-        let rel_id = self.relationships.insert(RelationshipData {
-            methods,
-            adj: adj.clone(),
-        });
+        let rel_id = self.relationships.insert(RelationshipData { methods, adj });
 
-        for cell_id in adj {
+        for &cell_id in &self.relationships[rel_id].adj {
             if let Some(cell) = self.cells.get_mut(cell_id)
                 && !cell.adj.contains(&rel_id)
             {
@@ -499,13 +587,17 @@ impl Sheet {
     /// - `Error::InvalidConditional` — the match subject's output type does not match `T`;
     ///   a referenced relationship does not exist; a relationship already appears in
     ///   another conditional branch; or a branch has no keys.
+    /// - `Error::InvalidCellKind` — a referenced relationship is a fixed `Out` writer.
     ///
     /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
     /// not by this mutator.
     ///
-    /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R =
-    ///   relationships per branch, plus O(A) when invalidation releases the final
-    ///   owners of prepared artifacts of total size A.
+    /// - Complexity: O(I + K + E) time and O(K + R) space for match inputs I,
+    ///   branch keys K, referenced relationships R and their total method-output
+    ///   edges E, plus O(A) when invalidation releases final prepared artifacts of size A.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn add_conditional<T: Any + PartialEq + 'static>(
         &mut self,
         source: MatchExpr,
@@ -546,8 +638,19 @@ impl Sheet {
             .collect();
 
         for &rel_id in &all_rels {
-            if !self.relationships.contains_key(rel_id) {
-                return Err(Error::InvalidConditional { sites: vec![] });
+            let relationship = self
+                .relationships
+                .get(rel_id)
+                .ok_or(Error::InvalidConditional { sites: vec![] })?;
+            if let Some(output) = relationship
+                .methods
+                .iter()
+                .flat_map(|method| &method.outputs)
+                .find(|&&id| self.cells[id].kind == CellKind::Out)
+            {
+                return Err(Error::InvalidCellKind {
+                    sites: vec![ErrorSite::Relationship(rel_id), ErrorSite::Cell(*output)],
+                });
             }
             if self.conditional_relationships.contains(&rel_id) {
                 return Err(Error::InvalidConditional {
@@ -605,6 +708,8 @@ impl Sheet {
     /// Returns `true` if `id` is already claimed as some existing method's output —
     /// i.e. it cannot legally become an `out` cell's writer target, since that would
     /// leave two producers claiming the same cell.
+    ///
+    /// - Complexity: O(E) for all registered method-output edges E.
     fn cell_has_prior_use(&self, id: CellId) -> bool {
         self.relationships
             .values()
@@ -796,6 +901,9 @@ impl Sheet {
     /// - Complexity: O(a) where a is the number of filter argument cells, plus O(A)
     ///   when invalidation releases the final owners of prepared artifacts of total
     ///   size A.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
         let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
         if self.cells[cell].filter.is_some() {
@@ -830,6 +938,9 @@ impl Sheet {
     /// Returns the argument cells of `id`'s filter, in declaration order.
     ///
     /// Returns `None` if `id` is not a live cell in this sheet, or has no filter.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn filter_args(&self, id: CellId) -> Option<&[CellId]> {
         self.cells
             .get(id)?
@@ -842,6 +953,9 @@ impl Sheet {
     /// arguments — the reverse of a filter's own argument list ([`Sheet::filter_args`]).
     ///
     /// - Postcondition: empty if no live cell's filter references `id`.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn filter_dependents(&self, id: CellId) -> &[CellId] {
         self.filter_dependents
             .get(&id)
@@ -852,6 +966,9 @@ impl Sheet {
     /// Returns the kind of validation/derivation `id`'s filter performs, if it has one.
     ///
     /// Returns `None` if `id` is not a live cell in this sheet, or has no filter.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn filter_kind(&self, id: CellId) -> Option<&FilterKind> {
         self.cells.get(id)?.filter.as_ref().map(|f| &f.kind)
     }
@@ -863,13 +980,17 @@ impl Sheet {
     /// [`Sheet::add_filter`] already uses, then calls the filter's `bounds` function.
     ///
     /// Returns `None` if `id` is not a live cell in this sheet, has no filter, its filter's
-    /// kind isn't [`FilterKind::Range`], or the range expression fails to evaluate against
+    /// kind isn't [`FilterKind::Range`], its bounds have a different type from `T`,
+    /// or the range expression fails to evaluate against
     /// the filter's current argument values (e.g. a fallible arithmetic op in a range
     /// endpoint) — the same degraded-to-`None` outcome as any other reason no live bounds
     /// are available right now.
     ///
     /// - Complexity: O(a) where a is the number of the filter's argument cells.
-    pub fn filter_range<T: Any + Clone>(&self, id: CellId) -> Option<(T, T)> {
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
+    pub fn filter_range<T: Any>(&self, id: CellId) -> Option<(T, T)> {
         let filter = self.cells.get(id)?.filter.as_ref()?;
         let FilterKind::Range { bounds } = &filter.kind else {
             return None;
@@ -889,6 +1010,9 @@ impl Sheet {
     /// - Postcondition: `None` if `id` has no filter, `id`'s filter's last-checked
     ///   value held, or no full `propagate()` has run since `id` was last a plain
     ///   external write.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn filter_violation(&self, id: CellId) -> Option<&FilterViolation> {
         self.last_filter_violations.get(&id)
     }
@@ -897,6 +1021,9 @@ impl Sheet {
     /// `propagate()` call.
     ///
     /// - Complexity: O(n) where n is the number of currently-violated filters.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn filter_violated_cells(&self) -> impl Iterator<Item = CellId> + '_ {
         self.last_filter_violations.keys().copied()
     }
@@ -910,6 +1037,9 @@ impl Sheet {
     /// - Postcondition: empty if no filter is currently violated.
     /// - Complexity: O(sum of `contributing_cells` cost over every violated filter and
     ///   its argument cells).
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn filter_violation_cells(&self) -> HashSet<CellId> {
         let mut result = HashSet::new();
         for cell_id in self.filter_violated_cells() {
@@ -926,6 +1056,9 @@ impl Sheet {
     /// Returns the requirements attached to `id`, in attachment order.
     ///
     /// Returns `None` if `id` is not a live cell in this sheet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn cell_requirements(&self, id: CellId) -> Option<&[RequirementId]> {
         self.cells.get(id).map(|c| c.requirements.as_slice())
     }
@@ -933,6 +1066,9 @@ impl Sheet {
     /// Returns the cell requirement `id` is attached to.
     ///
     /// Returns `None` if `id` is not a live requirement in this sheet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn requirement_cell(&self, id: RequirementId) -> Option<CellId> {
         self.requirements.get(id).map(|c| c.cell)
     }
@@ -940,6 +1076,9 @@ impl Sheet {
     /// Returns the cells requirement `id` reads.
     ///
     /// Returns `None` if `id` is not a live requirement in this sheet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn requirement_inputs(&self, id: RequirementId) -> Option<&[CellId]> {
         self.requirements.get(id).map(|c| c.inputs.as_slice())
     }
@@ -950,6 +1089,9 @@ impl Sheet {
     /// Returns `false` if no propagation has run yet. Also returns `true` for an
     /// `id` that is not a live cell in this sheet, since no requirement can have
     /// failed for a cell that doesn't exist.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn cell_requirements_valid(&self, id: CellId) -> bool {
         if self.last_plan.is_none() {
             return false;
@@ -962,6 +1104,9 @@ impl Sheet {
     ///
     /// - Postcondition: empty if `id`'s requirements all held, `id` is not a live
     ///   cell in this sheet, or no propagation has run yet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn violated_requirements(&self, id: CellId) -> impl Iterator<Item = RequirementId> + '_ {
         self.last_requirement_violations
             .get(&id)
@@ -979,11 +1124,10 @@ impl Sheet {
     /// a different method of that same relationship, making any of its other cells the
     /// source instead. So every method (of every active relationship touching `current`)
     /// with `current` among its outputs contributes its inputs to the walk, not only the
-    /// currently-selected one. [`Sheet::is_forced`] already answers "could `current` itself
-    /// be left as a free source under some strength" precisely, so `current` is added
-    /// directly whenever it is not forced. A self-referencing input (present in both a
-    /// method's inputs and its outputs) is treated as one of its own roots directly, since
-    /// it is read at its pre-execution value rather than derived further.
+    /// currently-selected one. A cell outside [`Sheet::is_forced`]'s pure-output
+    /// classification contributes its own stored aspiration. This includes a
+    /// self-referencing input even when a mandatory writer prevents the cell from
+    /// remaining unclaimed: its seed can still depend on that aspiration.
     ///
     /// Every visited cell is also checked against every conditional in the sheet: if any of
     /// that conditional's branches (or its default) has a method whose outputs include the
@@ -994,14 +1138,48 @@ impl Sheet {
     /// absence is itself a fact controlled by the match cell, not an indication that the
     /// match cell is irrelevant).
     ///
-    /// - Postcondition: returns `{id}` if no propagation has run yet, or if `id` is not
-    ///   forced and no active or conditional relationship could produce it.
+    /// A cell that can remain a source also contributes its dynamic filter arguments:
+    /// the filter determines its effective value. Filters on outputs claimed in every
+    /// acyclic assignment, including self-referencing outputs, only diagnose values
+    /// and do not add value dependencies.
     ///
-    /// - Complexity: O(N · (R·M + B)) where N is the number of cells reachable from `id`
+    /// Eligibility searches use the candidate's complete input/output relationship
+    /// component within the last successful active set. That completed assignment
+    /// witnesses feasibility of the independent components. Registered methods are
+    /// never replaced or removed, so writes, appended structure and failed
+    /// propagation preserve this witness; newly registered relationships stay outside
+    /// these assignment searches until successful propagation publishes another
+    /// active set. Filter arguments and potential conditional contributors still
+    /// come from the current registered graph.
+    ///
+    /// - Postcondition: returns `{id}` if no propagation has run yet, or if `id` is not
+    ///   forced and no active or conditional relationship or dynamic filter could produce it.
+    ///
+    /// - Complexity: O(N · (R·M·K² + B·M·K)) where N is the number of cells reachable from `id`
     ///   (including conditional match cells), R is the number of relationships adjacent to
-    ///   a visited cell, M is the maximum number of methods per relationship, and B is the
-    ///   total number of branch/default relationships across all conditionals.
+    ///   a visited cell, M is the maximum number of methods per relationship, K is
+    ///   the maximum input/output count per method, and B is the
+    ///   total number of branch/default relationships across all conditionals, plus the
+    ///   number of traversed filter argument edges. Each visited non-forced filtered
+    ///   cell with dynamic arguments that is not currently a source adds at most one
+    ///   exact eligibility search after expected linear traversal of that candidate's
+    ///   component adjacency (including inactive adjacency entries). Each search takes
+    ///   expected O(T + U · (1 + A · K²)) time, where T is relationship storage slots
+    ///   scanned, A is active relationships in that component, and U counts that
+    ///   search's recursive calls and examined method candidates. U is bounded by
+    ///   O(1 + M + … + M^A), including partial checks when M = 1; disconnected
+    ///   components do not multiply its search tree. Debug builds add O(G) validation
+    ///   during each component discovery, where G is prepared active relationships.
+    ///   Traversal storage is O(N + E) for visited cells and queued dependency edges E,
+    ///   plus visited component cells/relationships and O(1 + A · (1 + K)) auxiliary
+    ///   storage for one eligibility search. Repeated queries do not cache searches.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn contributing_cells(&self, id: CellId) -> HashSet<CellId> {
+        if self.last_plan.is_none() {
+            return HashSet::from([id]);
+        }
         let mut result = HashSet::new();
         let mut visited: HashSet<CellId> = HashSet::new();
         let mut stack = vec![id];
@@ -1016,12 +1194,27 @@ impl Sheet {
 
             if !self.is_forced(current) {
                 result.insert(current);
+                if let Some(prepared) = &self.last_plan
+                    && let Some(args) = self.filter_args(current)
+                    && !args.is_empty()
+                    && (self.is_source(current) || {
+                        let component = crate::planner::active_relationship_component(
+                            &self.cells,
+                            &self.relationships,
+                            &prepared.active,
+                            current,
+                        );
+                        crate::planner::can_be_source(&self.relationships, &component, current)
+                    })
+                {
+                    stack.extend(args.iter().copied());
+                }
             }
 
-            let Some(adj) = self.cells.get(current).map(|c| c.adj.clone()) else {
+            let Some(cell) = self.cells.get(current) else {
                 continue;
             };
-            for rel_id in adj {
+            for &rel_id in &cell.adj {
                 if !self.is_relationship_active(rel_id) {
                     continue;
                 }
@@ -1080,8 +1273,11 @@ impl Sheet {
     ///
     /// Returns an empty set if `id` is not a live requirement in this sheet.
     ///
-    /// - Complexity: O(K·N) where K is the requirement's input count and N is the size of
-    ///   each input's contributing set.
+    /// - Complexity: The sum of [`Self::contributing_cells`] costs over the requirement's
+    ///   inputs, with O(N) space for their union of N root cells.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn requirement_contributing_cells(&self, id: RequirementId) -> HashSet<CellId> {
         let Some(requirement) = self.requirements.get(id) else {
             return HashSet::new();
@@ -1100,6 +1296,9 @@ impl Sheet {
     /// - Postcondition: empty if no cell in the sheet has any requirements.
     /// - Complexity: O(sum of `contributing_cells` cost over every cell with
     ///   requirements).
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn requirement_relevant_cells(&self) -> HashSet<CellId> {
         self.cells
             .iter()
@@ -1116,6 +1315,9 @@ impl Sheet {
     ///   fails.
     /// - Complexity: O(sum of `requirement_contributing_cells` cost over every
     ///   violated requirement).
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn requirement_violation_cells(&self) -> HashSet<CellId> {
         self.cells
             .keys()
@@ -1140,6 +1342,9 @@ impl Sheet {
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
     /// - `Error::InvalidCellKind` — `id` is `Out`-kind.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.cells.get(id).is_some_and(|c| c.kind == CellKind::Out) {
             return Err(Error::InvalidCellKind { sites: vec![] });
@@ -1154,6 +1359,7 @@ impl Sheet {
         }
 
         self.invalidate_after_write(id);
+        self.last_filter_violations.remove(&id);
         self.next_strength += 1;
         let cell = &mut self.cells[id];
         cell.strength = self.next_strength | (1u64 << 63);
@@ -1169,6 +1375,9 @@ impl Sheet {
     ///
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn read<T: Any + 'static>(&self, id: CellId) -> Result<&T, Error> {
         let cell = self.cells.get(id).ok_or(Error::InvalidId)?;
         if cell.type_id != TypeId::of::<T>() {
@@ -1228,6 +1437,9 @@ impl Sheet {
     /// aborts before committing any writes.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn changed(&self) -> impl Iterator<Item = CellId> + '_ {
         self.changed_cells.iter().copied()
     }
@@ -1237,6 +1449,9 @@ impl Sheet {
     /// Call after processing the results of `propagate()`.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn clear_changed(&mut self) {
         for id in std::mem::take(&mut self.changed_cells) {
             if let Some(cell) = self.cells.get_mut(id) {
@@ -1295,6 +1510,9 @@ impl Sheet {
     /// Iterates all live cell IDs in the sheet.
     ///
     /// - Complexity: O(n) where n is the number of cells.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn cells(&self) -> impl Iterator<Item = CellId> + '_ {
         self.cells.keys()
     }
@@ -1302,6 +1520,9 @@ impl Sheet {
     /// Iterates all live relationship IDs in the sheet.
     ///
     /// - Complexity: O(n) where n is the number of relationships.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn relationships(&self) -> impl Iterator<Item = RelationshipId> + '_ {
         self.relationships.keys()
     }
@@ -1311,6 +1532,9 @@ impl Sheet {
     /// Returns `None` if `id` is not a live cell in this sheet.
     ///
     /// - Complexity: O(1).
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn cell_adj(&self, id: CellId) -> Option<&[RelationshipId]> {
         self.cells.get(id).map(|c| c.adj.as_slice())
     }
@@ -1320,6 +1544,9 @@ impl Sheet {
     /// Returns `None` if `id` is not a live relationship in this sheet.
     ///
     /// - Complexity: O(1).
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn relationship_adj(&self, id: RelationshipId) -> Option<&[CellId]> {
         self.relationships.get(id).map(|r| r.adj.as_slice())
     }
@@ -1330,6 +1557,8 @@ impl Sheet {
     ///
     /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
     ///   returned an error; its site identifies the executing conditional.
+    ///
+    /// - Complexity: O(I) time and space for expression inputs I, plus callback cost.
     fn evaluate_match_source(
         &self,
         id: ConditionalId,
@@ -1362,6 +1591,8 @@ impl Sheet {
     ///
     /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
     ///   returned an error; its site identifies the executing conditional.
+    ///
+    /// - Complexity: O(I) time and space for expression inputs I, plus callback cost.
     fn evaluate_match_source_staged<'a>(
         &'a self,
         id: ConditionalId,
@@ -1481,21 +1712,18 @@ impl Sheet {
                             )
                         })
                         .collect();
-                    let step_provenance = StepProvenance {
-                        input_producers,
-                        seed_inputs,
-                        source_producer: None,
-                        output_classes: output_classes.clone(),
-                    };
-                    for &(output, _) in &output_classes {
-                        effective_producers.insert(output, step);
-                    }
                     for &(output, classification) in &output_classes {
+                        effective_producers.insert(output, step);
                         if classification == OutputClassification::Source {
                             source_producers.insert(output, step);
                         }
                     }
-                    step_provenance
+                    StepProvenance {
+                        input_producers,
+                        seed_inputs,
+                        source_producer: None,
+                        output_classes,
+                    }
                 }
                 PlanStep::FilterReclamp(cell) => {
                     let filter = self.cells[cell]
@@ -1527,6 +1755,7 @@ impl Sheet {
     ///
     /// - Postcondition: `true` implies the selected method/filter, its input producers,
     ///   seed inputs, source producer, and output classifications all match.
+    /// - Complexity: O(I + O) for the step's input and output provenance lengths.
     fn prerequisite_step_is_compatible(
         &self,
         pre_plan: &PlanProvenance,
@@ -1612,8 +1841,11 @@ impl Sheet {
     /// A method or filter step already evaluated by the conditional pre-plan reuses
     /// its staged result when the general plan contains the same compatible step.
     /// This is an internal optimization, not a callback invocation guarantee.
-    /// Filter failures remain non-fatal and leave the staged cell untouched,
-    /// matching `execute_plan`.
+    /// Filter failures remain non-fatal and leave the staged cell untouched.
+    ///
+    /// - Precondition: each step belongs to this graph and has matching plan provenance.
+    /// - Complexity: O(s × k²) structural work for s steps with at most k input/output
+    ///   cells, plus callback costs and storage for staged output values.
     ///
     /// # Errors
     ///
@@ -1643,8 +1875,8 @@ impl Sheet {
                         }
                         continue;
                     }
-                    let (outputs, output_ids, shadow_outputs) = {
-                        let method = &self.relationships[rel_id].methods[method_idx];
+                    let method = &self.relationships[rel_id].methods[method_idx];
+                    let outputs = {
                         let inputs: Vec<&dyn Any> = method
                             .inputs
                             .iter()
@@ -1659,34 +1891,24 @@ impl Sheet {
                                 }
                             })
                             .collect();
-                        let outputs =
-                            (method.function)(&inputs).map_err(|error| Error::MethodFailed {
-                                error,
-                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
-                            })?;
-                        let output_ids = method.outputs.clone();
-                        let shadow_outputs: Vec<bool> = method
-                            .outputs
-                            .iter()
-                            .map(|o| method.inputs.contains(o) || forced_outputs.contains(o))
-                            .collect();
-                        (outputs, output_ids, shadow_outputs)
+                        (method.function)(&inputs).map_err(|error| Error::MethodFailed {
+                            error,
+                            sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                        })?
                     };
 
-                    if outputs.len() != output_ids.len() {
+                    if outputs.len() != method.outputs.len() {
                         return Err(Error::MethodFailed {
                             error: anyhow::anyhow!(
                                 "method produced {} outputs but relationship expects {}",
                                 outputs.len(),
-                                output_ids.len()
+                                method.outputs.len()
                             ),
                             sites: vec![ErrorSite::Method(rel_id, method_idx)],
                         });
                     }
 
-                    for ((cell_id, new_value), shadow) in
-                        output_ids.into_iter().zip(outputs).zip(shadow_outputs)
-                    {
+                    for (&cell_id, new_value) in method.outputs.iter().zip(outputs) {
                         let found = new_value.as_ref().type_id();
                         let cell = &self.cells[cell_id];
                         if found != cell.type_id {
@@ -1696,7 +1918,11 @@ impl Sheet {
                                 sites: vec![ErrorSite::Method(rel_id, method_idx)],
                             });
                         }
-                        stage.write(cell_id, new_value, shadow);
+                        stage.write(
+                            cell_id,
+                            new_value,
+                            method.inputs.contains(&cell_id) || forced_outputs.contains(&cell_id),
+                        );
                     }
                     stage.executed_methods.insert((rel_id, method_idx));
                     stage
@@ -1926,167 +2152,15 @@ impl Sheet {
         result
     }
 
-    /// Executes `execution_order` without invoking the planner.
-    ///
-    /// A `PlanStep::FilterReclamp(id)` step re-evaluates `id`'s filter against `id`'s own
-    /// current `source` value (never a possibly-shadowed `derived` — the same
-    /// self-referencing-input rule a `PlanStep::Method` step's self-referencing inputs
-    /// follow) and its filter arguments' current effective values, writing the result
-    /// into `id`'s `derived` unconditionally — `source` is never touched by this step,
-    /// exactly as it's never touched by any other self-referencing method's output. A
-    /// `PlanStep::Method` step's outputs follow the existing shadow/non-shadow rule,
-    /// unchanged; a non-shadow output also clears any leftover `derived` from an earlier
-    /// step in this same call (e.g. Phase 1 shadowing a cell that a later Phase 3 step
-    /// then claims as a plain output), so `effective()` reflects the fresh `source` write
-    /// rather than a stale override. A reclamp whose filter returns `Err`, or a value of
-    /// the wrong type, is pushed into `filter_violations` instead of aborting; the cell's
-    /// stored value is left untouched in that case (its `derived` stays unset, so
-    /// `read()` falls back to `source`).
-    ///
-    /// A `PlanStep::Method` step's self-referencing input reads its precomputed `seeds`
-    /// value (see [`crate::planner::evaluate_seeds`]) if present, else its own `source` —
-    /// never a `derived` override from this same execution.
-    ///
-    /// # Errors
-    ///
-    /// - `Error::MethodFailed` — a `PlanStep::Method` step's function returned an error,
-    ///   or the method produced a different number of outputs than declared.
-    /// - `Error::TypeMismatch` — a `PlanStep::Method` step's output runtime type does
-    ///   not match the cell's registered type.
-    ///
-    /// - Complexity: O(R·K) where R is the number of entries and K is the max cells per method,
-    ///   plus per-method execution cost.
-    #[cfg(test)]
-    fn execute_plan(
-        &mut self,
-        execution_order: &[PlanStep],
-        seeds: &Seeds,
-        forced_outputs: &HashSet<CellId>,
-        filter_violations: &mut Vec<(CellId, FilterViolation)>,
-    ) -> Result<(), Error> {
-        for step in execution_order {
-            match *step {
-                PlanStep::Method(rel_id, method_idx) => {
-                    let (outputs, output_ids, shadow_outputs) = {
-                        let method = &self.relationships[rel_id].methods[method_idx];
-                        let inputs: Vec<&dyn Any> = method
-                            .inputs
-                            .iter()
-                            .map(|&id| {
-                                if method.outputs.contains(&id) {
-                                    // Self-referencing input: its precomputed seed, else
-                                    // its own source -- never a derived override from
-                                    // this same execution. See evaluate_seeds.
-                                    seeds
-                                        .get(&id)
-                                        .map(|value| value.as_ref())
-                                        .unwrap_or_else(|| self.cells[id].source.as_ref())
-                                } else {
-                                    self.cells[id].effective()
-                                }
-                            })
-                            .collect();
-                        let outputs =
-                            (method.function)(&inputs).map_err(|error| Error::MethodFailed {
-                                error,
-                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
-                            })?;
-                        let output_ids = method.outputs.clone();
-                        let shadow_outputs: Vec<bool> = method
-                            .outputs
-                            .iter()
-                            .map(|o| method.inputs.contains(o) || forced_outputs.contains(o))
-                            .collect();
-                        (outputs, output_ids, shadow_outputs)
-                    };
-
-                    if outputs.len() != output_ids.len() {
-                        return Err(Error::MethodFailed {
-                            error: anyhow::anyhow!(
-                                "method produced {} outputs but relationship expects {}",
-                                outputs.len(),
-                                output_ids.len()
-                            ),
-                            sites: vec![ErrorSite::Method(rel_id, method_idx)],
-                        });
-                    }
-
-                    for ((cell_id, new_value), shadow) in
-                        output_ids.into_iter().zip(outputs).zip(shadow_outputs)
-                    {
-                        let cell = &mut self.cells[cell_id];
-                        let found = new_value.as_ref().type_id();
-                        if found != cell.type_id {
-                            return Err(Error::TypeMismatch {
-                                expected: cell.type_id,
-                                found,
-                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
-                            });
-                        }
-                        if shadow {
-                            cell.derived = Some(new_value);
-                        } else {
-                            cell.source = new_value;
-                            cell.derived = None;
-                        }
-                        if !cell.changed {
-                            cell.changed = true;
-                            self.changed_cells.push(cell_id);
-                        }
-                    }
-                }
-                PlanStep::FilterReclamp(id) => {
-                    let filter = self.cells[id]
-                        .filter
-                        .as_ref()
-                        .expect("plan() only emits FilterReclamp for a filtered cell");
-                    let args: Vec<&dyn Any> = filter
-                        .args
-                        .iter()
-                        .map(|&a| self.cells[a].effective())
-                        .collect();
-                    // Self-referencing input: always `source`, never a possibly-shadowed
-                    // `derived` — same rule as any other self-referencing method (see
-                    // the `PlanStep::Method` arm above, and the 2026-08-02 shadow-state
-                    // design). This is what keeps `source` provably untouched by the
-                    // filter across any number of rounds.
-                    let current = self.cells[id].source.as_ref();
-                    match (filter.function)(current, &args) {
-                        Ok(v) => {
-                            let cell_type = self.cells[id].type_id;
-                            if v.as_ref().type_id() != cell_type {
-                                filter_violations.push((
-                                    id,
-                                    FilterViolation::Failed(anyhow::anyhow!(
-                                        "filter returned a value of a different type than \
-                                         the cell"
-                                    )),
-                                ));
-                            } else {
-                                // Unconditional write, no equality check — matches every
-                                // other shadowed output's "no equality check" convention
-                                // (2026-08-02 design). The filter's Ok output is
-                                // authoritative the same way any method's output is.
-                                let cell = &mut self.cells[id];
-                                cell.derived = Some(v);
-                                if !cell.changed {
-                                    cell.changed = true;
-                                    self.changed_cells.push(id);
-                                }
-                            }
-                        }
-                        Err(e) => filter_violations.push((id, FilterViolation::Failed(e))),
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Returns the index of the method selected for `rel` in the last successful propagation.
     ///
     /// Returns `None` if no propagation has run yet, `rel` is not in the cached plan,
     /// or `rel` was added after the last `propagate()` call.
+    ///
+    /// - Complexity: O(S) worst-case time for S completed execution steps; O(1) space.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn selected_method(&self, rel: RelationshipId) -> Option<usize> {
         self.last_plan
             .as_ref()?
@@ -2102,6 +2176,9 @@ impl Sheet {
     /// Returns the input cells of method `idx` in relationship `rel`.
     ///
     /// Returns `None` if `rel` is not a live relationship or `idx` is out of bounds.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn method_inputs(&self, rel: RelationshipId, idx: usize) -> Option<&[CellId]> {
         self.relationships
             .get(rel)?
@@ -2113,6 +2190,9 @@ impl Sheet {
     /// Returns the output cells of method `idx` in relationship `rel`.
     ///
     /// Returns `None` if `rel` is not a live relationship or `idx` is out of bounds.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn method_outputs(&self, rel: RelationshipId, idx: usize) -> Option<&[CellId]> {
         self.relationships
             .get(rel)?
@@ -2129,6 +2209,9 @@ impl Sheet {
     /// Cells absent from the completed plan, including newly added cells, return `true`.
     ///
     /// - Complexity: Expected O(1).
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn is_source(&self, id: CellId) -> bool {
         let Some(plan) = &self.last_plan else {
             return false;
@@ -2136,14 +2219,21 @@ impl Sheet {
         !plan.certificate.contains_cell(id) || plan.certificate.is_released(id)
     }
 
-    /// Returns `true` if `id` can never be a source, as of the last successful
-    /// `propagate()` call.
+    /// Returns whether `id` belongs to the last successful plan's forced pure-output set.
     ///
-    /// Some active relationship's method structure guarantees the cell is always
-    /// produced by a method, regardless of strength — writing to it has no lasting
-    /// effect once `propagate()` runs again. Useful for disabling input fields in a UI.
+    /// The planner intersects pure outputs across viable methods and eliminates
+    /// alternatives that conflict with another relationship's forced outputs until
+    /// the classification stabilizes. A forced pure output's producer does not read
+    /// that cell as a self-referencing input.
+    ///
+    /// This does not decide whether some assignment can leave the cell unclaimed.
+    /// A mandatory self-referencing writer claims its output exclusively but remains
+    /// outside this classification; its editable source aspiration can affect its seed.
     ///
     /// Returns `false` if no propagation has run yet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn is_forced(&self, id: CellId) -> bool {
         self.last_plan
             .as_ref()
@@ -2154,6 +2244,9 @@ impl Sheet {
     /// successful `propagate()` call.
     ///
     /// - Complexity: O(n) where n is the number of forced cells.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn forced_cells(&self) -> impl Iterator<Item = CellId> + '_ {
         self.last_plan
             .iter()
@@ -2165,6 +2258,9 @@ impl Sheet {
     /// relationship, regardless of cell strength.
     ///
     /// Returns `false` if no propagation has run yet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn is_relationship_forced(&self, id: RelationshipId) -> bool {
         self.last_plan
             .as_ref()
@@ -2175,6 +2271,9 @@ impl Sheet {
     /// as of the last successful `propagate()` call.
     ///
     /// - Complexity: O(n) where n is the number of forced relationships.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn forced_relationships(&self) -> impl Iterator<Item = RelationshipId> + '_ {
         self.last_plan
             .iter()
@@ -2184,6 +2283,9 @@ impl Sheet {
     /// Iterates all live conditional IDs in the sheet.
     ///
     /// - Complexity: O(n) where n is the number of conditionals.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn conditionals(&self) -> impl Iterator<Item = ConditionalId> + '_ {
         self.conditionals.keys()
     }
@@ -2191,6 +2293,9 @@ impl Sheet {
     /// Iterates all live `Out`-kind cells in the sheet.
     ///
     /// - Complexity: O(n) where n is the number of cells.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn out_cells(&self) -> impl Iterator<Item = CellId> + '_ {
         self.cells
             .iter()
@@ -2202,6 +2307,9 @@ impl Sheet {
     /// subject, or every input of a [`MatchExpr`] match subject.
     ///
     /// Returns `None` if `id` is not a live conditional in this sheet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn conditional_match_cells(&self, id: ConditionalId) -> Option<&[CellId]> {
         self.conditionals.get(id).map(|c| c.match_cells())
     }
@@ -2209,6 +2317,9 @@ impl Sheet {
     /// Returns the number of named branches in conditional `id`.
     ///
     /// Returns `None` if `id` is not a live conditional in this sheet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn conditional_branch_count(&self, id: ConditionalId) -> Option<usize> {
         self.conditionals.get(id).map(|c| c.branches.len())
     }
@@ -2216,6 +2327,9 @@ impl Sheet {
     /// Returns the relationship IDs for branch `branch` of conditional `id`.
     ///
     /// Returns `None` if `id` is not a live conditional, or `branch` is out of bounds.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn conditional_branch_relationships(
         &self,
         id: ConditionalId,
@@ -2232,6 +2346,9 @@ impl Sheet {
     ///
     /// These relationships are active when no named branch key matches the match cell.
     /// Returns `None` if `id` is not a live conditional in this sheet.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn conditional_default_relationships(
         &self,
         id: ConditionalId,
@@ -2253,6 +2370,9 @@ impl Sheet {
     ///   identify the failing execution.
     ///
     /// - Complexity: O(B·K) where B = branches, K = keys per branch.
+    ///
+    /// # Examples
+    /// See the [graph example](crate::sheet).
     pub fn conditional_active_branch(&self, id: ConditionalId) -> Result<Option<usize>, Error> {
         let Some(cond) = self.conditionals.get(id) else {
             return Ok(None);
@@ -2289,7 +2409,68 @@ mod tests {
     use std::any::{Any, TypeId};
     use std::collections::{HashMap, HashSet};
 
+    /// Starts an empty default sheet and reports registered concrete identities.
     #[test]
+    fn default_and_type_id_obey_empty_and_registration_contracts() {
+        let mut sheet = Sheet::default();
+        assert_eq!(sheet.cells().count(), 0);
+        assert_eq!(sheet.relationships().count(), 0);
+        assert_eq!(sheet.conditionals().count(), 0);
+        assert_eq!(sheet.changed().count(), 0);
+        assert_eq!(sheet.cell_type_id(CellId::default()), None);
+        let cell = sheet.add_cell(String::new());
+        assert_eq!(sheet.cell_type_id(cell), Some(TypeId::of::<String>()));
+    }
+
+    /// Discards all staged outputs when the last output fails type validation.
+    #[test]
+    fn late_output_type_failure_preserves_published_state_and_recovers() {
+        let mut sheet = Sheet::new();
+        let source = sheet.add_cell(5_i32);
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let relationship = sheet
+            .add_relationship(vec![Method::new(
+                vec![source],
+                vec![a, b],
+                vec![TypeId::of::<i32>()],
+                vec![TypeId::of::<i32>(); 2],
+                |args| {
+                    let value = *args[0].downcast_ref::<i32>().unwrap();
+                    let last: Box<dyn Any> = if value < 0 {
+                        Box::new(false)
+                    } else {
+                        Box::new(value)
+                    };
+                    Ok(vec![Box::new(value), last])
+                },
+            )])
+            .unwrap();
+        sheet.propagate().unwrap();
+        let strengths = [sheet.cells[a].strength, sheet.cells[b].strength];
+        let selected = sheet.selected_method(relationship);
+        sheet.write(source, -9_i32).unwrap();
+        assert!(matches!(sheet.propagate(), Err(Error::TypeMismatch { .. })));
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 5);
+        assert_eq!(
+            [sheet.cells[a].strength, sheet.cells[b].strength],
+            strengths
+        );
+        assert_eq!(sheet.selected_method(relationship), selected);
+        assert_eq!(sheet.changed().count(), 0);
+        sheet.write(source, 12_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 12);
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 12);
+        assert_eq!(
+            sheet.changed().collect::<HashSet<_>>(),
+            HashSet::from([a, b])
+        );
+    }
+
+    #[test]
+    /// Checks the ordinary kind assigned to a new editable cell.
     fn add_cell_has_cell_kind() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2297,6 +2478,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks the source-only kind assigned to a new source.
     fn add_source_has_source_kind() {
         let mut sheet = Sheet::new();
         let a = sheet.add_source(0_i32);
@@ -2304,6 +2486,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absence of kind metadata for an unknown cell.
     fn cell_kind_returns_none_for_invalid_id() {
         let mut sheet = Sheet::new();
         sheet.add_cell(0_i32); // occupies slotmap index 0 in `sheet`
@@ -2318,15 +2501,10 @@ mod tests {
     }
 
     #[test]
-    fn execute_plan_clears_a_stale_derived_override_on_a_later_plain_write() {
-        // Simulates two execute_plan calls within one propagate() (e.g. Phase 1 then
-        // Phase 3) without an intervening Phase 0 reset: the first shadows `x` via a
-        // self-referencing method; the second claims `x` as a plain (non-self,
-        // non-conditional) output of a different relationship. `x`'s stale `derived`
-        // override from the first call must not survive to mask the second call's
-        // fresh `source` write.
+    /// Checks that a later plain staged write replaces an earlier derived override.
+    fn execute_plan_staged_clears_a_stale_override_on_a_later_plain_write() {
         let mut sheet = Sheet::new();
-        let x = sheet.add_cell(1_i32);
+        let x = sheet.add_cell(8_i32);
         let y = sheet.add_cell(2_i32);
         let z = sheet.add_cell(10_i32);
         let self_ref = sheet
@@ -2336,35 +2514,65 @@ mod tests {
             ])
             .unwrap();
         let plain = sheet
-            .add_relationship(vec![Method::from_fn_1_1(z, x, |v: &i32| Ok(*v + 1))])
+            .add_relationship(vec![Method::from_fn_1_1(z, x, |v: &i32| {
+                v.checked_add(1).ok_or_else(|| anyhow::anyhow!("overflow"))
+            })])
             .unwrap();
 
         let no_seeds: Seeds = HashMap::new();
         let no_forced: HashSet<CellId> = HashSet::new();
+        let mut stage = super::PropagationStage::default();
+        let mut plan = crate::planner::plan(
+            &sheet.cells,
+            &sheet.relationships,
+            &HashSet::from([self_ref]),
+        )
+        .unwrap();
+        plan.execution_order = vec![PlanStep::Method(self_ref, 0)];
+        plan.forced_outputs.clear();
+        let provenance = sheet.plan_provenance(&plan);
         sheet
-            .execute_plan(
+            .execute_plan_staged(
                 &[PlanStep::Method(self_ref, 0)],
                 &no_seeds,
                 &no_forced,
+                &provenance,
+                &mut stage,
                 &mut Vec::new(),
             )
             .unwrap();
-        assert_eq!(*sheet.read::<i32>(x).unwrap(), 1);
+        assert_eq!(
+            stage.effective(&sheet.cells, x).downcast_ref::<i32>(),
+            Some(&2)
+        );
+        assert_eq!(*sheet.read::<i32>(x).unwrap(), 8);
 
         sheet.write(z, 41_i32).unwrap();
+        let mut plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &HashSet::from([plain]))
+                .unwrap();
+        plan.forced_outputs.clear();
+        let provenance = sheet.plan_provenance(&plan);
         sheet
-            .execute_plan(
+            .execute_plan_staged(
                 &[PlanStep::Method(plain, 0)],
                 &no_seeds,
                 &no_forced,
+                &provenance,
+                &mut stage,
                 &mut Vec::new(),
             )
             .unwrap();
-
+        assert_eq!(
+            stage.effective(&sheet.cells, x).downcast_ref::<i32>(),
+            Some(&42)
+        );
+        sheet.commit_stage(stage);
         assert_eq!(*sheet.read::<i32>(x).unwrap(), 42);
     }
 
     #[test]
+    /// Checks rejection of an unknown conditional match cell.
     fn add_conditional_returns_error_for_invalid_cell() {
         let mut sheet = Sheet::new();
         let result = sheet.add_conditional(
@@ -2376,6 +2584,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of branch keys with the wrong match type.
     fn add_conditional_returns_invalid_conditional_for_type_mismatch() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2386,6 +2595,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of an unknown conditional relationship.
     fn add_conditional_returns_invalid_conditional_for_missing_relationship() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2398,27 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_returns_dependency_cycle_for_multi_method_relationship_involving_match_cell() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        // Relationship has two methods and involves `a` (the match cell).
-        let rel = sheet
-            .add_relationship(vec![
-                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
-            ])
-            .unwrap();
-        sheet
-            .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
-            .unwrap();
-        assert!(matches!(
-            sheet.validate(),
-            Err(Error::DependencyCycle { .. })
-        ));
-    }
-
-    #[test]
+    /// Checks the match-cell site in a conditional dependency-cycle error.
     fn dependency_cycle_from_a_conditional_names_the_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2434,10 +2624,12 @@ mod tests {
             .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
             .unwrap();
         let err = sheet.validate().unwrap_err();
+        assert!(matches!(err, Error::DependencyCycle { .. }));
         assert!(err.sites().contains(&ErrorSite::Cell(a)));
     }
 
     #[test]
+    /// Checks rejection of a branch that can derive an upstream match dependency.
     fn add_conditional_returns_error_when_branch_rel_writes_a_cell_upstream_of_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2464,6 +2656,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks guard independence for every computed-match input.
     fn add_conditional_returns_error_when_branch_rel_writes_a_cell_upstream_of_either_expr_input() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2493,6 +2686,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks branch selection from a computed two-input subject.
     fn add_conditional_activates_branch_from_two_cell_expression() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(false);
@@ -2517,6 +2711,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of keys incompatible with the computed subject's output type.
     fn add_conditional_returns_invalid_conditional_for_expr_output_type_mismatch() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2528,6 +2723,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of an unknown computed-subject input.
     fn add_conditional_returns_invalid_id_for_bad_expr_input_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2537,6 +2733,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks propagation of a computed subject's callback failure.
     fn propagate_surfaces_method_failed_from_a_failing_match_expression() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2551,6 +2748,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks acceptance of multi-method branches independent of the match cell.
     fn add_conditional_allows_multi_method_rel_not_involving_match_cell() {
         let mut sheet = Sheet::new();
         let mode = sheet.add_cell(0_i32);
@@ -2574,6 +2772,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of an explicit branch without keys.
     fn add_conditional_returns_invalid_conditional_for_empty_branch_keys() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2588,24 +2787,7 @@ mod tests {
     }
 
     #[test]
-    fn add_conditional_returns_invalid_conditional_for_duplicate_relationship_across_branches() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        let rel = sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-            .unwrap();
-        // Add rel to the first conditional.
-        sheet
-            .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
-            .unwrap();
-        // Try to add the same rel to a second conditional.
-        let result =
-            sheet.add_conditional(MatchExpr::cell(a), vec![(vec![1_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
-    }
-
-    #[test]
+    /// Checks duplicate conditional ownership rejection and its relationship site.
     fn invalid_conditional_duplicate_relationship_names_that_relationship() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2633,6 +2815,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks registration and lookup of a valid conditional identity.
     fn add_conditional_returns_id_for_valid_input() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2643,11 +2826,12 @@ mod tests {
         let cid = sheet
             .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
             .unwrap();
-        // ConditionalId must be a live key.
-        let _ = cid; // just check it compiles and succeeds
+        assert_eq!(sheet.conditionals().collect::<Vec<_>>(), vec![cid]);
+        assert_eq!(sheet.conditional_match_cells(cid), Some([a].as_slice()));
     }
 
     #[test]
+    /// Checks distinct identities for separate cell declarations.
     fn add_cell_returns_distinct_ids() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
@@ -2656,6 +2840,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of external writes to fixed Out cells.
     fn write_returns_invalid_cell_kind_for_an_output_cell() {
         let mut sheet = Sheet::new();
         let writer_input = sheet.add_cell(1_i32);
@@ -2673,6 +2858,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of method outputs targeting source-only cells.
     fn add_relationship_returns_invalid_cell_kind_when_a_source_cell_is_an_output() {
         let mut sheet = Sheet::new();
         let a = sheet.add_source(0_i32);
@@ -2686,6 +2872,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks method and cell sites for a rejected source-only output.
     fn invalid_cell_kind_names_the_method_and_the_source_output_cell() {
         let mut sheet = Sheet::new();
         let s = sheet.add_source(0_i32); // Source-kind cell
@@ -2699,6 +2886,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks acceptance of source-only cells as method inputs.
     fn add_relationship_allows_a_source_cell_as_an_input() {
         let mut sheet = Sheet::new();
         let a = sheet.add_source(5_i32);
@@ -2708,6 +2896,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks external editing of source-only cells.
     fn write_succeeds_on_a_source_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_source(0_i32);
@@ -2715,18 +2904,7 @@ mod tests {
     }
 
     #[test]
-    fn error_variant_is_invalid_cell_kind_not_terminal_cell() {
-        // Compile-time check that the rename landed; exercised for real once Task 3
-        // wires up the CellKind-based checks that actually return this variant.
-        let _err = Error::InvalidCellKind { sites: vec![] };
-    }
-
-    #[test]
-    fn error_has_invalid_requirement_variant() {
-        let _err = Error::InvalidRequirement;
-    }
-
-    #[test]
+    /// Checks immediate reads of a successfully written value.
     fn write_read_roundtrip() {
         let mut sheet = Sheet::new();
         let id = sheet.add_cell(42_i32);
@@ -2735,6 +2913,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks typed-write rejection for an incompatible value.
     fn write_wrong_type_returns_type_mismatch() {
         let mut sheet = Sheet::new();
         let id = sheet.add_cell(0_i32);
@@ -2745,6 +2924,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks typed-read rejection for an incompatible requested type.
     fn read_wrong_type_returns_type_mismatch() {
         let mut sheet = Sheet::new();
         let id = sheet.add_cell(0_i32);
@@ -2755,6 +2935,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks source/effective agreement without a derived override.
     fn source_matches_read_for_a_plain_unshadowed_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(3_i32);
@@ -2767,6 +2948,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks source lookup rejection for an unknown cell.
     fn source_returns_invalid_id_for_unknown_cell() {
         let sheet = Sheet::new();
         assert!(matches!(
@@ -2776,6 +2958,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks source lookup rejection for an incompatible requested type.
     fn source_wrong_type_returns_type_mismatch() {
         let mut sheet = Sheet::new();
         let id = sheet.add_cell(0_i32);
@@ -2786,6 +2969,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a relationship without methods.
     fn add_relationship_empty_methods_returns_invalid_method() {
         let mut sheet = Sheet::new();
         let result = sheet.add_relationship(vec![]);
@@ -2794,6 +2978,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a method signature inconsistent with registered cell types.
     fn add_relationship_type_mismatch_returns_error() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2809,6 +2994,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks the producing method's site for a runtime output-type mismatch.
     fn execute_plan_type_mismatch_reports_the_method_that_produced_it() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2839,6 +3025,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks the producing method's site for a callback failure.
     fn execute_plan_method_failed_reports_the_method_that_produced_it() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2856,6 +3043,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks evaluation of a constant-producing zero-input method.
     fn add_relationship_zero_input_method_defines_a_fixed_point() {
         // A method with no inputs is a valid degenerate case: it always produces the
         // same value, independent of every other cell in the sheet.
@@ -2872,6 +3060,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a method without outputs.
     fn add_relationship_empty_outputs_returns_invalid_method() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2891,6 +3080,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks acceptance of distinct output alternatives sharing one complete cell set.
     fn add_relationship_consistent_cell_sets_across_methods_succeeds() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2906,6 +3096,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of alternatives with different complete cell sets.
     fn add_relationship_inconsistent_cell_sets_across_methods_returns_mismatched_method_cells() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2924,22 +3115,7 @@ mod tests {
     }
 
     #[test]
-    fn add_relationship_distinct_output_sets_across_methods_succeeds() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        let c = sheet.add_cell(0_i32);
-        // Triangle relationship: every method has a distinct single-cell output set
-        // ({c}, {b}, {a}).
-        let result = sheet.add_relationship(vec![
-            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(x + y)),
-            Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(y - x)),
-            Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok(y - x)),
-        ]);
-        assert!(result.is_ok());
-    }
-
-    #[test]
+    /// Checks rejection of alternatives with identical output sets.
     fn add_relationship_duplicate_output_set_across_methods_returns_invalid_method_outputs() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2959,6 +3135,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of strictly nested alternative output sets.
     fn add_relationship_rejects_strictly_nested_method_outputs() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2987,6 +3164,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks acceptance of overlapping output alternatives without nesting.
     fn add_relationship_accepts_overlapping_non_nested_method_outputs() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3021,6 +3199,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks distinct identities for separate relationship declarations.
     fn add_relationship_returns_distinct_ids() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3036,6 +3215,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of inconsistent positional cell sets.
     fn add_relationship_mismatched_cells_returns_error() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3055,6 +3235,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of duplicate alternative output sets.
     fn add_relationship_duplicate_output_sets_across_methods_returns_error() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3073,6 +3254,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a repeated output identity within one method.
     fn add_relationship_duplicate_cell_within_own_outputs_returns_error() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3097,6 +3279,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks both method sites and the differing cell in a cell-set mismatch.
     fn mismatched_method_cells_names_both_methods_and_the_differing_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3116,6 +3299,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks both method sites and the shared cell in a duplicate-output error.
     fn duplicate_output_set_across_methods_names_both_methods_and_the_shared_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3134,6 +3318,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks the method and repeated-cell sites for duplicate positional outputs.
     fn duplicate_cell_within_own_outputs_names_the_method_and_the_repeated_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3158,6 +3343,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks deduplication of diagnostic cell sites for repeated outputs.
     fn duplicate_cell_repeated_three_times_reports_cell_once() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3190,12 +3376,14 @@ mod tests {
     }
 
     #[test]
+    /// Checks an empty changed set before propagation.
     fn changed_is_empty_before_propagate() {
         let sheet = Sheet::new();
         assert_eq!(sheet.changed().count(), 0);
     }
 
     #[test]
+    /// Checks changed membership for committed method outputs.
     fn changed_after_propagate_contains_method_outputs() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3210,6 +3398,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks explicit clearing of changed membership.
     fn clear_changed_empties_changed_set() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3224,22 +3413,28 @@ mod tests {
     }
 
     #[test]
+    /// Checks replacement of previous changed membership after reversing method direction.
     fn propagate_clears_previous_changed_set() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
         sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+            ])
             .unwrap();
         sheet.write(a, 3_i32).unwrap();
         sheet.propagate().unwrap();
-        sheet.write(a, 5_i32).unwrap();
+        assert_eq!(sheet.changed().collect::<Vec<_>>(), vec![b]);
+        sheet.write(b, 5_i32).unwrap();
         sheet.propagate().unwrap();
         let changed: Vec<_> = sheet.changed().collect();
-        assert_eq!(changed, vec![b]);
+        assert_eq!(changed, vec![a]);
     }
 
     #[test]
+    /// Checks enumeration of every live cell identity.
     fn cells_returns_all_cell_ids() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3251,12 +3446,14 @@ mod tests {
     }
 
     #[test]
+    /// Checks empty cell enumeration on a new sheet.
     fn cells_returns_empty_for_empty_sheet() {
         let sheet = Sheet::new();
         assert_eq!(sheet.cells().count(), 0);
     }
 
     #[test]
+    /// Checks enumeration of every live relationship identity.
     fn relationships_returns_all_relationship_ids() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3269,12 +3466,14 @@ mod tests {
     }
 
     #[test]
+    /// Checks empty relationship enumeration on a new sheet.
     fn relationships_returns_empty_for_empty_sheet() {
         let sheet = Sheet::new();
         assert_eq!(sheet.relationships().count(), 0);
     }
 
     #[test]
+    /// Checks a cell's adjacent relationship identities.
     fn cell_adj_returns_adjacent_relationships() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3287,12 +3486,14 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent adjacency for an unknown cell.
     fn cell_adj_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert!(sheet.cell_adj(CellId::default()).is_none());
     }
 
     #[test]
+    /// Checks a relationship's complete adjacent cell set.
     fn relationship_adj_returns_adjacent_cells() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3306,12 +3507,14 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent adjacency for an unknown relationship.
     fn relationship_adj_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert!(sheet.relationship_adj(RelationshipId::default()).is_none());
     }
 
     #[test]
+    /// Checks absence of a selected method before propagation.
     fn selected_method_returns_none_before_propagate() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3323,6 +3526,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks the completed plan's selected method index.
     fn selected_method_returns_index_after_propagate() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3338,6 +3542,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks positional input lookup for a live method.
     fn method_inputs_returns_inputs_for_valid_method() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3349,6 +3554,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks positional output lookup for a live method.
     fn method_outputs_returns_outputs_for_valid_method() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3360,6 +3566,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent input metadata for an invalid method index.
     fn method_inputs_returns_none_for_out_of_bounds_idx() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3371,6 +3578,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent output metadata for an invalid method index.
     fn method_outputs_returns_none_for_out_of_bounds_idx() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3382,6 +3590,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absence of completed-plan source classification before propagation.
     fn is_source_returns_false_before_propagate() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3393,6 +3602,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks source classification of an unclaimed input after propagation.
     fn is_source_returns_true_for_input_cell_after_propagate() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3407,6 +3617,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks non-source classification of a selected method's output.
     fn is_source_returns_false_for_output_cell_after_propagate() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3422,6 +3633,7 @@ mod tests {
 
     // ── Conditional accessor tests ─────────────────────────────────────────
 
+    /// Builds a sheet with two keyed branches and returns its conditional identity.
     fn sheet_with_two_branch_conditional() -> (Sheet, ConditionalId) {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3445,6 +3657,7 @@ mod tests {
         (sheet, cid)
     }
 
+    /// Builds a conditional fixture and identifies its default relationship.
     fn sheet_with_default_conditional() -> (Sheet, ConditionalId, RelationshipId) {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3462,18 +3675,21 @@ mod tests {
     }
 
     #[test]
+    /// Checks enumeration of a registered conditional identity.
     fn conditionals_returns_registered_id() {
         let (sheet, cid) = sheet_with_two_branch_conditional();
         assert!(sheet.conditionals().any(|id| id == cid));
     }
 
     #[test]
+    /// Checks empty conditional enumeration on a new sheet.
     fn conditionals_empty_on_new_sheet() {
         let sheet = Sheet::new();
         assert_eq!(sheet.conditionals().count(), 0);
     }
 
     #[test]
+    /// Checks the registered conditional's match-cell identity.
     fn conditional_match_cells_returns_correct_cell() {
         let mut sheet = Sheet::new();
         let p = sheet.add_cell(0_i32);
@@ -3484,6 +3700,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent match inputs for an unknown conditional.
     fn conditional_match_cells_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert_eq!(
@@ -3493,12 +3710,14 @@ mod tests {
     }
 
     #[test]
+    /// Checks the authored explicit-branch count.
     fn conditional_branch_count_returns_correct_count() {
         let (sheet, cid) = sheet_with_two_branch_conditional();
         assert_eq!(sheet.conditional_branch_count(cid), Some(2));
     }
 
     #[test]
+    /// Checks absent branch counts for an unknown conditional.
     fn conditional_branch_count_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert_eq!(
@@ -3508,22 +3727,25 @@ mod tests {
     }
 
     #[test]
+    /// Checks the exact authored relationship identities of both explicit branches.
     fn conditional_branch_relationships_returns_correct_rels() {
         let (sheet, cid) = sheet_with_two_branch_conditional();
         let rels0 = sheet.conditional_branch_relationships(cid, 0).unwrap();
         let rels1 = sheet.conditional_branch_relationships(cid, 1).unwrap();
-        assert_eq!(rels0.len(), 1);
-        assert_eq!(rels1.len(), 1);
-        assert_ne!(rels0[0], rels1[0]);
+        let authored: Vec<_> = sheet.relationships().collect();
+        assert_eq!(rels0, [authored[0]]);
+        assert_eq!(rels1, [authored[1]]);
     }
 
     #[test]
+    /// Checks absent relationship metadata for an invalid branch index.
     fn conditional_branch_relationships_returns_none_for_out_of_bounds() {
         let (sheet, cid) = sheet_with_two_branch_conditional();
         assert!(sheet.conditional_branch_relationships(cid, 2).is_none());
     }
 
     #[test]
+    /// Checks absent branch relationships for an unknown conditional.
     fn conditional_branch_relationships_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert!(
@@ -3534,6 +3756,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks the exact authored default-relationship identity.
     fn conditional_default_relationships_returns_correct_rels() {
         let (sheet, cid, rel_default) = sheet_with_default_conditional();
         let rels = sheet.conditional_default_relationships(cid).unwrap();
@@ -3541,12 +3764,14 @@ mod tests {
     }
 
     #[test]
+    /// Checks empty default membership when no default is declared.
     fn conditional_default_relationships_empty_when_no_default() {
         let (sheet, cid) = sheet_with_two_branch_conditional();
         assert_eq!(sheet.conditional_default_relationships(cid).unwrap(), &[]);
     }
 
     #[test]
+    /// Checks absent default metadata for an unknown conditional.
     fn conditional_default_relationships_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert!(
@@ -3557,6 +3782,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks branch-index lookup for a matching subject.
     fn conditional_active_branch_returns_matching_branch_index() {
         let (mut sheet, cid) = sheet_with_two_branch_conditional();
         let p = sheet.conditional_match_cells(cid).unwrap()[0];
@@ -3567,6 +3793,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent explicit-branch selection for an unmatched subject.
     fn conditional_active_branch_returns_none_when_no_branch_matches() {
         let (mut sheet, cid) = sheet_with_two_branch_conditional();
         let p = sheet.conditional_match_cells(cid).unwrap()[0];
@@ -3575,6 +3802,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent branch selection for an unknown conditional.
     fn conditional_active_branch_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert_eq!(
@@ -3586,6 +3814,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks filter attachment rejection for an unknown governed cell.
     fn add_filter_returns_invalid_id_for_missing_cell() {
         let mut sheet = Sheet::new();
         let result = sheet.add_filter(CellId::default(), Filter::from_fn_0(|x: &i32| Ok(*x)));
@@ -3593,6 +3822,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that attachment alone preserves the cell's current value.
     fn add_filter_does_not_change_the_cells_current_value() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
@@ -3605,6 +3835,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks conformance of the initial value at propagation rather than attachment.
     fn propagate_after_add_filter_conforms_the_initial_value() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
@@ -3619,6 +3850,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a second filter on the same cell.
     fn add_filter_returns_invalid_filter_when_cell_already_has_a_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -3630,6 +3862,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a filter declaring the wrong governed-value type.
     fn add_filter_returns_invalid_filter_for_mismatched_value_type() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -3638,6 +3871,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a filter's direct dynamic self-dependency.
     fn add_filter_returns_invalid_filter_when_args_name_the_filtered_cell_itself() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -3649,6 +3883,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks filter attachment rejection for an unknown argument.
     fn add_filter_returns_invalid_id_for_missing_arg_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -3662,6 +3897,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks filter attachment rejection for an incompatible argument type.
     fn add_filter_returns_type_mismatch_for_wrong_arg_cell_type() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -3674,6 +3910,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks filter attachment to a source-only cell.
     fn add_filter_succeeds_on_a_source_kind_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_source(5_i32);
@@ -3685,6 +3922,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that both dynamic bounds affect a binary filter's conformed value.
     fn from_fn_2_conforms_values_through_sheet_using_both_dynamic_arguments() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
@@ -3707,6 +3945,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks direct source/effective publication by an unfiltered write.
     fn write_without_a_filter_behaves_exactly_as_before() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3715,6 +3954,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preservation of the raw aspiration across deferred filtering.
     fn write_leaves_the_raw_value_in_source_until_propagate_conforms_it() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3729,6 +3969,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absence of diagnostics for a conforming derived value.
     fn propagate_reports_no_violation_when_a_derived_value_conforms() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(10_i32);
@@ -3745,6 +3986,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks a soft nonconformance diagnostic without rewriting a derived value.
     fn propagate_reports_not_conformed_when_a_derived_value_violates_its_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(60_i32);
@@ -3765,6 +4007,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks a soft callback-failure diagnostic for a derived value.
     fn propagate_reports_failed_when_the_filter_errors_on_a_derived_value() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
@@ -3797,12 +4040,12 @@ mod tests {
     }
 
     #[test]
+    /// Checks a soft type-failure diagnostic for a malformed derived-value filter result.
     fn propagate_reports_failed_when_the_filter_returns_the_wrong_type_on_a_derived_value() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
         let b = sheet.add_cell(0_i32);
-        // Conforms correctly for the attach-time value (b's initial 0), so
-        // `add_filter` succeeds, but returns a `f64` for any other input — tripping
+        // Returns a `f64` for a nonzero derived value, tripping
         // propagate()'s diagnostic-phase defensive check once `a`'s value (1) is
         // copied into `b` this round.
         let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
@@ -3827,6 +4070,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absence of nonconformance diagnostics for a successfully conformed source.
     fn propagate_never_flags_a_filtered_cell_that_stayed_a_plain_source() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(60_i32);
@@ -3838,6 +4082,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks reclamping of a source after its dynamic argument changes.
     fn propagate_reclamps_a_filtered_source_cell_when_its_argument_changes() {
         // Issue #132's exact repro.
         let mut sheet = Sheet::new();
@@ -3855,6 +4100,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that downstream methods consume the settled conformed source.
     fn propagate_reclamps_before_a_relationship_consumes_the_reclamped_value() {
         // The inequality.adm2-shaped case: a and b are linked by a two-method mutual
         // relationship (b := min(a, b); a := max(a, b)); a is the currently-source cell
@@ -3893,6 +4139,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks restoration of the stored aspiration when a dynamic bound loosens.
     fn filtered_source_cell_springs_back_to_its_original_value_when_a_bound_loosens() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(50_i32);
@@ -3917,12 +4164,12 @@ mod tests {
     }
 
     #[test]
+    /// Checks a soft diagnostic for a malformed successful source-filter result.
     fn filter_reclamp_records_failed_violation_when_the_filters_function_returns_the_wrong_type() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
         let trigger = sheet.add_cell(0_i32);
-        // Conforms correctly for the attach-time values (a's initial 5 and trigger's 0), so
-        // `add_filter` succeeds, but returns an f64 when trigger becomes non-zero —
+        // Returns an f64 when trigger becomes non-zero,
         // tripping FilterReclamp's check once `trigger` is updated.
         let filter = Filter::new(
             TypeId::of::<i32>(),
@@ -3953,6 +4200,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a failed reclamp preserves the cell and does not abort propagation.
     fn filter_reclamp_failure_is_recorded_without_aborting_propagate_or_changing_the_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -3984,6 +4232,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks positional lookup of a filter's dynamic argument identities.
     fn filter_args_returns_the_filters_argument_cells() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -3998,6 +4247,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent argument metadata on an unfiltered cell.
     fn filter_args_returns_none_for_a_cell_with_no_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -4005,18 +4255,29 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent filter arguments for an unknown cell.
     fn filter_args_returns_none_for_an_invalid_cell() {
         let sheet = Sheet::new();
         assert_eq!(sheet.filter_args(CellId::default()), None);
     }
 
     #[test]
+    /// Checks absence of filter diagnostics before propagation.
     fn filter_violation_returns_none_before_any_propagate() {
-        let sheet = Sheet::new();
+        let mut sheet = Sheet::new();
+        let cell = sheet.add_cell(100_i32);
+        sheet
+            .add_filter(
+                cell,
+                Filter::from_fn_0(|value: &i32| Ok((*value).clamp(0, 10))),
+            )
+            .unwrap();
+        assert!(sheet.filter_violation(cell).is_none());
         assert!(sheet.filter_violation(CellId::default()).is_none());
     }
 
     #[test]
+    /// Checks enumeration of a currently nonconforming filtered cell.
     fn filter_violated_cells_reports_a_currently_violated_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(60_i32);
@@ -4036,6 +4297,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks an empty diagnostic-contributor set when all filters conform.
     fn filter_violation_cells_is_empty_when_nothing_is_violated() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(10_i32);
@@ -4047,6 +4309,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks root contributors of a nonconforming derived value.
     fn filter_violation_cells_includes_root_causes_of_a_violation() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(60_i32);
@@ -4072,13 +4335,13 @@ mod tests {
     }
 
     #[test]
+    /// Checks root contributors of a failed filter diagnostic.
     fn filter_violation_cells_includes_root_causes_of_a_failed_violation() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
         let bound = sheet.add_cell(100_i32);
         let b = sheet.add_cell(0_i32);
-        // Accepts b's attach-time value (0) so add_filter succeeds, but errors on any
-        // other input so the relationship's derived value (copied from `a`) trips a
+        // Errors on a nonzero input so the relationship's derived value (copied from `a`) trips a
         // `Failed` violation instead of `NotConformed`.
         sheet
             .add_filter(
@@ -4108,6 +4371,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks reverse lookup of filter-argument dependents.
     fn filter_dependents_returns_the_cells_whose_filter_references_this_one() {
         let mut sheet = Sheet::new();
         let bound = sheet.add_cell(10_i32);
@@ -4122,6 +4386,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks empty reverse-filter membership for an unreferenced cell.
     fn filter_dependents_is_empty_for_a_cell_no_filter_references() {
         let mut sheet = Sheet::new();
         let bound = sheet.add_cell(10_i32);
@@ -4133,12 +4398,14 @@ mod tests {
     }
 
     #[test]
+    /// Checks empty reverse-filter membership for an unknown cell.
     fn filter_dependents_is_empty_for_an_invalid_cell() {
         let sheet = Sheet::new();
         assert!(sheet.filter_dependents(CellId::default()).is_empty());
     }
 
     #[test]
+    /// Checks complete reverse membership when several filters share an argument.
     fn filter_dependents_aggregates_multiple_dependents_of_the_same_argument() {
         let mut sheet = Sheet::new();
         let bound = sheet.add_cell(10_i32);
@@ -4163,6 +4430,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absent presentation metadata on an unfiltered cell.
     fn filter_kind_returns_none_for_a_cell_with_no_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -4170,6 +4438,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks opaque metadata for an ordinary filter.
     fn filter_kind_returns_opaque_for_a_plain_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -4180,6 +4449,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks range metadata for a range filter.
     fn filter_kind_returns_range_for_a_range_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -4203,6 +4473,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks live range-bound values read from dynamic argument cells.
     fn filter_range_returns_live_bounds_from_argument_cells() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -4232,6 +4503,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks range introspection of a relationship-derived bound.
     fn filter_range_reflects_a_bound_derived_by_a_relationship_not_just_a_direct_write() {
         // `hi` isn't itself written — its value is derived from `hi_source` via a relationship —
         // exercising `filter_range`'s use of `effective()` (which sees a relationship's derived
@@ -4268,6 +4540,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks absence of range bounds for an opaque filter.
     fn filter_range_returns_none_for_an_opaque_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -4275,14 +4548,6 @@ mod tests {
             .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
             .unwrap();
         assert!(sheet.filter_range::<i32>(a).is_none());
-    }
-
-    #[test]
-    fn add_requirement_succeeds_on_a_plain_cell() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)));
-        assert!(result.is_ok());
     }
 
     #[test]
@@ -4300,17 +4565,7 @@ mod tests {
     }
 
     #[test]
-    fn add_requirement_allows_two_unnamed_requirements_on_the_same_cell() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        sheet
-            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
-            .unwrap();
-        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)));
-        assert!(result.is_ok());
-    }
-
-    #[test]
+    /// Checks rejection of a currently false requirement on an ordinary cell.
     fn add_requirement_hard_fails_when_current_value_already_violates_it_on_a_plain_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(-5_i32);
@@ -4319,6 +4574,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks rejection of a currently false requirement on a source-only cell.
     fn add_requirement_hard_fails_when_current_value_already_violates_it_on_a_source_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_source(-5_i32);
@@ -4327,6 +4583,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks propagation of requirement-evaluation failure during attachment.
     fn add_requirement_propagates_method_failed_when_evaluation_errors() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -4338,6 +4595,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks lookup of the requirement attached to a cell.
     fn cell_has_the_requirement_it_was_given() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -4348,6 +4606,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that Out declaration returns its governed cell identity.
     fn add_out_returns_the_cell_id_directly() {
         let mut sheet = Sheet::new();
         let width = sheet.add_cell(4_i32);
@@ -4364,6 +4623,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks downstream use of a fixed Out cell as an ordinary input.
     fn out_cell_is_referenceable_as_another_relationships_input() {
         let mut sheet = Sheet::new();
         let width = sheet.add_cell(4_i32);
@@ -4386,6 +4646,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks use of a fixed Out cell as a conditional subject.
     fn out_cell_is_referenceable_as_a_conditional_match_subject() {
         let mut sheet = Sheet::new();
         let flag = sheet.add_cell(0_i32);
@@ -4405,20 +4666,7 @@ mod tests {
     }
 
     #[test]
-    fn add_out_returns_invalid_cell_kind_for_a_write() {
-        let mut sheet = Sheet::new();
-        let width = sheet.add_cell(4_i32);
-        let area = sheet.add_cell(0_i32);
-        sheet
-            .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
-            .unwrap();
-        assert!(matches!(
-            sheet.write(area, 99_i32),
-            Err(Error::InvalidCellKind { .. })
-        ));
-    }
-
-    #[test]
+    /// Checks rejection of a second fixed writer for an Out cell.
     fn add_out_returns_invalid_cell_kind_for_a_second_writer() {
         let mut sheet = Sheet::new();
         let width = sheet.add_cell(4_i32);
@@ -4432,6 +4680,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks legal Out promotion of a previously input-only cell.
     fn add_out_succeeds_when_target_cell_was_previously_used_only_as_an_input() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
@@ -4440,11 +4689,23 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
         let c = sheet.add_cell(0_i32);
-        let result = sheet.add_out(Method::from_fn_1_1(a, c, |x: &i32| Ok(*x * 2)), vec![]);
-        assert!(result.is_ok());
+        sheet
+            .add_out(
+                Method::from_fn_1_1(c, a, |x: &i32| {
+                    x.checked_mul(2).ok_or_else(|| anyhow::anyhow!("overflow"))
+                }),
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(sheet.cell_kind(a), Some(CellKind::Out));
+        sheet.write(c, 9_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 18);
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 18);
     }
 
     #[test]
+    /// Checks deferred requirement evaluation on a newly declared Out cell.
     fn add_out_with_a_requirement_that_would_fail_still_succeeds_and_propagate_reports_it() {
         let mut sheet = Sheet::new();
         let width = sheet.add_cell(4_i32);
@@ -4461,6 +4722,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks exclusion of ordinary cells from Out enumeration.
     fn out_cells_iterates_only_out_kind_cells() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
@@ -4473,6 +4735,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks legal diagnostic-filter attachment to a fixed Out cell.
     fn add_filter_succeeds_on_a_real_out_kind_cell() {
         let mut sheet = Sheet::new();
         let width = sheet.add_cell(4_i32);
@@ -4485,6 +4748,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks relevance contributors for a requirement on an ordinary cell.
     fn requirement_relevant_cells_covers_a_plain_cells_requirement_too() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -4496,6 +4760,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks violation contributors for a failed requirement on an ordinary cell.
     fn requirement_violation_cells_covers_a_plain_cells_violation_too() {
         // `add_requirement` hard-fails immediately if a `Cell`/`Source` kind cell's
         // *current* value already violates it (see

@@ -341,6 +341,7 @@ mod tests {
     use crate::{Filter, MatchExpr, Method};
 
     #[test]
+    /// Checks that an unguarded graph has no guard-dependency violation.
     fn guard_violation_is_none_for_a_sheet_without_guards() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -355,6 +356,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks acceptance of a filter argument upstream of its governed cell.
     fn guard_violation_is_none_for_an_upstream_filter_argument() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -372,6 +374,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a dependency path renders method hops as relationship sites.
     fn into_sites_renders_method_hops_as_relationships() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -396,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks acceptance of a branch that reads but cannot derive its match cell.
     fn guard_violation_is_none_for_a_conditional_whose_branch_only_reads_its_match_cell() {
         let mut sheet = Sheet::new();
         let mode = sheet.add_cell(0_i32);

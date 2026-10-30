@@ -1,6 +1,7 @@
 //! Examples backing `book-src/source.md` (Chapter 3). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
+/// Keeps a declared source unclaimed and recomputes its dependent output after a write.
 #[test]
 fn basic_source() {
     let mut parser = adam_lang_book::support::parser();
@@ -25,6 +26,7 @@ fn basic_source() {
     assert_eq!(*parsed.read::<i32>(area).unwrap(), 3840 * 1080);
 }
 
+/// Filters a source during propagation rather than during its external write.
 #[test]
 fn source_with_a_filter() {
     let mut parser = adam_lang_book::support::parser();
@@ -42,6 +44,7 @@ fn source_with_a_filter() {
     assert_eq!(*parsed.read::<i32>(level).unwrap(), 100); // now conformed
 }
 
+/// Retains an invalid source write while reporting its failed requirement.
 #[test]
 fn source_with_a_requirement() {
     let mut parser = adam_lang_book::support::parser();
@@ -56,6 +59,8 @@ fn source_with_a_requirement() {
     assert!(parsed.cell_requirements_valid(width));
 
     parsed.write(width, -1_i32).unwrap();
+    assert_eq!(*parsed.read::<i32>(width).unwrap(), -1);
     parsed.propagate().unwrap();
     assert!(!parsed.cell_requirements_valid(width));
+    assert_eq!(*parsed.read::<i32>(width).unwrap(), -1);
 }

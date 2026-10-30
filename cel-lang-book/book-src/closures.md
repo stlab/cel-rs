@@ -1,7 +1,8 @@
 # Closures
 
-CEL uses `|...|` for closure literals. A closure is an expression and can
-appear anywhere an expression is expected. For the exact grammar, see the
+CEL uses `|...|` for closure literals. A bare closure occupies a complete
+expression; an operator operand requires parentheses around the closure.
+For the exact grammar, see the
 [Reference Manual](reference.md).
 
 ## Concept
@@ -12,10 +13,11 @@ callable value.
 ## Syntax
 
 ```text
-closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|")
+expression = closure_expression | range_expression .
+closure_expression = ("||" | "|" closure_param { "," closure_param } "|")
                      expression .
 closure_param = identifier ":" type_expression .
-type_expression = identifier [ "(" type_expression { "," type_expression } ")" ]
+type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
                 | "[" type_expression "]"
                 | "(" [ type_expression [ "," [ type_expression { "," type_expression } ] ] ] ")" .
 ```
@@ -35,9 +37,7 @@ type_expression = identifier [ "(" type_expression { "," type_expression } ")" ]
 
 ## Exact rules
 
-Closures:
-
-- `|| body` declares a zero-parameter closure.
+- `|| body` declares a zero-parameter closure; spaced empty pipes `| |` are not this token.
 - `|name: Type| body` declares one typed parameter.
 - `|a: T, b: U| body` declares multiple typed parameters in source order.
 - An annotation uses the host's configured type environment: built-in
@@ -47,6 +47,14 @@ Closures:
 - `|pair: (i32, i32)| pair.0 + pair.1` declares one tuple-typed
   parameter, not two separate parameters.
 - The closure body is one expression.
+- A bare closure body extends to its enclosing expression boundary. For example,
+  `|| 1 + 2` returns `3`; write `(|| 1)()` to apply a zero-parameter closure.
+- Group a closure before using it as an operator operand, cast input, or postfix
+  receiver. `a + |x: i32| x` is a syntax error; `a + (|x: i32| x)` is
+  syntactically valid, with operator/type checking performed separately.
+- Call arguments, tuple and array elements, branch bodies, and closure bodies
+  are complete expressions and accept bare closures, as in `f(|x: i32| x + 1)`.
+- Parameter names are unique and cannot use reserved value names.
 - A closure body resolves its own parameters and does not capture free
   variables from an enclosing expression. Installed library operations
   remain available inside it.
@@ -65,13 +73,12 @@ Closures:
 `CELParser::with_type_resolver` supplies annotation lookup. A registered
 leaf uses `ValueType::cloneable_leaf::<T>()` so parameters can clone
 owned values without requiring `Copy`, equality, or debug formatting.
-Adam supplies these descriptors through its existing `TypeRegistry`;
-no second closure-specific type registry is needed. Results move from
+Adam supplies these descriptors through `TypeRegistry`. Results move from
 the body into the caller and need no clone adapter of their own.
 
-The Rust `DynClosure::new`, `call`, and `call_boxed` APIs remain available
-for existing host integrations. `DynClosure::typed` and
-`DynSegment::push_closure` additionally retain the complete metadata
+The Rust `DynClosure::new`, `call`, and `call_boxed` APIs support host
+integrations. `DynClosure::typed` and
+`DynSegment::push_closure` retain the complete metadata
 needed by general CEL invocation.
 
 ## Typed callable interoperability
@@ -87,8 +94,7 @@ Arrays compare whole signatures when checking element homogeneity.
 `Callable::from_prepared` binds a matching `PreparedSegment`. Both expose the
 same `call(&args)` interface with no signature comparisons during invocation.
 Clones share execution state; recursive entry into the same carrier returns an
-error. Body errors propagate. This interface prepares for a future compiled
-backend; that backend is not implemented.
+error. Body errors propagate.
 
 This example checks a typed empty array and calls native and interpreted
 functions through the same Rust interface. Callables need no equality capability

@@ -15,6 +15,10 @@ use std::path::Path;
 ///
 /// - Complexity: O(n) in the size of the file at `path`.
 #[cfg(feature = "desktop")]
+///
+/// # Examples
+///
+/// `read_opened_file(Path::new("example.adm2"))` returns source text or a readable I/O diagnostic.
 pub fn read_opened_file(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
@@ -24,6 +28,11 @@ pub fn read_opened_file(path: &Path) -> Result<String, String> {
 ///
 /// - Complexity: awaits user interaction; no upper bound on wall-clock time.
 #[cfg(feature = "desktop")]
+///
+/// # Examples
+///
+/// `if let Some(path) = pick_file().await { /* load the selected source */ }`
+/// handles successful selection without treating cancellation as an error.
 pub async fn pick_file() -> Option<std::path::PathBuf> {
     let handle = rfd::AsyncFileDialog::new()
         .add_filter("adm2", &["adm2"])
@@ -41,6 +50,11 @@ pub async fn pick_file() -> Option<std::path::PathBuf> {
 /// Returns `Err` if the underlying OS watch could not be established (e.g.
 /// `path`'s parent directory doesn't exist).
 #[cfg(feature = "desktop")]
+///
+/// # Examples
+///
+/// After selecting a source path, retain its returned watcher while the UI receives
+/// reload notifications; replace that watcher when selecting another file.
 pub fn spawn_watch(
     path: std::path::PathBuf,
     mut on_change: impl FnMut() + Send + 'static,
@@ -48,12 +62,27 @@ pub fn spawn_watch(
     use notify::Watcher;
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if res.is_ok() {
-            on_change();
-        }
+        dispatch_watch_event(res, &mut on_change, &mut |message| {
+            eprintln!("opened-file watcher failed: {message}")
+        });
     })?;
     watcher.watch(&path, notify::RecursiveMode::NonRecursive)?;
     Ok(watcher)
+}
+
+/// Routes successful watch events to reload and asynchronous failures to diagnostics.
+///
+/// - Complexity: O(m) to format an m-byte error; callback costs are additional.
+#[cfg(feature = "desktop")]
+pub(crate) fn dispatch_watch_event(
+    result: notify::Result<notify::Event>,
+    on_change: &mut impl FnMut(),
+    report: &mut impl FnMut(&str),
+) {
+    match result {
+        Ok(_) => on_change(),
+        Err(error) => report(&error.to_string()),
+    }
 }
 
 /// The result of a web-side `open()`/`refresh()` call, sent from JS via
@@ -65,6 +94,11 @@ pub fn spawn_watch(
 /// the load is one-shot, with nothing to refresh from.
 #[cfg(not(feature = "desktop"))]
 #[derive(serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+///
+/// # Examples
+///
+/// A payload with `id: Some(7)` can be re-read using `refresh_script(7)`;
+/// an upload-fallback payload with `id: None` cannot.
 pub struct OpenedFilePayload {
     pub id: Option<u32>,
     pub name: String,
@@ -84,6 +118,11 @@ pub struct OpenedFilePayload {
 #[cfg(not(feature = "desktop"))]
 #[derive(serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(untagged)]
+///
+/// # Examples
+///
+/// Receive `Option<OpenResult>` from the browser bridge: `None` is cancellation,
+/// while a resolved error retains a diagnostic rather than masquerading as cancellation.
 pub enum OpenResult {
     /// Loaded successfully.
     Payload(OpenedFilePayload),
@@ -100,13 +139,28 @@ pub enum OpenResult {
 /// type="file">` fallback) and sends the result back via `dioxus.send()`.
 /// Resolves to `null` on JS's side (received as `None`) if the user
 /// cancelled; otherwise sends an [`OpenResult`].
+///
+/// A successful read waits for Rust's Boolean authorization before installing
+/// the candidate's refresh handle. Rejected candidates leave the accepted handle intact.
 #[cfg(not(feature = "desktop"))]
-pub const OPEN_SCRIPT: &str =
-    "(async () => { dioxus.send(await window.beginOpenFile.open()); })();";
+pub const OPEN_SCRIPT: &str = r#"(async () => {
+    const candidate = await window.beginOpenFile.open();
+    if (!candidate || candidate.error) {
+        dioxus.send(candidate);
+        return;
+    }
+    const { id, name, text } = candidate;
+    dioxus.send({ id, name, text });
+    if (await dioxus.recv()) candidate.commit();
+})();"#;
 
 /// `document::eval` script that re-reads the file behind handle `id` and
 /// sends the refreshed `{id, name, text}` back via `dioxus.send()`.
 #[cfg(not(feature = "desktop"))]
+///
+/// # Examples
+///
+/// `refresh_script(payload.id.unwrap())` refreshes a picker payload with a retained handle.
 pub fn refresh_script(id: u32) -> String {
     format!("(async () => {{ dioxus.send(await window.beginOpenFile.refresh({id})); }})();")
 }
@@ -116,11 +170,39 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Watch failures report their cause without masquerading as source changes.
+    #[test]
+    fn watcher_errors_reach_the_reporter() {
+        let mut changes = 0;
+        let mut messages = Vec::new();
+        dispatch_watch_event(
+            Err(notify::Error::generic("lost watch")),
+            &mut || changes += 1,
+            &mut |message| messages.push(message.to_string()),
+        );
+        assert_eq!(changes, 0);
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("lost watch"));
+        dispatch_watch_event(
+            Ok(notify::Event::new(notify::EventKind::Any)),
+            &mut || changes += 1,
+            &mut |message| messages.push(message.to_string()),
+        );
+        assert_eq!(changes, 1);
+        assert_eq!(messages.len(), 1);
+    }
+
+    /// Creates the build-tree fixture directory and returns a process-local path.
+    ///
+    /// - Complexity: O(constructed path bytes) time and space, plus directory creation.
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(name)
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target");
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join(format!("{}-{name}", std::process::id()))
     }
 
     #[test]
+    /// File reads return the selected UTF-8 source text.
     fn read_opened_file_returns_file_contents() {
         let path = temp_path("begin_open_file_test_contents.adm2");
         std::fs::File::create(&path)
@@ -135,6 +217,7 @@ mod tests {
     }
 
     #[test]
+    /// Missing source paths return a file-read error.
     fn read_opened_file_missing_file_returns_err() {
         let path = temp_path("begin_open_file_test_does_not_exist.adm2");
         let _ = std::fs::remove_file(&path);
@@ -150,6 +233,7 @@ mod web_tests {
     use super::*;
 
     #[test]
+    /// Browser payloads retain refreshable file handles.
     fn opened_file_payload_deserializes_with_handle_id() {
         let json = r#"{"id": 3, "name": "my_model.adm2", "text": "sheet s {}"}"#;
         let payload: OpenedFilePayload = serde_json::from_str(json).unwrap();
@@ -159,6 +243,7 @@ mod web_tests {
     }
 
     #[test]
+    /// Upload-fallback payloads permit an absent refresh handle.
     fn opened_file_payload_deserializes_without_handle_id() {
         let json = r#"{"id": null, "name": "my_model.adm2", "text": "sheet s {}"}"#;
         let payload: OpenedFilePayload = serde_json::from_str(json).unwrap();
@@ -166,12 +251,14 @@ mod web_tests {
     }
 
     #[test]
+    /// Refresh scripts address the selected handle ID.
     fn refresh_script_embeds_the_given_id() {
         let script = refresh_script(3);
         assert!(script.contains("beginOpenFile.refresh(3)"), "{script}");
     }
 
     #[test]
+    /// Successful browser responses decode to file payloads.
     fn open_result_deserializes_payload_variant() {
         let json = r#"{"id": 3, "name": "my_model.adm2", "text": "sheet s {}"}"#;
         let result: OpenResult = serde_json::from_str(json).unwrap();
@@ -186,6 +273,7 @@ mod web_tests {
     }
 
     #[test]
+    /// Failed browser responses preserve their transport diagnostic.
     fn open_result_deserializes_failed_variant() {
         let json = r#"{"error": "permission denied"}"#;
         let result: OpenResult = serde_json::from_str(json).unwrap();

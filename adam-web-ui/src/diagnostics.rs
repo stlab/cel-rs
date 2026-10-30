@@ -17,6 +17,12 @@
 /// Reports `msg` on the platform's error channel: the process's stderr on desktop, or when
 /// built for any non-wasm32 host (e.g. running this crate's own test suite natively).
 #[cfg(any(feature = "desktop", not(target_arch = "wasm32")))]
+///
+/// # Examples
+///
+/// `report_error("Could not propagate the edited sheet")` reports a recoverable UI failure.
+///
+/// - Complexity: O(msg.len()) diagnostic output work.
 pub fn report_error(msg: &str) {
     eprintln!("{msg}");
 }
@@ -24,6 +30,12 @@ pub fn report_error(msg: &str) {
 /// Reports `msg` on the platform's error channel: the browser's console, for a genuine
 /// wasm32 web build.
 #[cfg(all(not(feature = "desktop"), target_arch = "wasm32"))]
+///
+/// # Examples
+///
+/// `report_error("Could not propagate the edited sheet")` reports a recoverable UI failure.
+///
+/// - Complexity: O(msg.len()) diagnostic output work.
 pub fn report_error(msg: &str) {
     web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(msg));
 }

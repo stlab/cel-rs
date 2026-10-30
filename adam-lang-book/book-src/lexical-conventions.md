@@ -1,14 +1,12 @@
 # Lexical Conventions
 
-An Adam source file is tokenized as Rust/CEL tokens (via `proc_macro2`): identifiers, integer
-and float literals (with optional type suffixes), string literals, and punctuation, exactly as
-[`cel-parser`'s own lexical grammar](../cel_parser/index.html) defines them. Adam adds exactly
-one lexical extension on top of CEL's own conventions: doc comments.
+Adam uses [CEL's lexical conventions](../cel-book/lexical-conventions.html):
+identifiers, integer and float literals with optional type suffixes, string literals,
+and punctuation. Adam also recognizes doc comments.
 
 ## Comments
 
-`//` starts a line comment; `/* ... */` a block comment — the same two forms C, Rust, and CEL
-all share:
+`//` starts a line comment; `/* ... */` encloses a block comment:
 
 ```adam
 // a whole-line comment
@@ -19,9 +17,8 @@ cell width: i32 = 1920; // a trailing comment
 ## Doc comments
 
 `///` immediately before a `cell`, `source`, `relationship`, `conditional`, or `out`
-declaration, and `//!` immediately before the `sheet` keyword itself, are Adam's own addition to
-CEL's lexical grammar: doc comments, recovered by the language server and the formatter, and
-otherwise inert — they carry no meaning when the sheet resolves:
+declaration and `//!` immediately before `sheet` introduce *doc comments*.
+The language server and formatter retain them; they do not affect sheet resolution:
 
 ```adam
 {{#include examples/lexical-conventions/doc_comments.adm2}}
@@ -29,8 +26,10 @@ otherwise inert — they carry no meaning when the sheet resolves:
 
 ## Keywords and reserved identifiers
 
-**Keywords**: `sheet`, `cell`, `source`, `relationship`, `conditional`, `out`, `require`,
-`filter`. None of these can be used as a cell or sheet name. `_` is not a keyword but is
+Adam recognizes `sheet`, `use`, `as`, `cell`, `source`, `relationship`, `conditional`,
+`out`, `require`, and `filter` in their grammar positions. They are contextual:
+cell names may use these words. Sheet definitions and module names reject `_`,
+`sheet`, `use`, `as`, empty names, and raw identifiers. `_` is also
 reserved in two specific positions: a `conditional`'s default branch
 (`_ => { ... }`, the [default branch and reverting to source](conditionals.md#the-default-branch-and-reverting-to-source) section),
 and inside a `filter` expression (the candidate value,

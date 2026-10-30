@@ -18,6 +18,19 @@ use dioxus::prelude::*;
 /// Provides Spectrum token context for all descendant SWC components.
 ///
 /// Must be the root ancestor of any `SpXxx` component. Maps to `<sp-theme>`.
+///
+/// - Complexity: O(a) attribute construction for a forwarded string bytes, plus child rendering.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpTheme;
+/// # fn example() -> Element {
+/// rsx! { SpTheme { color: "light", scale: "medium", system: "spectrum-two", "Content" } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpTheme(color: String, scale: String, system: String, children: Element) -> Element {
     rsx! {
@@ -36,15 +49,33 @@ pub fn SpTheme(color: String, scale: String, system: String, children: Element) 
 /// events. Setting `invalid` to `true` renders the SWC error state (red ring
 /// and `aria-invalid`). Setting `disabled` to `true` renders the SWC disabled
 /// state and blocks focus/input at the DOM level.
+/// `readonly` preserves selectable output text without permitting edits; `children`
+/// supplies supported help-text slots.
+///
+/// - Complexity: O(id.len() + value.len()) attribute construction.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpTextfield;
+/// # fn example() -> Element {
+/// rsx! { SpTextfield { id: "title", value: "Hello", invalid: false,
+///     disabled: false, oninput: |_| {}, onfocus: |_| {}, onblur: |_| {} } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpTextfield(
     id: String,
     value: String,
     invalid: bool,
     disabled: bool,
+    #[props(default)] readonly: bool,
     oninput: EventHandler<FormEvent>,
     onfocus: EventHandler<FocusEvent>,
     onblur: EventHandler<FocusEvent>,
+    #[props(default)] children: Element,
 ) -> Element {
     rsx! {
         sp-textfield {
@@ -53,9 +84,11 @@ pub fn SpTextfield(
             // Boolean attribute: omit entirely when false; presence = invalid.
             "invalid": if invalid { "true" },
             "disabled": if disabled { "true" },
+            "readonly": if readonly { "true" },
             oninput: move |e| oninput.call(e),
             onfocus: move |e| onfocus.call(e),
             onblur: move |e| onblur.call(e),
+            {children}
         }
     }
 }
@@ -87,6 +120,21 @@ pub fn SpTextfield(
 /// `Intl.NumberFormat` options for locale-aware display without changing the stored value.
 /// `children` slots into the element's light DOM, e.g. an [`SpHelpText`] with
 /// `slot: "negative-help-text"` or `slot: "help-text"`.
+///
+/// - Complexity: O(a) attribute construction for a forwarded string bytes, plus child rendering.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpNumberfield;
+/// # fn example() -> Element {
+/// rsx! { SpNumberfield { id: "count", value: "42", step: "1",
+///     invalid: false, disabled: false, readonly: false,
+///     oninput: |_| {}, onfocus: |_| {}, onblur: |_| {} } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpNumberfield(
     id: String,
@@ -154,6 +202,21 @@ pub fn SpNumberfield(
 /// localized text (including blanks) in `adamNumericDraft`, and redispatches a host `input` event.
 /// The Inspector's numeric input bridge consumes and deletes that draft once; handle drags instead
 /// read the canonical host value. Empty inline `change` events are suppressed to preserve blanks.
+///
+/// - Complexity: O(a) attribute/bridge construction for a forwarded string bytes.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpSlider;
+/// # fn example() -> Element {
+/// rsx! { SpSlider { id: "volume", label: "Volume", value: "50",
+///     min: "0", max: "100", editable: true, disabled: false,
+///     oninput: |_| {}, onfocus: |_| {}, onblur: |_| {} } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpSlider(
     id: String,
@@ -201,7 +264,17 @@ pub fn SpSlider(
 ///
 /// Maps to `<sp-field-label>`. The `for_` prop sets the `for` HTML attribute
 /// linking the label to an input by id.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpFieldLabel;
+/// let _ = rsx! { SpFieldLabel { for_: "count", "Count" } };
+/// ```
 #[component]
+///
+/// - Complexity: O(for_.len()) attribute construction, plus child rendering.
 pub fn SpFieldLabel(for_: String, children: Element) -> Element {
     rsx! {
         sp-field-label {
@@ -225,7 +298,17 @@ pub fn SpFieldLabel(for_: String, children: Element) -> Element {
 /// error/red treatment); note that slotting into `"negative-help-text"` sets this to
 /// `"negative"` automatically on the control's own side, so passing it here is
 /// belt-and-suspenders, not load-bearing.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpHelpText;
+/// let _ = rsx! { SpHelpText { slot: "negative-help-text", variant: "negative", "Invalid value" } };
+/// ```
 #[component]
+///
+/// - Complexity: O(slot.len() + variant.len()) attribute construction, plus child rendering.
 pub fn SpHelpText(slot: String, variant: String, children: Element) -> Element {
     rsx! {
         sp-help-text {
@@ -239,6 +322,14 @@ pub fn SpHelpText(slot: String, variant: String, children: Element) -> Element {
 /// Horizontal visual separator.
 ///
 /// Maps to `<sp-divider>` with `size="s"` (small).
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpDivider;
+/// let _ = rsx! { SpDivider {} };
+/// ```
 #[component]
 pub fn SpDivider() -> Element {
     rsx! {
@@ -248,13 +339,23 @@ pub fn SpDivider() -> Element {
     }
 }
 
-/// Section heading.
+/// Renders a level-two section heading with Spectrum's small heading typography.
 ///
-/// Maps to `<sp-heading>`.
+/// Uses native heading semantics and the enclosing [`SpTheme`]'s heading tokens.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpHeading;
+/// let _ = rsx! { SpHeading { "Cells" } };
+/// ```
 #[component]
 pub fn SpHeading(children: Element) -> Element {
     rsx! {
-        sp-heading {
+        h2 {
+            class: "spectrum-section-heading",
+            style: "font-family: var(--spectrum-sans-font-family-stack); font-size: var(--spectrum-heading-size-s); font-style: var(--spectrum-heading-sans-serif-font-style); font-weight: var(--spectrum-heading-sans-serif-font-weight); line-height: var(--spectrum-heading-line-height); color: var(--spectrum-heading-color); margin: 0;",
             {children}
         }
     }
@@ -265,6 +366,17 @@ pub fn SpHeading(children: Element) -> Element {
 /// Maps to `<sp-action-group>`. Setting `compact` to `true` removes the gaps between
 /// buttons and rounds only the group's outermost corners — interior buttons (including
 /// a lone middle button) render square on both sides.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::{SpActionButton, SpActionGroup};
+/// # fn example() -> Element {
+/// rsx! { SpActionGroup { compact: true, SpActionButton { onclick: |_| {}, "Fit" } } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpActionGroup(compact: bool, children: Element) -> Element {
     rsx! {
@@ -281,6 +393,17 @@ pub fn SpActionGroup(compact: bool, children: Element) -> Element {
 /// Maps to `<sp-action-button>`. `selected` renders it in its pressed/active
 /// visual state (e.g. to highlight the current choice in a group of buttons
 /// used as a picker).
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpActionButton;
+/// # fn example() -> Element {
+/// rsx! { SpActionButton { onclick: |_| {}, selected: true, "Select" } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpActionButton(
     onclick: EventHandler<MouseEvent>,
@@ -304,6 +427,17 @@ pub fn SpActionButton(
 /// mirroring `SpActionButton`'s `selected`/`onclick` pattern (the caller owns
 /// the boolean state and re-renders `checked` from it) rather than reading
 /// the new state back off a native `change` event.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpSwitch;
+/// # fn example() -> Element {
+/// rsx! { SpSwitch { checked: true, onclick: |_| {}, "Show inactive" } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpSwitch(checked: bool, onclick: EventHandler<MouseEvent>, children: Element) -> Element {
     rsx! {
@@ -326,6 +460,20 @@ pub fn SpSwitch(checked: bool, onclick: EventHandler<MouseEvent>, children: Elem
 /// mirroring `SpSwitch`'s `checked`/`onclick` pattern — the caller owns the boolean
 /// state and re-renders `checked` from it rather than reading the new state off a
 /// native `change` event.
+///
+/// - Complexity: O(id.len()) attribute construction, plus child rendering.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpCheckbox;
+/// # fn example() -> Element {
+/// rsx! { SpCheckbox { id: "enabled", checked: true, invalid: false,
+///     disabled: false, onclick: |_| {}, "Enabled" } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpCheckbox(
     id: String,
@@ -358,6 +506,21 @@ pub fn SpCheckbox(
 /// `SidenavItem.startTrackingSelection`), silently clearing any `selected`
 /// attribute set directly on an item whose `value` doesn't match — confirmed
 /// by inspecting the bundled `assets/swc.js` source and the rendered DOM.
+///
+/// - Complexity: O(value.len()) attribute construction, plus child rendering.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::{SpSideNav, SpSideNavItem};
+/// # fn example() -> Element {
+/// rsx! { SpSideNav { value: "first",
+///     SpSideNavItem { label: "First", value: "first", selected: true, onclick: |_| {} }
+/// } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpSideNav(value: String, children: Element) -> Element {
     rsx! {
@@ -379,6 +542,19 @@ pub fn SpSideNav(value: String, children: Element) -> Element {
 /// choice in a list used as a picker); pass the same condition used to
 /// decide `SpSideNav`'s `value`, so the attribute is already correct on the
 /// very first render rather than only after a later selection change.
+///
+/// - Complexity: O(label.len() + value.len()) attribute construction.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::SpSideNavItem;
+/// # fn example() -> Element {
+/// rsx! { SpSideNavItem { label: "First", value: "first", onclick: |_| {} } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpSideNavItem(
     label: String,
@@ -408,6 +584,17 @@ pub fn SpSideNavItem(
 /// matching a Rust keyword (`in`) parses as a raw identifier whose
 /// `to_string()` includes the `r#` prefix, corrupting the tag to
 /// `sp-icon-zoom-r#in`.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::{SpActionButton, SpIconZoomIn};
+/// # fn example() -> Element {
+/// rsx! { SpActionButton { onclick: |_| {}, SpIconZoomIn {} } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpIconZoomIn() -> Element {
     rsx! {
@@ -423,11 +610,171 @@ pub fn SpIconZoomIn() -> Element {
 /// Maps to `<sp-icon-zoom-out>`, assigned to the button's `icon` slot so
 /// `ActionButton` centers and sizes it like any other action-button icon
 /// instead of treating it as label text.
+///
+/// # Examples
+///
+/// ```
+/// use dioxus::prelude::*;
+/// use adam_web_ui::spectrum::{SpActionButton, SpIconZoomOut};
+/// # fn example() -> Element {
+/// rsx! { SpActionButton { onclick: |_| {}, SpIconZoomOut {} } }
+/// # }
+/// # VirtualDom::new(example).rebuild_in_place();
+/// ```
 #[component]
 pub fn SpIconZoomOut() -> Element {
     rsx! {
         sp-icon-zoom-out {
             "slot": "icon",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    /// Renders every wrapper with shared event observers and explicit optional props.
+    fn host((enabled, events): (bool, Rc<RefCell<Vec<&'static str>>>)) -> Element {
+        let input_events = events.clone();
+        let input = EventHandler::new(move |event: FormEvent| {
+            assert_eq!(event.value(), "draft");
+            input_events.borrow_mut().push("input");
+        });
+        let focus_events = events.clone();
+        let focus = EventHandler::new(move |_: FocusEvent| focus_events.borrow_mut().push("focus"));
+        let blur_events = events.clone();
+        let blur = EventHandler::new(move |_: FocusEvent| blur_events.borrow_mut().push("blur"));
+        let click = EventHandler::new(move |_: MouseEvent| events.borrow_mut().push("click"));
+        rsx! {
+            SpTheme { color: "dark", scale: "large", system: "spectrum-two",
+                SpHeading { "Contract heading" }
+                SpDivider {}
+                SpFieldLabel { for_: "text", "Text label" }
+                SpTextfield { id: "text", value: "draft", invalid: enabled, disabled: enabled, readonly: enabled, oninput: input, onfocus: focus, onblur: blur }
+                SpNumberfield { id: "number", value: "12", min: enabled.then(|| "-2".to_string()), max: enabled.then(|| "20".to_string()), step: enabled.then(|| "2".to_string()), format_options: Some(r#"{"maximumFractionDigits":0}"#), invalid: enabled, disabled: enabled, readonly: enabled, oninput: input, onfocus: focus, onblur: blur,
+                    SpHelpText { slot: "negative-help-text", variant: "negative", "Bound violated" }
+                }
+                SpSlider { id: "slider", label: "Amount", value: "3", min: "0", max: "10", step: None, format_options: None, editable: enabled, disabled: enabled, oninput: input, onfocus: focus, onblur: blur }
+                SpActionGroup { compact: enabled,
+                    SpActionButton { selected: enabled, onclick: click, SpIconZoomIn {} SpIconZoomOut {} "Zoom" }
+                }
+                SpSwitch { checked: enabled, onclick: click, "Switch label" }
+                SpCheckbox { id: "check", checked: enabled, invalid: enabled, disabled: enabled, onclick: click, "Check label" }
+                SpSideNav { value: "chosen",
+                    SpSideNavItem { label: "Chosen label", value: "chosen", selected: enabled, onclick: click }
+                }
+            }
+        }
+    }
+
+    /// Returns one rendered opening tag for semantic attribute assertions.
+    ///
+    /// - Complexity: O(html.len() + name.len()) search work and O(name.len()) scratch space.
+    fn tag<'a>(html: &'a str, name: &str) -> &'a str {
+        html.split_once(&format!("<{name}"))
+            .unwrap()
+            .1
+            .split_once('>')
+            .unwrap()
+            .0
+    }
+
+    /// Every wrapper preserves its element, content, and optional/boolean attributes.
+    #[test]
+    fn wrappers_forward_content_and_attributes() {
+        for enabled in [false, true] {
+            let mut dom =
+                VirtualDom::new_with_props(host, (enabled, Rc::new(RefCell::new(Vec::new()))));
+            dom.rebuild_in_place();
+            let html = dioxus_ssr::render(&dom);
+            assert!(tag(&html, "sp-theme").contains(r#"color="dark""#));
+            assert!(tag(&html, "sp-theme").contains(r#"scale="large""#));
+            assert!(tag(&html, "sp-theme").contains(r#"system="spectrum-two""#));
+            assert!(html.contains("Contract heading</h2>"));
+            assert!(tag(&html, "h2").contains("spectrum-section-heading"));
+            assert!(tag(&html, "h2").contains("font-size:"));
+            assert!(tag(&html, "sp-divider").contains(r#"size="s""#));
+            assert!(tag(&html, "sp-field-label").contains(r#"for="text""#));
+            assert!(tag(&html, "sp-textfield").contains(r#"value="draft""#));
+            assert_eq!(tag(&html, "sp-textfield").contains("readonly="), enabled);
+            assert!(tag(&html, "sp-number-field").contains(r#"value="12""#));
+            assert!(tag(&html, "sp-number-field").contains("format-options="));
+            assert_eq!(tag(&html, "sp-number-field").contains("min="), enabled);
+            assert_eq!(tag(&html, "sp-number-field").contains("max="), enabled);
+            assert_eq!(tag(&html, "sp-number-field").contains("step="), enabled);
+            assert!(tag(&html, "sp-help-text").contains(r#"slot="negative-help-text""#));
+            assert!(html.contains("Bound violated</sp-help-text>"));
+            assert!(tag(&html, "sp-slider").contains(r#"label="Amount""#));
+            assert!(!tag(&html, "sp-slider").contains("step="));
+            assert!(tag(&html, "sp-slider").contains(r#"min="0""#));
+            assert!(tag(&html, "sp-slider").contains(r#"max="10""#));
+            assert!(html.contains("<sp-icon-zoom-in></sp-icon-zoom-in>"));
+            assert!(tag(&html, "span").contains(r#"slot="icon""#));
+            assert!(tag(&html, "sp-icon-zoom-out").contains(r#"slot="icon""#));
+            assert!(html.contains("Switch label</sp-switch>"));
+            assert!(html.contains("Check label</sp-checkbox>"));
+            assert!(tag(&html, "sp-sidenav").contains(r#"value="chosen""#));
+            assert!(tag(&html, "sp-sidenav-item").contains(r#"label="Chosen label""#));
+            for (element, attribute) in [
+                ("sp-textfield", "invalid"),
+                ("sp-textfield", "disabled"),
+                ("sp-number-field", "invalid"),
+                ("sp-number-field", "disabled"),
+                ("sp-number-field", "readonly"),
+                ("sp-slider", "editable"),
+                ("sp-slider", "disabled"),
+                ("sp-action-group", "compact"),
+                ("sp-action-button", "selected"),
+                ("sp-switch", "checked"),
+                ("sp-checkbox", "checked"),
+                ("sp-checkbox", "invalid"),
+                ("sp-checkbox", "disabled"),
+                ("sp-sidenav-item", "selected"),
+            ] {
+                assert_eq!(
+                    tag(&html, element).contains(&format!("{attribute}=")),
+                    enabled,
+                    "{element}.{attribute}"
+                );
+            }
+        }
+    }
+
+    /// Real Dioxus event dispatch reaches the caller through each interactive wrapper.
+    #[test]
+    fn wrappers_forward_events() {
+        dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut dom = VirtualDom::new_with_props(host, (false, events.clone()));
+        let mutations = dom.rebuild_to_vec();
+        for edit in mutations.edits {
+            let dioxus::core::Mutation::NewEventListener { name, id } = edit else {
+                continue;
+            };
+            let payload: Box<dyn std::any::Any> = match name.as_str() {
+                "click" => Box::<dioxus_html::SerializedMouseData>::default(),
+                "input" => Box::new(dioxus_html::SerializedFormData::new(
+                    "draft".to_string(),
+                    vec![],
+                )),
+                "focus" | "blur" => Box::<dioxus_html::SerializedFocusData>::default(),
+                _ => continue,
+            };
+            dom.runtime().handle_event(
+                &name,
+                Event::new(Rc::new(dioxus_html::PlatformEventData::new(payload)), true).into_any(),
+                id,
+            );
+        }
+        let events = events.borrow();
+        for (name, count) in [("click", 4), ("input", 3), ("focus", 3), ("blur", 3)] {
+            assert_eq!(
+                events.iter().filter(|event| **event == name).count(),
+                count,
+                "{name}"
+            );
         }
     }
 }

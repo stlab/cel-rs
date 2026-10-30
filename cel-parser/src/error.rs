@@ -13,6 +13,9 @@ use std::str::FromStr;
 /// Uses [`proc_macro2::LineColumn`] for positions (1-based line, 0-based column).
 /// This type is `Send + Sync`. Build it from a `proc_macro2::Span` via
 /// [`SourceSpan::from_proc_macro2`] when you have one (e.g. in the parser).
+///
+/// # Examples
+/// See [`Self::new`] and [`Self::to_byte_range`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceSpan {
     /// Start position (inclusive).
@@ -22,6 +25,7 @@ pub struct SourceSpan {
 }
 
 impl Default for SourceSpan {
+    /// Returns an empty region at line one, column zero.
     fn default() -> Self {
         SourceSpan {
             start: LineColumn { line: 1, column: 0 },
@@ -130,6 +134,9 @@ impl SourceSpan {
 ///
 /// Uses a [`SourceSpan`] (line/column only) so the error is `Send + Sync` and
 /// can be used from async execution or reported across thread boundaries.
+///
+/// # Examples
+/// See [`Self::new`] and [`Self::format_rustc_style`].
 #[derive(Clone, Debug)]
 pub struct CELError {
     message: String,
@@ -139,7 +146,7 @@ pub struct CELError {
 /// Converts a [`SourceSpan`] (1-based lines, 0-based character columns) to a byte-offset
 /// range within `source`.
 ///
-/// - Complexity: O(n) in the length of `source`.
+/// - Complexity: O(n) time and O(1) auxiliary space for n source bytes.
 pub(crate) fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Range<usize> {
     debug_assert!(
         span.start.line >= 1,
@@ -190,6 +197,9 @@ pub(crate) fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Ra
 }
 
 /// One labelled span in a multi-span diagnostic.
+///
+/// # Examples
+/// See [`format_multi_span`].
 #[derive(Clone, Debug)]
 pub struct SpanLabel {
     /// The source region to underline.
@@ -202,7 +212,8 @@ pub struct SpanLabel {
 /// primary caret and the rest as secondary context, in rustc style.
 ///
 /// - Precondition: `labels` is non-empty.
-/// - Complexity: O(n) in `source_code`'s length plus the number of labels.
+/// - Complexity: O(k * s + l) annotation work for k labels, s source bytes and l label bytes,
+///   plus renderer layout; O(k + s + b) auxiliary/output space for b output bytes.
 ///
 /// # Examples
 ///
@@ -266,6 +277,7 @@ fn matching_close(open: char) -> char {
 /// Returns `None` when the prefix lexes cleanly (no opener at all to match).
 ///
 /// - Complexity: O(n) in `source`'s length (re-lexes the prefix before `close_span`).
+///   Prefix lexing uses O(n) auxiliary space.
 fn innermost_open_delimiter(
     source: &str,
     close_span: proc_macro2::Span,
@@ -288,6 +300,8 @@ fn innermost_open_delimiter(
 ///
 /// Returns `None` when the span doesn't resolve to a character (e.g. it points past the end of
 /// `source`), so the caller can fall back to a generic message.
+///
+/// - Complexity: O(s) time and auxiliary space for s source bytes, including prefix re-lexing.
 fn lex_failure_message(
     source: &str,
     span: proc_macro2::Span,
@@ -333,6 +347,9 @@ fn lex_failure_message(
 
 impl CELError {
     /// Creates a new error with the given message and source span.
+    ///
+    /// - Complexity: O(m) time and space for m borrowed message bytes; transferring a `String`
+    ///   is O(1). Other message types contribute their `Into<String>` conversion cost.
     ///
     /// # Examples
     ///
@@ -392,6 +409,9 @@ impl CELError {
     /// Pass [`Renderer::plain`] for tests and non-ANSI contexts; pass
     /// [`Renderer::styled`] for terminal output.
     ///
+    /// - Complexity: O(s) source traversal for s source bytes, plus renderer layout;
+    ///   rendering uses O(s + b) auxiliary/output space for b output bytes.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -431,6 +451,7 @@ impl CELError {
 }
 
 impl std::fmt::Display for CELError {
+    /// Writes m message bytes in O(m) time without allocating an intermediate string.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
@@ -445,6 +466,9 @@ impl std::error::Error for CELError {}
 /// `proc_macro2::Span` wraps a compiler-internal handle that is only valid on
 /// the proc-macro thread. Convert to [`CELError`] via `From` when the error
 /// must cross thread boundaries or be stored for async reporting.
+///
+/// # Examples
+/// See [`Self::new`], [`Self::new_range`] and [`Self::with_cause`].
 #[derive(Clone, Debug)]
 pub struct ParseError {
     message: String,
@@ -474,6 +498,9 @@ impl ParseError {
 
     /// Creates a new parse error with the given message and token span.
     ///
+    /// - Complexity: O(m) time and space for m borrowed message bytes; transferring a `String`
+    ///   is O(1). Other message types contribute their `Into<String>` conversion cost.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -499,6 +526,8 @@ impl ParseError {
     /// sub-expression rather than a single token. At runtime the two spans
     /// are merged into a contiguous underline; at compile time two separate
     /// `compile_error!()` diagnostics are emitted.
+    ///
+    /// - Complexity: Matches the message conversion in [`Self::new`].
     ///
     /// # Examples
     ///
@@ -527,6 +556,9 @@ impl ParseError {
     }
 
     /// Returns the error message.
+    ///
+    /// # Examples
+    /// See [`Self::new`].
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -535,6 +567,13 @@ impl ParseError {
     ///
     /// Use this span with `quote_spanned!` in proc-macro code to attach the
     /// `compile_error!` to the exact source location.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::ParseError;
+    /// let error = ParseError::new("bad name", proc_macro2::Span::call_site());
+    /// assert_eq!(error.span().start().column, 0);
+    /// ```
     pub fn span(&self) -> proc_macro2::Span {
         self.span
     }
@@ -543,11 +582,16 @@ impl ParseError {
     ///
     /// `Some` for errors created with [`new_range`](Self::new_range);
     /// `None` for errors created with [`new`](Self::new).
+    ///
+    /// # Examples
+    /// See [`Self::new_range`].
     pub fn end_span(&self) -> Option<proc_macro2::Span> {
         self.end_span
     }
 
     /// Attaches secondary labelled spans, rendered as extra carets alongside the primary.
+    ///
+    /// - Complexity: O(k) to release k previously attached labels; transfers the new vector.
     ///
     /// # Examples
     ///
@@ -594,6 +638,9 @@ impl ParseError {
     /// block comment, or another invalid character — falling back to `err`'s own message only
     /// when the span doesn't resolve to a character in `source` (e.g. it points past the end).
     ///
+    /// - Complexity: O(s) inspection for s source bytes, plus lexer error display when needed;
+    ///   O(s) auxiliary/output space in delimiter classification.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -624,6 +671,10 @@ impl ParseError {
     /// `CELError` first when you have the source text at hand. When secondaries have been
     /// added via [`with_secondary`](Self::with_secondary), renders a multi-span diagnostic
     /// (the primary span plus one context caret per secondary) via [`format_multi_span`].
+    ///
+    /// - Complexity: O(k * s + l) annotation work for k total labels, s source bytes and
+    ///   l secondary-label bytes, plus renderer layout; O(k + l + s + b) auxiliary/output
+    ///   space for b output bytes.
     ///
     /// # Examples
     ///
@@ -683,6 +734,9 @@ impl ParseError {
 ///
 /// Use this at async/runtime boundaries where `Send + Sync` is required.
 impl From<ParseError> for CELError {
+    /// Transfers the message and complete primary range into a thread-safe error.
+    ///
+    /// - Complexity: O(k) to release k secondary labels, plus releasing the retained cause.
     fn from(e: ParseError) -> Self {
         let source_span = SourceSpan {
             start: e.span.start(),
@@ -693,6 +747,7 @@ impl From<ParseError> for CELError {
 }
 
 impl std::fmt::Display for ParseError {
+    /// Writes m message bytes in O(m) time without allocating an intermediate string.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
@@ -709,6 +764,9 @@ impl std::error::Error for ParseError {
 ///
 /// Add this as anyhow context with `.context(SpanContext::new(span))` when wrapping
 /// an op closure. Retrieve it from an `anyhow::Error` with `e.downcast_ref::<SpanContext>()`.
+///
+/// # Examples
+/// See [`Self::new`] and [`FormatRustcStyle::format_rustc_style`].
 pub struct SpanContext {
     span: SourceSpan,
 }
@@ -748,6 +806,9 @@ impl SpanContext {
     ///
     /// Delegates to `CELError::format_rustc_style` using `self.span` and `message`.
     ///
+    /// - Complexity: O(s + m) source/message work for s source bytes and m message bytes,
+    ///   plus renderer layout; O(s + m + b) auxiliary/output space for b output bytes.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -778,6 +839,7 @@ impl SpanContext {
 }
 
 impl std::fmt::Display for SpanContext {
+    /// Writes the start and end line/column coordinates.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -788,6 +850,7 @@ impl std::fmt::Display for SpanContext {
 }
 
 impl std::fmt::Debug for SpanContext {
+    /// Writes the context's source region as a named debug field.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SpanContext")
             .field("span", &self.span)
@@ -818,7 +881,24 @@ pub trait FormatRustcStyle {
     /// Formats in rustc diagnostic style.
     ///
     /// If the error carries a [`SpanContext`], produces a multi-line caret diagnostic.
+    /// Uses the root failure as the diagnostic title, regardless of textual context wrappers.
     /// Otherwise returns `self.to_string()`.
+    ///
+    /// - Complexity: O(c + s) traversal work for c error-chain links and s source bytes,
+    ///   plus error-display and renderer-layout costs; O(c + s + b) auxiliary/output
+    ///   space for b output bytes. Unlocated errors do not inspect the source.
+    ///
+    /// # Examples
+    /// ```
+    /// use annotate_snippets::Renderer;
+    /// use cel_parser::{FormatRustcStyle, SourceSpan, SpanContext};
+    /// let error = anyhow::anyhow!("division by zero")
+    ///     .context(SpanContext::new(SourceSpan::new(1, 0, 1, 1)));
+    /// let text = error.format_rustc_style("1", "input.cel", 1, &Renderer::plain());
+    /// assert!(text.contains("error: division by zero"));
+    /// assert!(text.contains("input.cel:1:1"));
+    /// ```
+    /// See the [`FormatRustcStyle`] example for the unlocated fallback.
     fn format_rustc_style(
         &self,
         source_code: &str,
@@ -829,6 +909,9 @@ pub trait FormatRustcStyle {
 }
 
 impl FormatRustcStyle for anyhow::Error {
+    /// Renders the located root failure, or the outer display text when no location exists.
+    ///
+    /// - Complexity: Matches [`FormatRustcStyle::format_rustc_style`].
     fn format_rustc_style(
         &self,
         source_code: &str,
@@ -837,13 +920,7 @@ impl FormatRustcStyle for anyhow::Error {
         renderer: &Renderer,
     ) -> String {
         if let Some(ctx) = self.downcast_ref::<SpanContext>() {
-            // `SpanContext` is the outermost layer in the anyhow chain, so `self.to_string()`
-            // would return the span location string ("at 1:5-1:6") rather than the op error
-            // message. `source()` recovers the actual error from the layer below.
-            let message = self
-                .source()
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| self.to_string());
+            let message = self.root_cause().to_string();
             ctx.format_rustc_style(&message, source_code, filename, start_line, renderer)
         } else {
             self.to_string()
@@ -1110,7 +1187,7 @@ mod tests {
         let span = SourceSpan::new(1, 0, 1, 5);
         let ctx = SpanContext::new(span);
         let s = ctx.to_string();
-        assert!(!s.is_empty());
+        assert_eq!(s, "at 1:0-1:5");
     }
 
     #[test]
@@ -1214,6 +1291,8 @@ mod tests {
         assert!(out.contains("mismatch"), "{out}");
         assert!(out.contains("first"), "{out}");
         assert!(out.contains("third"), "{out}");
+        assert!(out.contains("| ^^^     --- third"), "{out}");
+        assert!(out.contains("| first"), "{out}");
         assert!(!out.contains('\u{1b}'), "plain renderer has no ANSI: {out}");
     }
 

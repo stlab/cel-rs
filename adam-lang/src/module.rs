@@ -30,12 +30,14 @@ use crate::{
 
 /// Identifies a supplied module by nonempty, `::`-separated identifiers.
 ///
-/// Whitespace, raw identifiers, `_` alone, and `sheet`, `use`, `as` are not path segments.
+/// Whitespace, literal tokens, raw identifiers, `_` alone, and `sheet`, `use`, `as`
+/// are not path segments.
 /// See the [module example](self).
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ModulePath(Vec<String>);
 
 impl FromStr for ModulePath {
+    /// Reports an invalid externally supplied module path.
     type Err = ModuleDiagnostic;
 
     /// Validates and retains every identifier segment.
@@ -49,6 +51,22 @@ impl FromStr for ModulePath {
             return Err(crate::composition::diagnostic("invalid module path"));
         }
         Ok(Self(segments.into_iter().map(str::to_owned).collect()))
+    }
+}
+
+#[cfg(test)]
+mod identifier_tests {
+    use super::*;
+
+    /// Module paths require lexical identifiers, not Boolean literal tokens.
+    #[test]
+    fn module_paths_reject_literal_tokens() {
+        for path in ["true", "false", "a::true", "false::b"] {
+            assert!(path.parse::<ModulePath>().is_err(), "{path}");
+        }
+        for path in ["if", "else", "Δ::constraints"] {
+            assert_eq!(path.parse::<ModulePath>().unwrap().to_string(), path);
+        }
     }
 }
 
@@ -77,8 +95,8 @@ pub(crate) fn valid_identifier(name: &str) -> bool {
     let Ok(stream) = name.parse::<proc_macro2::TokenStream>() else {
         return false;
     };
-    let mut tokens = stream.into_iter();
-    matches!(tokens.next(), Some(proc_macro2::TokenTree::Ident(ident)) if ident == name)
+    let mut tokens = cel_parser::lex_lexer::LexLexer::new(stream.into_iter());
+    matches!(tokens.next(), Some(cel_parser::lex_lexer::Token::Identifier(ident)) if ident == name)
         && tokens.next().is_none()
 }
 

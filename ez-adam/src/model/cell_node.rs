@@ -9,6 +9,11 @@ use crate::model::geometry::Point;
 new_key_type! {
     /// A stable handle to a [`CellNode`] in a
     /// [`crate::model::document::Document`].
+    ///
+    /// # Examples
+    ///
+    /// `add_cell_node(&mut document, cell, position)` returns a placement ID;
+    /// another placement of the same cell has a distinct ID.
     pub struct CellNodeId;
 }
 
@@ -18,6 +23,11 @@ new_key_type! {
 /// Multiple `CellNode`s may reference the same [`CellId`] — "two instances
 /// of the same value in the graph" — each with its own [`Point`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// Place one cell twice with `add_cell_node`; the resulting nodes have
+/// independent positions but reference the same editable cell.
 pub struct CellNode {
     /// The cell being placed on the canvas.
     pub cell: CellId,
@@ -27,6 +37,10 @@ pub struct CellNode {
 
 impl CellNode {
     /// Creates a node placing `cell` at `position`.
+    ///
+    /// # Examples
+    ///
+    /// `CellNode::new(cell, Point::new(10.0, 20.0))` describes another placement of `cell`.
     #[must_use]
     pub fn new(cell: CellId, position: Point) -> Self {
         CellNode { cell, position }
@@ -39,6 +53,7 @@ mod tests {
     use slotmap::SlotMap;
 
     #[test]
+    /// Placement construction preserves its cell and position.
     fn new_sets_cell_and_position() {
         let mut cells: SlotMap<CellId, ()> = SlotMap::with_key();
         let cell = cells.insert(());
@@ -48,6 +63,7 @@ mod tests {
     }
 
     #[test]
+    /// Distinct placements of a shared cell retain distinct positions.
     fn two_nodes_of_the_same_cell_at_different_positions_are_distinct() {
         let mut cells: SlotMap<CellId, ()> = SlotMap::with_key();
         let cell = cells.insert(());

@@ -18,8 +18,25 @@ pub use cel_parser::Comment;
 /// # Examples
 ///
 /// ```
-/// let module = adam_lang::AdamAstParser::new().parse_module_str("sheet root {}").unwrap();
-/// assert_eq!(module.items.len(), 1);
+/// let module = adam_lang::AdamAstParser::new().parse_module_str(
+///     "use math::ops as operations;
+///      sheet component(input: i32, result: i32) {
+///          relationship { result := input; }
+///      }
+///      sheet root {
+///          source x: i32 = 1 filter 0..=10 require { @positive x > 0; };
+///          cell y: i32;
+///          cell z: i32;
+///          out pair: (i32, i32) := (x, y);
+///          relationship component(input: x, result: y);
+///          conditional true {
+///              true => { relationship { (y, z) := (x, x); } }
+///              _ => { relationship { y := x; } }
+///          }
+///      }"
+/// ).unwrap();
+/// assert!(module.errors.is_empty());
+/// assert_eq!(module.items.len(), 3);
 /// ```
 #[derive(Debug, Clone)]
 pub struct Module {
@@ -32,6 +49,10 @@ pub struct Module {
 }
 
 /// A file-level declaration or a recovered malformed declaration.
+///
+/// # Examples
+///
+/// See [`Module`] for a parsed file containing imports and sheet definitions.
 #[derive(Debug, Clone)]
 pub enum ModuleItem {
     /// An explicit named import.
@@ -61,6 +82,10 @@ impl ModuleItem {
 }
 
 /// `use_decl = "use" identifier { "::" identifier } [ "as" identifier ] ";".`
+///
+/// # Examples
+///
+/// See [`Module`] for an aliased import in a parsed file.
 #[derive(Debug, Clone)]
 pub struct UseDecl {
     /// The `use` keyword's span, excluding preceding documentation.
@@ -76,6 +101,10 @@ pub struct UseDecl {
 }
 
 /// A required typed formal parameter, without a default or an initializer.
+///
+/// # Examples
+///
+/// See [`Module`] for the component's `input` and `result` parameters.
 #[derive(Debug, Clone)]
 pub struct ParameterDecl {
     /// The formal parameter's name.
@@ -87,6 +116,10 @@ pub struct ParameterDecl {
 }
 
 /// A named binding from a formal parameter to a caller's cell identifier.
+///
+/// # Examples
+///
+/// See [`Module`] for `input: x` and `result: y` actual arguments.
 #[derive(Debug, Clone)]
 pub struct NamedArgument {
     /// The formal parameter's name.
@@ -100,6 +133,10 @@ pub struct NamedArgument {
 }
 
 /// `relationship_use = "relationship" path "(" [ named_arguments ] ")" ";".`
+///
+/// # Examples
+///
+/// See [`Module`] for a component use with named actual arguments.
 #[derive(Debug, Clone)]
 pub struct RelationshipUse {
     /// The `relationship` keyword's span, excluding any preceding documentation.
@@ -124,6 +161,10 @@ pub struct RelationshipUse {
 }
 
 /// A conditional branch item, retaining inline and included relationship order.
+///
+/// # Examples
+///
+/// See [`Module`] for inline relationships in named and default branches.
 #[derive(Debug, Clone)]
 pub enum BranchItem {
     /// An ordinary inline relationship.
@@ -134,8 +175,12 @@ pub enum BranchItem {
 
 /// A parsed adam-lang sheet declaration, with source spans on every node.
 ///
-/// Built by [`crate::AdamAstParser`]; consumed by the language server, the formatter, and the
-/// (separate, future) compile-to-`Sheet` phase.
+/// Built by [`crate::AdamAstParser`]; consumed by the language server, the formatter,
+/// and [`crate::ModuleCompiler`].
+///
+/// # Examples
+///
+/// See [`Module`] for a root sheet and a parameterized definition.
 #[derive(Debug, Clone)]
 pub struct Sheet {
     /// The `sheet` keyword's span, excluding any preceding documentation.
@@ -173,6 +218,10 @@ pub struct Sheet {
 }
 
 /// One top-level item inside a `sheet { ... }` body.
+///
+/// # Examples
+///
+/// See [`Module`] for source, cell, output, relationship-use and conditional items.
 #[derive(Debug, Clone)]
 pub enum SheetItem {
     /// A `cell` declaration.
@@ -211,6 +260,15 @@ pub enum SheetItem {
 
 impl SheetItem {
     /// Returns this item's source span.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let sheet = adam_lang::AdamAstParser::new()
+    ///     .parse_str("sheet s {\n    source x: i32;\n}").unwrap();
+    /// assert_eq!(sheet.items[0].span().start.start().line, 2);
+    /// assert_eq!(sheet.items[0].span().start.start().column, 4);
+    /// ```
     pub fn span(&self) -> ExprSpan {
         match self {
             SheetItem::Cell(c) => c.span,
@@ -309,23 +367,26 @@ impl SheetItem {
     }
 }
 
-/// `type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".`
+/// Re-exports CEL's shared named, generic, tuple, array, and callable type expressions.
 ///
-/// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T` — types have
-/// no precedence to disambiguate, but staying symmetric with `cel_parser`'s expression grammar
-/// costs nothing); `(T,)` is a 1-element tuple; `(T, U, ...)` is n-element, no trailing comma.
-/// Shared verbatim with `cel_parser` (which additionally supports `[T]` array types and
-/// `Name(args)` parameterized/generic types) so both crates resolve, format, and error on
-/// exactly one type-expression grammar.
+/// `()` is the empty tuple type; `(T)` is grouping; `(T,)` is a singleton tuple.
+/// Larger tuples prohibit trailing commas. Both languages use the same parser.
+///
+/// # Examples
+///
+/// See [`crate::TypeRegistry::resolve`] for parsing and resolving a nested array-and-tuple type.
 pub use cel_parser::TypeExpr;
 
 /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" { requirement }
 /// "}" ] ";".`
 ///
 /// `type_name`/`initializer` are unresolved — no `TypeRegistry` lookup, no literal validation.
-/// Exactly one of `type_name`, `initializer` may be absent, per the grammar's two
-/// `cell_type_init` forms, but this is not enforced here (an all-`None` `CellDecl` cannot be
-/// produced by [`crate::AdamAstParser`], which requires at least one of `:`/`=`).
+/// Parsed declarations contain an annotation, an initializer, or both. Public field storage
+/// does not enforce this invariant for manually constructed nodes.
+///
+/// # Examples
+///
+/// See [`Module`] for annotated cells in a parsed sheet.
 #[derive(Debug, Clone)]
 pub struct CellDecl {
     /// The cell's declared name.
@@ -362,8 +423,12 @@ pub struct CellDecl {
 /// `source_decl = "source" identifier cell_type_init [ cell_filter ] [ "require" "{" {
 /// requirement } "}" ] ";".`
 ///
-/// Same shape as [`CellDecl`]: a `source` cell's initializer is a one-time literal exactly like a
+/// Same shape as [`CellDecl`]: a `source` cell's initializer is a one-time expression exactly like a
 /// plain `cell`'s, and it supports the same `filter` clause and `require` block.
+///
+/// # Examples
+///
+/// See [`Module`] for a source with an initializer, range filter and requirement.
 #[derive(Debug, Clone)]
 pub struct SourceDecl {
     /// The source cell's declared name.
@@ -398,6 +463,10 @@ pub struct SourceDecl {
 }
 
 /// `cell_filter = "filter" expression.`
+///
+/// # Examples
+///
+/// See [`Module`] for an inclusive range filter.
 #[derive(Debug, Clone)]
 pub struct CellFilter {
     /// The filter's body expression. `_` inside it denotes the candidate value being conformed;
@@ -408,6 +477,10 @@ pub struct CellFilter {
 }
 
 /// `relationship_decl = "relationship" "{" { binding } "}".`
+///
+/// # Examples
+///
+/// See [`Module`] for direct and destructuring bindings in relationships.
 #[derive(Debug, Clone)]
 pub struct RelationshipDecl {
     /// The relationship block's bindings, in declaration order.
@@ -439,10 +512,8 @@ pub struct RelationshipDecl {
 /// `binding = binding_target ":=" expression ";".`
 /// `binding_target = identifier | "(" identifier "," [ identifier { "," identifier } ] ")".`
 ///
-/// Unlike the old `method_decl` this replaces, a binding names no explicit input cell list —
-/// its inputs are whichever already-declared cells `body` references, deduced at compile time
-/// (see `crate::parser::AdamParser::parse_deduced_expr`); this untyped CST parser has no cell
-/// declarations to resolve against, so it records no input list at all, only the outputs.
+/// The compiler deduces inputs from resolved cell references in `body`. The structural
+/// AST records only the explicit output names, without resolving cell declarations.
 ///
 /// Parenthesizing the left-hand side requests tuple destructuring, matching Rust's tuple-pattern
 /// syntax: `(a, b) := ...` and the single-element `(a,) := ...` (trailing comma mandatory,
@@ -450,6 +521,10 @@ pub struct RelationshipDecl {
 /// `outputs`. A bare identifier binds `body`'s whole result directly to that one output instead.
 /// A parenthesized binding target always requires a comma; `(a) := ...` is invalid.
 /// See [`Self::destructure`].
+///
+/// # Examples
+///
+/// See [`Module`] for both direct and destructuring binding targets.
 #[derive(Debug, Clone)]
 pub struct BindingDecl {
     /// The binding's output cell names (the left-hand side), in declaration order.
@@ -483,6 +558,10 @@ pub struct BindingDecl {
 /// `type_expr` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
 /// absent, the cell's type is inferred from `initializer`'s result type by the compile phase
 /// (`crate::parser::AdamParser`) — never here.
+///
+/// # Examples
+///
+/// See [`Module`] for a tuple-valued annotated output.
 #[derive(Debug, Clone)]
 pub struct OutDecl {
     /// The declared cell's name.
@@ -514,7 +593,11 @@ pub struct OutDecl {
     pub span: ExprSpan,
 }
 
-/// The optional `require { ... }` block trailing an `out` declaration's initializer.
+/// An optional `require { ... }` block on a cell, source or output declaration.
+///
+/// # Examples
+///
+/// See [`Module`] for a labeled requirement on a source.
 #[derive(Debug, Clone)]
 pub struct RequireBlock {
     /// The block's requirements, in declaration order.
@@ -537,6 +620,10 @@ pub struct RequireBlock {
 /// `name`, when present, is a plain string label passed to `adam_rs::Sheet::add_requirement`,
 /// not a cell reference — it may coincide with a cell name declared elsewhere in the sheet but
 /// doesn't have to.
+///
+/// # Examples
+///
+/// See [`Module`] for an explicitly labeled Boolean requirement.
 #[derive(Debug, Clone)]
 pub struct RequirementDecl {
     /// The requirement's declared label, if the `@identifier` marker was present.
@@ -560,6 +647,10 @@ pub struct RequirementDecl {
 }
 
 /// `conditional_decl = "conditional" expression "{" { conditional_branch } "}".`
+///
+/// # Examples
+///
+/// See [`Module`] for a conditional with named and default branches.
 #[derive(Debug, Clone)]
 pub struct ConditionalDecl {
     /// The match subject: an arbitrary expression over already-declared cells (a bare
@@ -595,8 +686,16 @@ pub struct ConditionalDecl {
 
 /// The `_ => { ... }` default branch of a `conditional_decl`, mirroring `ConditionalBranch`'s
 /// shape (it has no match literal of its own).
+///
+/// # Examples
+///
+/// See [`Module`] for a conditional with a terminal default branch.
 #[derive(Debug, Clone)]
 pub struct DefaultBranch {
+    /// Comments before the default pattern, in source order.
+    pub leading_comment: Option<Comment>,
+    /// Whether a blank line precedes the default pattern.
+    pub blank_line_before: bool,
     /// The default branch's relationships, in declaration order.
     pub relationships: Vec<BranchItem>,
     /// A trailing comment immediately preceding this branch's own closing `}`, if recovered.
@@ -617,6 +716,10 @@ pub struct DefaultBranch {
 
 /// `conditional_branch = literal_pattern "=>" "{" { relationship_item } "}".`
 /// `literal_pattern = ["-"] literal.`
+///
+/// # Examples
+///
+/// See [`Module`] for a Boolean literal branch containing a destructuring binding.
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
     /// The branch's unresolved match literal, always stored unsigned; see [`Self::negated`]
@@ -659,6 +762,95 @@ mod tests {
     use super::*;
     use proc_macro2::Span;
 
+    /// Checks nondefault source coordinates and independent trivia replacement for every variant.
+    #[test]
+    fn sheet_item_operations_preserve_unrelated_fields_for_every_variant() {
+        let source = "sheet s {\ncell a: i32;\nsource b: i32;\nout c := 1;\nrelationship {}\nrelationship component();\nconditional true {}\nbogus;\n}";
+        let mut sheet = crate::AdamAstParser::new().parse_str(source).unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 7);
+        let replacement = "header"
+            .parse::<proc_macro2::TokenStream>()
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .span();
+        for (index, item) in sheet.items.iter_mut().enumerate() {
+            let original = item.span();
+            assert_eq!(original.start.start().line, index + 2);
+            assert_eq!(original.start.start().column, 0);
+            item.set_leading_comment(Comment::Line("old".into()));
+            item.set_leading_comment(Comment::Block("leading".into()));
+            item.set_trailing_line_comment(Comment::Line("trailing".into()));
+            item.set_blank_line_before(true);
+            item.set_blank_line_before(false);
+            item.set_doc_comment("documentation".into(), replacement);
+            assert_eq!(item.span().start.start(), replacement.start());
+            assert_eq!(item.span().end.end(), original.end.end());
+            let (leading, trailing, blank, doc) = item_trivia(item);
+            assert_eq!(leading, Some(&Comment::Block("leading".into())));
+            assert_eq!(trailing, Some(&Comment::Line("trailing".into())));
+            assert!(!blank);
+            assert_eq!(doc, Some("documentation"));
+        }
+    }
+
+    /// Borrows each variant's trivia without changing its span or contents.
+    fn item_trivia(item: &SheetItem) -> (Option<&Comment>, Option<&Comment>, bool, Option<&str>) {
+        match item {
+            SheetItem::Cell(c) => (
+                c.leading_comment.as_ref(),
+                c.trailing_line_comment.as_ref(),
+                c.blank_line_before,
+                c.doc_comment.as_deref(),
+            ),
+            SheetItem::Source(c) => (
+                c.leading_comment.as_ref(),
+                c.trailing_line_comment.as_ref(),
+                c.blank_line_before,
+                c.doc_comment.as_deref(),
+            ),
+            SheetItem::Out(c) => (
+                c.leading_comment.as_ref(),
+                c.trailing_line_comment.as_ref(),
+                c.blank_line_before,
+                c.doc_comment.as_deref(),
+            ),
+            SheetItem::Relationship(c) => (
+                c.leading_comment.as_ref(),
+                c.trailing_line_comment.as_ref(),
+                c.blank_line_before,
+                c.doc_comment.as_deref(),
+            ),
+            SheetItem::RelationshipUse(c) => (
+                c.leading_comment.as_ref(),
+                c.trailing_line_comment.as_ref(),
+                c.blank_line_before,
+                c.doc_comment.as_deref(),
+            ),
+            SheetItem::Conditional(c) => (
+                c.leading_comment.as_ref(),
+                c.trailing_line_comment.as_ref(),
+                c.blank_line_before,
+                c.doc_comment.as_deref(),
+            ),
+            SheetItem::Error {
+                leading_comment,
+                trailing_line_comment,
+                blank_line_before,
+                doc_comment,
+                ..
+            } => (
+                leading_comment.as_ref(),
+                trailing_line_comment.as_ref(),
+                *blank_line_before,
+                doc_comment.as_deref(),
+            ),
+        }
+    }
+
+    /// Wraps a token span as a point expression span.
     fn point(span: Span) -> ExprSpan {
         ExprSpan {
             start: span,
@@ -666,6 +858,7 @@ mod tests {
         }
     }
 
+    /// Returns the stored cell declaration span.
     #[test]
     fn sheet_item_span_reads_the_cell_variant() {
         let span = point(Span::call_site());
@@ -685,6 +878,7 @@ mod tests {
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
     }
 
+    /// Returns the stored inline relationship span.
     #[test]
     fn sheet_item_span_reads_the_relationship_variant() {
         let span = point(Span::call_site());
@@ -702,6 +896,7 @@ mod tests {
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
     }
 
+    /// Returns the stored conditional declaration span.
     #[test]
     fn sheet_item_span_reads_the_conditional_variant() {
         let span = point(Span::call_site());
@@ -724,6 +919,7 @@ mod tests {
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
     }
 
+    /// Returns the stored recovery range.
     #[test]
     fn sheet_item_span_reads_the_error_variant() {
         let span = point(Span::call_site());
@@ -737,6 +933,7 @@ mod tests {
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
     }
 
+    /// Attaches a leading comment to a cell.
     #[test]
     fn set_leading_comment_sets_the_cell_variant() {
         let span = point(Span::call_site());
@@ -762,6 +959,7 @@ mod tests {
         }
     }
 
+    /// Attaches a leading comment to a recovery placeholder.
     #[test]
     fn set_leading_comment_sets_the_error_variant() {
         let span = point(Span::call_site());
@@ -783,6 +981,7 @@ mod tests {
         }
     }
 
+    /// Marks a cell as preceded by a blank line.
     #[test]
     fn set_blank_line_before_sets_the_cell_variant() {
         let span = point(Span::call_site());
@@ -806,6 +1005,7 @@ mod tests {
         }
     }
 
+    /// Returns the stored output declaration span.
     #[test]
     fn sheet_item_span_reads_the_out_variant() {
         let span = point(Span::call_site());
@@ -828,6 +1028,7 @@ mod tests {
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
     }
 
+    /// Attaches a leading comment to an output.
     #[test]
     fn set_leading_comment_sets_the_out_variant() {
         let span = point(Span::call_site());
@@ -856,8 +1057,10 @@ mod tests {
         }
     }
 
+    /// Accepts the CEL parser type expression without conversion.
     #[test]
     fn ast_type_expr_is_the_shared_cel_parser_type_expr() {
+        /// Requires the expression's static type to match the shared parser type.
         fn assert_same_type<T>(_: &T) {}
         let span = cel_parser::ExprSpan {
             start: Span::call_site(),
@@ -871,6 +1074,7 @@ mod tests {
         assert_same_type::<cel_parser::TypeExpr>(&expr);
     }
 
+    /// Returns a named type expression's stored span.
     #[test]
     fn type_expr_named_span_is_its_own_span() {
         let span = point(Span::call_site());
@@ -882,6 +1086,7 @@ mod tests {
         assert_eq!(format!("{:?}", expr.span()), format!("{span:?}"));
     }
 
+    /// Returns a tuple type expression's stored span.
     #[test]
     fn type_expr_tuple_span_is_the_whole_parenthesized_span() {
         let span = point(Span::call_site());
@@ -890,95 +1095,5 @@ mod tests {
             span,
         };
         assert_eq!(format!("{:?}", expr.span()), format!("{span:?}"));
-    }
-
-    #[test]
-    fn cell_decl_type_name_holds_a_nested_tuple_type_expr() {
-        let span = point(Span::call_site());
-        let cell = CellDecl {
-            name: "a".to_string(),
-            name_span: span,
-            type_name: Some(TypeExpr::Tuple {
-                elements: vec![
-                    TypeExpr::Named {
-                        name: "i32".to_string(),
-                        args: Vec::new(),
-                        span,
-                    },
-                    TypeExpr::Named {
-                        name: "f64".to_string(),
-                        args: Vec::new(),
-                        span,
-                    },
-                ],
-                span,
-            }),
-            initializer: None,
-            filter: None,
-            require: None,
-            leading_comment: None,
-            doc_comment: None,
-            trailing_line_comment: None,
-            blank_line_before: false,
-            span,
-        };
-        match cell.type_name {
-            Some(TypeExpr::Tuple { elements, .. }) => assert_eq!(elements.len(), 2),
-            other => panic!("expected Tuple, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cell_decl_initializer_holds_a_parsed_expr() {
-        let span = point(Span::call_site());
-        let cell = CellDecl {
-            name: "a".to_string(),
-            name_span: span,
-            type_name: None,
-            initializer: Some(cel_parser::Expr::Ident {
-                name: "x".to_string(),
-                span,
-            }),
-            filter: None,
-            require: None,
-            leading_comment: None,
-            doc_comment: None,
-            trailing_line_comment: None,
-            blank_line_before: false,
-            span,
-        };
-        assert!(matches!(
-            cell.initializer,
-            Some(cel_parser::Expr::Ident { .. })
-        ));
-    }
-
-    #[test]
-    fn cell_decl_filter_field_holds_a_cell_filter() {
-        let span = point(Span::call_site());
-        let cell = CellDecl {
-            name: "a".to_string(),
-            name_span: span,
-            type_name: None,
-            initializer: None,
-            filter: Some(CellFilter {
-                body: cel_parser::Expr::Ident {
-                    name: "_".to_string(),
-                    span,
-                },
-                span,
-            }),
-            require: None,
-            leading_comment: None,
-            doc_comment: None,
-            trailing_line_comment: None,
-            blank_line_before: false,
-            span,
-        };
-        let filter = cell.filter.as_ref().expect("filter present");
-        assert!(matches!(
-            &filter.body,
-            cel_parser::Expr::Ident { name, .. } if name == "_"
-        ));
     }
 }

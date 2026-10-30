@@ -3,8 +3,8 @@
 //! The recursive-descent grammar in `lib.rs` is generic over `C: ParserContext` so the same
 //! grammar can drive different backends without duplicating it. [`DynSegmentContext`] is the
 //! first implementation: it reproduces exactly what `CELParser` did before this trait existed,
-//! wrapping a [`DynSegment`] one-for-one. A future AST-building context (for the language
-//! server, formatter, and eventual macro-compilation backend) is expected to be the second.
+//! wrapping a [`DynSegment`] one-for-one. [`crate::AstContext`] retains syntax for the language
+//! server, formatter, and retained compiler.
 
 use cel_runtime::DynSegment;
 use proc_macro2::Span;
@@ -207,6 +207,8 @@ impl<'a> AnnotatedArray<'a> {
     /// Returns `Err` if the annotation names an unknown type, does not name a complete array
     /// type, or has an unrepresentable canonical layout.
     ///
+    /// - Complexity: O(1) bundling overhead plus the configured annotation resolver's cost.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -302,8 +304,14 @@ impl<'a> AnnotatedArray<'a> {
 /// The pluggable target a grammar production emits into.
 ///
 /// Each method mirrors one operation the grammar in `lib.rs` needs. Implementations decide what
-/// "emitting" means: [`DynSegmentContext`] executes immediately into a stack machine; a future
-/// AST-building context would instead record a tree node.
+/// "emitting" means: [`DynSegmentContext`] builds stack-machine operations;
+/// [`crate::AstContext`] records syntax without executing it.
+///
+/// Emission costs depend on the selected context, including its storage, descriptor traversal,
+/// literal cloning and host callbacks.
+///
+/// # Examples
+/// See [`Self::apply_op`] for runtime emission and [`Self::apply_member`] for syntax construction.
 pub trait ParserContext: Sized {
     /// Returns whether closure annotations must resolve while parsing rather than remain syntax.
     ///
@@ -317,6 +325,12 @@ pub trait ParserContext: Sized {
     }
 
     /// Creates a fresh, empty context with no operations recorded yet.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{DynSegmentContext, ParserContext};
+    /// assert_eq!(DynSegmentContext::new_context().current_stack_offset(), 0);
+    /// ```
     fn new_context() -> Self;
 
     /// Creates an empty fragment for building an alternate branch (one side of a
@@ -325,9 +339,17 @@ pub trait ParserContext: Sized {
     /// - Precondition: `self` matches whatever precondition the implementation's equivalent of
     ///   `DynSegment::new_fragment` requires (for `DynSegmentContext`, a condition value already
     ///   present).
+    ///
+    /// # Examples
+    /// See [`Self::apply_logical`] for an independent right-hand-side fragment.
     fn new_fragment(&self) -> Self;
 
     /// Pushes a literal value with the source span of the token it came from.
+    ///
+    /// - Precondition: the selected context supports `T` as a literal type.
+    ///
+    /// # Examples
+    /// See [`Self::apply_op`] for literal operands.
     fn push_literal<T: 'static + Clone>(&mut self, value: T, span: Span);
 
     /// Applies a named operator or zero-arity identifier lookup, using `op_lookup` to resolve it
@@ -336,6 +358,18 @@ pub trait ParserContext: Sized {
     /// # Errors
     ///
     /// Returns `Err` if `op_lookup` cannot resolve `name` for `arity` operands.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{DynSegmentContext, OpLookup, ParserContext};
+    /// use proc_macro2::Span;
+    /// let mut context = DynSegmentContext::new_context();
+    /// let span = Span::call_site();
+    /// context.push_literal(40i32, span);
+    /// context.push_literal(2i32, span);
+    /// context.apply_op(&OpLookup::new(), "+", 2, span, span).unwrap();
+    /// assert_eq!(context.into_inner().call0::<i32>().unwrap(), 42);
+    /// ```
     fn apply_op(
         &mut self,
         op_lookup: &OpLookup,
@@ -412,6 +446,19 @@ pub trait ParserContext: Sized {
     /// return `Err` if the leading condition value isn't a `bool`. Implementations that defer
     /// type validation to a later phase (e.g. [`crate::ast::AstContext`]) never return `Err`
     /// here.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{DynSegmentContext, ParserContext};
+    /// use proc_macro2::Span;
+    /// let mut context = DynSegmentContext::new_context();
+    /// let span = Span::call_site();
+    /// context.push_literal(false, span);
+    /// let mut rhs = context.new_fragment();
+    /// rhs.push_literal(true, span);
+    /// context.apply_logical("&&", rhs, span, span).unwrap();
+    /// assert!(!context.into_inner().call0::<bool>().unwrap());
+    /// ```
     fn apply_logical(&mut self, name: &str, rhs: Self, start: Span, end: Span)
     -> crate::Result<()>;
 
@@ -431,6 +478,21 @@ pub trait ParserContext: Sized {
     /// error). Implementations that defer type validation to a later phase (e.g.
     /// [`crate::ast::AstContext`]) never return `Err` here, and record whether `else_fragment` was
     /// `None` directly (see [`crate::Expr::If`]) instead of synthesizing anything.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{DynSegmentContext, ParserContext};
+    /// use proc_macro2::Span;
+    /// let mut context = DynSegmentContext::new_context();
+    /// let span = Span::call_site();
+    /// context.push_literal(true, span);
+    /// let mut yes = context.new_fragment();
+    /// yes.push_literal(42i32, span);
+    /// let mut no = context.new_fragment();
+    /// no.push_literal(0i32, span);
+    /// context.join2(yes, Some(no), span, span).unwrap();
+    /// assert_eq!(context.into_inner().call0::<i32>().unwrap(), 42);
+    /// ```
     fn join2(
         &mut self,
         then_fragment: Self,
@@ -444,6 +506,21 @@ pub trait ParserContext: Sized {
     ///
     /// # Errors
     /// Returns an error if the tuple's frame or canonical layout cannot be represented.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{DynSegmentContext, ParserContext};
+    /// use proc_macro2::Span;
+    /// let mut context = DynSegmentContext::new_context();
+    /// let span = Span::call_site();
+    /// let ambient = context.current_stack_offset();
+    /// context.push_literal(42i32, span);
+    /// context.push_literal(false, span);
+    /// context.make_tuple(2, ambient, span, span).unwrap();
+    /// assert_eq!(context.peek_tuple_arity(), Some(2));
+    /// context.tuple_index(0, span, span).unwrap();
+    /// assert_eq!(context.into_inner().call0::<i32>().unwrap(), 42);
+    /// ```
     fn make_tuple(
         &mut self,
         n: usize,
@@ -464,6 +541,19 @@ pub trait ParserContext: Sized {
     /// return `Err` if the elements' complete recursive runtime shapes differ, or if the array's storage
     /// layout cannot be represented. Implementations that defer type validation to a later phase
     /// (e.g. [`crate::ast::AstContext`]) never return `Err` here.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, Expr, ParserContext};
+    /// use proc_macro2::Span;
+    /// let mut context = AstContext::new_context();
+    /// let span = Span::call_site();
+    /// let ambient = context.current_stack_offset();
+    /// context.push_literal(1i32, span);
+    /// context.push_literal(2i32, span);
+    /// context.make_array(2, ambient, span, span).unwrap();
+    /// assert!(matches!(context.into_expr(), Expr::Array { elements, .. } if elements.len() == 2));
+    /// ```
     fn make_array(
         &mut self,
         n: usize,
@@ -493,6 +583,10 @@ pub trait ParserContext: Sized {
     /// Returns `Err` under [`Self::make_array`]'s conditions, and additionally — for an
     /// implementation that resolves the annotation here — if the annotation names an unknown
     /// type, does not name a complete array type, or disagrees with the collected elements.
+    ///
+    /// # Examples
+    /// See [`AnnotatedArray::resolve_element_type`] for annotation resolution and
+    /// [`Self::make_array`] for element emission.
     fn make_annotated_array(
         &mut self,
         n: usize,
@@ -502,20 +596,28 @@ pub trait ParserContext: Sized {
         end: Span,
     ) -> crate::Result<()>;
 
-    /// Returns the arity of the tuple currently on top, or `None` if the top value isn't a
-    /// tuple.
+    /// Returns the known tuple arity, or `None` for a non-tuple or unresolved value.
+    ///
+    /// # Examples
+    /// See [`Self::make_tuple`] for a resolved two-field tuple.
     fn peek_tuple_arity(&self) -> Option<usize>;
 
     /// Replaces the tuple on top with its `index`-th element. `start`/`end` cover the base
     /// expression through the index token.
     ///
-    /// - Precondition: `peek_tuple_arity()` returns `Some(arity)` with `index < arity`.
-    ///
     /// # Errors
-    /// Returns an error if the selected field's transfer frame cannot be represented.
+    /// Returns an error if a resolved value is not a tuple, its index is out of bounds,
+    /// or the selected field's transfer frame cannot be represented.
+    /// Syntax-only contexts retain the index without imposing semantic bounds.
+    ///
+    /// # Examples
+    /// See [`Self::make_tuple`] for selection from a resolved tuple.
     fn tuple_index(&mut self, index: usize, start: Span, end: Span) -> crate::Result<()>;
 
     /// Returns the current stack offset, used to compute tuple layouts.
+    ///
+    /// # Examples
+    /// See [`Self::make_tuple`] for recording the offset before emitting fields.
     fn current_stack_offset(&self) -> usize;
 
     /// Applies a cast (`expr as Type`), consuming the operand already present on `self`
@@ -528,6 +630,18 @@ pub trait ParserContext: Sized {
     /// return `Err` if `type_name` isn't a recognized cast-target type, or if no conversion
     /// from the operand's current type to it is registered. Implementations that defer type
     /// validation to a later phase (e.g. [`crate::ast::AstContext`]) never return `Err` here.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{DynSegmentContext, OpLookup, ParserContext};
+    /// use proc_macro2::Span;
+    /// let mut context = DynSegmentContext::new_context();
+    /// let span = Span::call_site();
+    /// context.push_literal(7i32, span);
+    /// context.apply_cast(&OpLookup::new(), "i64", span, span).unwrap();
+    /// assert_eq!(context.output_type_id(), Some(std::any::TypeId::of::<i64>()));
+    /// assert_eq!(context.into_inner().call0::<i64>().unwrap(), 7);
+    /// ```
     fn apply_cast(
         &mut self,
         op_lookup: &OpLookup,
@@ -554,6 +668,18 @@ pub trait ParserContext: Sized {
     /// Returns `Err` if this `ParserContext` implementation doesn't support closures, or (for an
     /// implementation that validates during parsing) if `body` is otherwise unsuitable — e.g.
     /// [`DynSegmentContext`] rejects a `body` that doesn't produce exactly one value.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, Expr, ParserContext};
+    /// use proc_macro2::Span;
+    /// let mut context = AstContext::new_context();
+    /// let span = Span::call_site();
+    /// let mut body = AstContext::new_context();
+    /// body.push_literal(42i32, span);
+    /// context.push_closure(Vec::new(), Vec::new(), body, span).unwrap();
+    /// assert!(matches!(context.into_expr(), Expr::Closure { params, .. } if params.is_empty()));
+    /// ```
     fn push_closure(
         &mut self,
         param_types: Vec<cel_runtime::ValueType>,
@@ -576,12 +702,11 @@ pub trait ParserContext: Sized {
     /// already-compiled body, mirroring [`Self::peek_tuple_arity`]'s "ask the context what it
     /// currently holds" shape, generalized from "is it a tuple" to "what type is it".
     ///
-    /// The default implementation returns `None`, matching [`Self::push_closure`]'s default
-    /// "unsupported" behavior — an implementation with no notion of a parse-time runtime type
-    /// (e.g. an AST-building context) simply can't answer this, which surfaces to the caller the
-    /// same way an empty or multi-valued body does (a plain parse error), and in practice never
-    /// matters for such an implementation anyway, since its `push_closure` override (if any)
-    /// would reject the closure regardless.
+    /// The default implementation returns `None`. A syntax-only context can retain closures
+    /// without answering this runtime query; [`Self::resolves_closure_types`] selects that policy.
+    ///
+    /// # Examples
+    /// See [`Self::apply_cast`] for a known runtime output type.
     fn output_type_id(&self) -> Option<std::any::TypeId> {
         None
     }
@@ -603,6 +728,9 @@ pub struct DynSegmentContext(pub(crate) DynSegment);
 
 impl DynSegmentContext {
     /// Returns the wrapped [`DynSegment`], consuming `self`.
+    ///
+    /// # Examples
+    /// See [`ParserContext::apply_op`] for executing the returned segment.
     pub fn into_inner(self) -> DynSegment {
         self.0
     }
@@ -660,28 +788,34 @@ impl DynSegmentContext {
 }
 
 impl std::ops::Deref for DynSegmentContext {
+    /// The execution owner borrowed through this context.
     type Target = DynSegment;
 
+    /// Borrows the execution segment without transferring ownership.
     fn deref(&self) -> &DynSegment {
         &self.0
     }
 }
 
 impl std::ops::DerefMut for DynSegmentContext {
+    /// Exclusively borrows the execution segment.
     fn deref_mut(&mut self) -> &mut DynSegment {
         &mut self.0
     }
 }
 
 impl ParserContext for DynSegmentContext {
+    /// Creates an empty execution owner with no arguments.
     fn new_context() -> Self {
         DynSegmentContext(DynSegment::new::<()>())
     }
 
+    /// Creates an independent branch owner preserving the argument layout.
     fn new_fragment(&self) -> Self {
         DynSegmentContext(self.0.new_fragment())
     }
 
+    /// Emits an owned literal and attaches its builtin descriptor when available.
     fn push_literal<T: 'static + Clone>(&mut self, value: T, _span: Span) {
         self.0.just(value);
         if let Some(ty) = crate::op_table::builtin_value_type(std::any::TypeId::of::<T>()) {
@@ -689,6 +823,7 @@ impl ParserContext for DynSegmentContext {
         }
     }
 
+    /// Emits a matching operation or reports a source-anchored dispatch error.
     fn apply_op(
         &mut self,
         op_lookup: &OpLookup,
@@ -736,6 +871,7 @@ impl ParserContext for DynSegmentContext {
         lookup.construct_record(name, &fields, ambient_start, &mut self.0, start, end)
     }
 
+    /// Emits lazy branching with the nonselected branch left unexecuted.
     fn apply_logical(
         &mut self,
         name: &str,
@@ -758,6 +894,7 @@ impl ParserContext for DynSegmentContext {
         result.map_err(|e| crate::ParseError::new_range(e.to_string(), start, end))
     }
 
+    /// Joins compatible branch outputs, supplying unit for an absent alternative.
     fn join2(
         &mut self,
         then_fragment: Self,
@@ -781,6 +918,7 @@ impl ParserContext for DynSegmentContext {
         self.0.join2(then_fragment.0, else_fragment.0)
     }
 
+    /// Builds a checked tuple layout from the current source-order fields.
     fn make_tuple(
         &mut self,
         n: usize,
@@ -793,6 +931,7 @@ impl ParserContext for DynSegmentContext {
             .map_err(|error| crate::ParseError::new_range(error.to_string(), start, end))
     }
 
+    /// Builds an array or reports a source-anchored element-shape error.
     fn make_array(
         &mut self,
         n: usize,
@@ -808,6 +947,7 @@ impl ParserContext for DynSegmentContext {
             .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end))
     }
 
+    /// Resolves an annotation before constructing its checked array representation.
     fn make_annotated_array(
         &mut self,
         n: usize,
@@ -824,20 +964,38 @@ impl ParserContext for DynSegmentContext {
         )
     }
 
+    /// Returns the execution stack's known tuple arity.
     fn peek_tuple_arity(&self) -> Option<usize> {
         self.0.peek_tuple_arity()
     }
 
+    /// Validates a resolved tuple index before emitting its checked field transfer.
+    ///
+    /// # Errors
+    /// Returns a spanned error for a non-tuple, out-of-bounds index, or unrepresentable frame.
     fn tuple_index(&mut self, index: usize, start: Span, end: Span) -> crate::Result<()> {
+        let arity = self
+            .0
+            .peek_tuple_arity()
+            .ok_or_else(|| crate::ParseError::new_range("'.N' requires a tuple", start, end))?;
+        if index >= arity {
+            return Err(crate::ParseError::new_range(
+                format!("tuple index `{index}` out of range for tuple of arity {arity}"),
+                start,
+                end,
+            ));
+        }
         self.0
             .tuple_index(index)
             .map_err(|error| crate::ParseError::new_range(error.to_string(), start, end))
     }
 
+    /// Returns the execution stack's current byte offset.
     fn current_stack_offset(&self) -> usize {
         self.0.current_stack_offset()
     }
 
+    /// Emits a checked cast or reports its source-anchored dispatch error.
     fn apply_cast(
         &mut self,
         op_lookup: &OpLookup,
@@ -848,6 +1006,7 @@ impl ParserContext for DynSegmentContext {
         op_lookup.lookup_cast(type_name, &mut self.0, start, end)
     }
 
+    /// Installs a typed noncapturing body with its complete parameter and result shapes.
     fn push_closure(
         &mut self,
         param_types: Vec<cel_runtime::ValueType>,
@@ -863,6 +1022,7 @@ impl ParserContext for DynSegmentContext {
             .map_err(|error| crate::ParseError::new_range(error.to_string(), span, span))
     }
 
+    /// Returns the sole execution result's known concrete identity.
     fn output_type_id(&self) -> Option<std::any::TypeId> {
         self.0.peek_output_type_id()
     }
@@ -1278,6 +1438,61 @@ mod tests {
         assert_eq!(
             ctx.peek_output_type_id(),
             Some(std::any::TypeId::of::<i32>())
+        );
+        ctx.op1r(|value: i32| {
+            value
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("overflow"))
+        })
+        .unwrap();
+        assert_eq!(ctx.call0::<i32>().unwrap(), 8);
+    }
+
+    /// Defaults resolve runtime annotations, report unknown output, and reject closures.
+    #[test]
+    fn default_context_policy_is_explicit() {
+        assert!(RecordingContext::resolves_closure_types());
+        let mut context = RecordingContext::new_context();
+        assert_eq!(context.output_type_id(), None);
+        let error = context
+            .push_closure(
+                Vec::new(),
+                Vec::new(),
+                RecordingContext::new_context(),
+                Span::call_site(),
+            )
+            .unwrap_err();
+        assert!(error.message().contains("not supported"));
+    }
+
+    /// Annotation accessors retain syntax and source while resolution reports host failures.
+    #[test]
+    fn annotation_accessors_and_resolution_errors_are_observable() {
+        let syntax = crate::CELParser::new(OpLookup::new())
+            .parse_type_expr_str("[i32]")
+            .unwrap();
+        let span = syntax.span();
+        let mut resolve = |_: &TypeExpr| -> crate::Result<crate::ResolvedArrayType> {
+            Err(crate::ParseError::new(
+                "host resolution failed",
+                Span::call_site(),
+            ))
+        };
+        let mut annotation = AnnotatedArray::new(&mut resolve, Some(syntax), Some(span));
+        assert!(matches!(
+            annotation.type_annotation(),
+            Some(TypeExpr::Array { .. })
+        ));
+        assert_eq!(
+            annotation.annotation_span().unwrap().start.start().column,
+            0
+        );
+        assert!(
+            annotation
+                .resolve_element_type()
+                .unwrap_err()
+                .message()
+                .contains("host resolution failed")
         );
     }
 

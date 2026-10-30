@@ -98,6 +98,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    /// Checks recovery of a simple cycle with valid wraparound edges.
     fn recover_cycle_returns_a_simple_loop() {
         let mut rmap: SlotMap<RelationshipId, ()> = SlotMap::with_key();
         let r1 = rmap.insert(());
@@ -128,6 +129,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks cycle recovery after traversing an earlier acyclic component.
     fn recover_cycle_skips_acyclic_components_before_the_cycle() {
         let mut cmap: SlotMap<CellId, ()> = SlotMap::with_key();
         let source = cmap.insert(());
@@ -156,6 +158,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks isolation of the conflicting pair from unrelated relationships.
     fn minimal_infeasible_set_isolates_the_conflicting_pair() {
         use crate::{Method, Sheet};
         let mut sheet = Sheet::new();

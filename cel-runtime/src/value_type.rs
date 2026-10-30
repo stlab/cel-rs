@@ -301,15 +301,25 @@ type DropHook = unsafe fn(*mut u8);
 /// Freezes one descriptor's ownership and independent capability plans.
 #[derive(Clone, Debug)]
 struct Plan {
+    /// Retains the complete recursive representation identity.
     kind: ValueKind,
+    /// Retains the representation's exact allocation layout.
     layout: Layout,
+    /// Destroys a concrete opaque leaf; containers use their recursive children.
     leaf_drop: Option<DropHook>,
+    /// Clones a concrete leaf when that optional capability is registered.
     clone_hook: Option<CloneHook>,
+    /// Compares concrete leaves when that optional capability is registered.
     equality_hook: Option<EqualityHook>,
+    /// Formats a concrete leaf when that optional capability is registered.
     debug_hook: Option<DebugHook>,
+    /// Caches whether every node has the required cloning capabilities.
     cloneable: bool,
+    /// Caches whether every node has the required comparison capabilities.
     comparable: bool,
+    /// Caches whether every node has the required formatting capabilities.
     debuggable: bool,
+    /// Moves an exact concrete scalar box through the checked host boundary.
     host_leaf: Option<crate::host_value_bridge::LeafBridge>,
 }
 

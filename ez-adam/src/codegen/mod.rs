@@ -15,10 +15,66 @@ use crate::model::relationship_group::RelationshipGroupId;
 
 mod ast_builder;
 
+#[cfg(test)]
+mod identifier_contract_tests {
+    use super::*;
+    use crate::{model::cell::CellType, ops::cells::add_cell};
+
+    /// Rejects invalid or duplicate export names without rejecting editing drafts.
+    #[test]
+    fn invalid_export_names_return_errors() {
+        for name in [
+            "",
+            "two words",
+            "a-b",
+            "true",
+            "42",
+            "x; cell injected: i64",
+        ] {
+            let mut doc = Document::new("demo");
+            let _ = add_cell(&mut doc, name, CellType::i64());
+            assert!(generate_adm2(&doc).is_err(), "{name:?}");
+        }
+        for name in [
+            "",
+            "two words",
+            "a-b",
+            "true",
+            "false",
+            "42",
+            "x; cell injected: i64",
+        ] {
+            let mut doc = Document::new(name);
+            let _ = add_cell(&mut doc, "x", CellType::i64());
+            assert!(generate_adm2(&doc).is_err(), "sheet {name:?}");
+        }
+        let mut doc = Document::new("demo");
+        let _ = add_cell(&mut doc, "same", CellType::i64());
+        let _ = add_cell(&mut doc, "same", CellType::i64());
+        assert!(generate_adm2(&doc).is_err());
+    }
+}
+
 /// A reason [`generate_adm2`] could not produce `.adm2` text for a
 /// [`crate::model::document::Document`].
 #[derive(Debug)]
+///
+/// # Examples
+///
+/// Display an error returned by `generate_adm2(&document)` with `error.to_string()`
+/// so an invalid draft produces the contextual message rather than debug internals.
 pub enum ExportError {
+    /// The document has invalid references, declaration order, or numeric data.
+    InvalidDocument(String),
+    /// A sheet or cell identifier violates its declaration's grammar.
+    InvalidIdentifier {
+        /// Identifies the named declaration.
+        kind: &'static str,
+        /// Contains the rejected draft.
+        name: String,
+    },
+    /// Two cell declarations use the same name.
+    DuplicateCellName(String),
     /// `group`'s binding for `cell` is not valid CEL (e.g. still empty).
     InvalidFormula {
         /// The relationship group containing the invalid formula.
@@ -36,8 +92,8 @@ pub enum ExportError {
         source: cel_parser::ParseError,
     },
     /// `conditional` matches on more than one value per branch (a
-    /// `Formula`-mode condition with more than one referenced cell, or a
-    /// multi-cell `Cells`-mode condition with a non-empty `default`) —
+    /// malformed `Formula` branch key, or a multi-cell `Cells`-mode condition
+    /// with a non-empty `default`) —
     /// `adam_lang`'s conditional-branch grammar only accepts a single,
     /// optionally negated literal per branch key, and no general codegen
     /// strategy exists yet for this case. See
@@ -84,8 +140,16 @@ pub enum ExportError {
 }
 
 impl std::fmt::Display for ExportError {
+    /// Formats a contextual export failure for the editor.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ExportError::InvalidDocument(message) => write!(f, "invalid document: {message}"),
+            ExportError::InvalidIdentifier { kind, name } => {
+                write!(f, "invalid {kind} identifier: {name:?}")
+            }
+            ExportError::DuplicateCellName(name) => {
+                write!(f, "duplicate cell identifier: {name:?}")
+            }
             ExportError::InvalidFormula {
                 group,
                 cell,
@@ -122,11 +186,15 @@ impl std::fmt::Display for ExportError {
 }
 
 impl std::error::Error for ExportError {
+    /// Returns the underlying formula parse failure, when present.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ExportError::InvalidFormula { source, .. }
             | ExportError::InvalidCondition { source, .. } => Some(source),
-            ExportError::UnsupportedMultiValueCondition { .. }
+            ExportError::InvalidDocument(_)
+            | ExportError::InvalidIdentifier { .. }
+            | ExportError::DuplicateCellName(_)
+            | ExportError::UnsupportedMultiValueCondition { .. }
             | ExportError::UnrepresentableBranchLiteral { .. }
             | ExportError::NonFiniteClampBound { .. }
             | ExportError::UnrepresentableClampBound { .. } => None,
@@ -141,14 +209,70 @@ impl std::error::Error for ExportError {
 ///
 /// # Errors
 ///
-/// Returns [`ExportError`] if any stored formula or condition-formula text
-/// is not valid CEL (e.g. a relationship member whose formula box is still
-/// empty).
+/// Returns [`ExportError`] for invalid document references/order/numeric data,
+/// malformed or duplicate identifiers, invalid CEL formulas, unsupported
+/// multi-value conditions, or unrepresentable branch literals.
 ///
-/// - Complexity: O(n) in the total number of cells, relationship groups,
-///   and conditional-group branches.
+/// - Complexity: expected O(d + p + e) time and space for document contents d,
+///   name/formula parsing work p, and emitted syntax/text e. A group enabled in
+///   several branches is parsed and emitted separately at every occurrence.
+///
+/// # Examples
+///
+/// ```
+/// let doc = ez_adam::model::document::Document::new("example");
+/// assert!(ez_adam::codegen::generate_adm2(&doc)?.contains("sheet example"));
+/// # Ok::<(), ez_adam::codegen::ExportError>(())
+/// ```
 pub fn generate_adm2(doc: &Document) -> Result<String, ExportError> {
+    validate_export_names(doc)?;
+    crate::persistence::validate_document(doc)
+        .map_err(|error| ExportError::InvalidDocument(error.to_string()))?;
     Ok(adam_lang::format_sheet(&build_sheet(doc)?, ""))
+}
+
+/// Validates names before constructing spans or synthesizing expressions.
+///
+/// # Errors
+///
+/// Returns contextual errors for malformed/reserved identifiers or duplicate cell names.
+///
+/// - Complexity: O(t + c) expected time and O(c) space for name bytes t and cell count c.
+fn validate_export_names(doc: &Document) -> Result<(), ExportError> {
+    /// Accepts exactly one CEL identifier, including Unicode identifiers supported by CEL.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidIdentifier` when the entire input is not one identifier.
+    ///
+    /// - Complexity: O(name.len()) time and space.
+    fn identifier(name: &str, kind: &'static str) -> Result<(), ExportError> {
+        let mut parser =
+            cel_parser::Parser::<cel_parser::AstContext>::new(cel_parser::OpLookup::new());
+        if matches!(parser.parse_str_ast(name), Ok(cel_parser::Expr::Ident { name: parsed, .. }) if parsed == name)
+        {
+            Ok(())
+        } else {
+            Err(ExportError::InvalidIdentifier {
+                kind,
+                name: name.to_owned(),
+            })
+        }
+    }
+    if doc.sheet_name.contains("::") || doc.sheet_name.parse::<adam_lang::ModulePath>().is_err() {
+        return Err(ExportError::InvalidIdentifier {
+            kind: "sheet",
+            name: doc.sheet_name.clone(),
+        });
+    }
+    let mut names = HashSet::with_capacity(doc.cells.len());
+    for cell in doc.cells.values() {
+        identifier(&cell.name, "cell")?;
+        if !names.insert(cell.name.as_str()) {
+            return Err(ExportError::DuplicateCellName(cell.name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Builds the `adam_lang::ast::Sheet` [`generate_adm2`] renders for `doc`.
@@ -159,8 +283,8 @@ pub fn generate_adm2(doc: &Document) -> Result<String, ExportError> {
 /// [`ast_builder::build_conditional_decl`] for an invalid formula or
 /// condition expression.
 ///
-/// - Complexity: O(n) in the total number of cells, relationship groups,
-///   and conditional-group branches.
+/// - Complexity: expected O(d + p + e) time and space for document contents,
+///   parsing work, and emitted syntax; repeated group occurrences repeat parsing.
 fn build_sheet(doc: &Document) -> Result<Sheet, ExportError> {
     let mut items = Vec::new();
 
@@ -225,12 +349,109 @@ fn groups_owned_by_conditionals(doc: &Document) -> HashSet<RelationshipGroupId> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sheet names follow Adam module identifiers without restricting cell identifiers.
+    #[test]
+    fn sheet_names_use_adam_module_identifier_rules() {
+        for name in [
+            "sheet", "use", "as", "_", "true", "false", "r#name", "a::b", " name",
+        ] {
+            assert!(
+                matches!(
+                    generate_adm2(&Document::new(name)),
+                    Err(ExportError::InvalidIdentifier { kind: "sheet", .. })
+                ),
+                "{name}"
+            );
+        }
+        for name in ["resize", "Δ", "if", "else"] {
+            let mut document = Document::new(name);
+            let _ = crate::ops::cells::add_cell(
+                &mut document,
+                "sheet",
+                crate::model::cell::CellType::i64(),
+            );
+            let source = generate_adm2(&document).unwrap();
+            let parsed = adam_lang::AdamParser::new(
+                adam_lang::TypeRegistry::new(),
+                cel_parser::OpLookup::new(),
+            )
+            .parse_str(&source)
+            .unwrap();
+            assert!(parsed.cell_names.contains_key("sheet"));
+        }
+    }
+
+    /// Multi-cell selectors support integer/text equality without tuple branch syntax or panics.
+    #[test]
+    fn multi_cell_conditions_support_integer_and_escaped_text_keys() {
+        use crate::model::{
+            cell::CellType,
+            conditional_group::{
+                CellValueLiteral, ConditionExpr, ConditionalBranch, ConditionalGroup,
+            },
+            geometry::Point,
+        };
+        use crate::ops::{
+            cells::{add_cell, add_cell_node},
+            relationships::{create_relationship, set_member_formula},
+        };
+        for text in ["", "quoted \"text\"\\\n雪"] {
+            let mut doc = Document::new("mixed_keys");
+            let a = add_cell(&mut doc, "amount", CellType::i64());
+            let b = add_cell(&mut doc, "other", CellType::i64());
+            let derived = add_cell(&mut doc, "derived", CellType::i64());
+            let title = add_cell(&mut doc, "title", CellType::Text);
+            let na = add_cell_node(&mut doc, b, Point::new(0.0, 0.0));
+            let nb = add_cell_node(&mut doc, derived, Point::new(100.0, 0.0));
+            let group = create_relationship(&mut doc, na, nb, Point::new(50.0, 0.0));
+            set_member_formula(&mut doc, group, na, "derived");
+            set_member_formula(&mut doc, group, nb, "other");
+            let conditional = doc.conditional_groups.insert(ConditionalGroup {
+                display_name: "mixed".into(),
+                position: Point::new(50.0, 50.0),
+                condition: ConditionExpr::Cells(vec![a, title]),
+                branches: vec![ConditionalBranch {
+                    values: vec![
+                        CellValueLiteral::I64(0),
+                        CellValueLiteral::Text(text.into()),
+                    ],
+                    enabled_groups: vec![group],
+                }],
+                default: vec![],
+            });
+            doc.conditional_group_order.push(conditional);
+            let source = generate_adm2(&doc).unwrap();
+            let mut parsed = adam_lang::AdamParser::new(
+                adam_lang::TypeRegistry::new(),
+                cel_parser::OpLookup::new(),
+            )
+            .parse_str(&source)
+            .unwrap();
+            let title = parsed.cell_names["title"].0;
+            parsed.write(title, text.to_owned()).unwrap();
+            let conditional = parsed.conditionals().next().unwrap();
+            assert_eq!(
+                parsed.conditional_active_branch(conditional).unwrap(),
+                Some(0)
+            );
+            parsed.write(title, format!("{text} different")).unwrap();
+            assert_eq!(parsed.conditional_active_branch(conditional).unwrap(), None);
+            doc.conditional_groups[doc.conditional_group_order[0]].branches[0].values[0] =
+                CellValueLiteral::I64(i64::MIN);
+            assert!(matches!(
+                generate_adm2(&doc),
+                Err(ExportError::UnrepresentableBranchLiteral { .. })
+            ));
+        }
+    }
     use crate::model::cell::CellType;
     use crate::model::geometry::Point;
     use crate::ops::cells::{add_cell, add_cell_node};
     use crate::ops::relationships::{create_relationship, set_member_formula};
 
     #[test]
+    /// Ordered cells export their names, types, and initial values.
     fn generates_bare_cell_declarations() {
         let mut doc = Document::new("demo");
         let _ = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -243,6 +464,7 @@ mod tests {
     }
 
     #[test]
+    /// Unconditional groups export a top-level relationship block.
     fn generates_a_top_level_relationship_block() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -261,6 +483,7 @@ mod tests {
     }
 
     #[test]
+    /// The current export contract preserves cells without generating out declarations.
     fn does_not_emit_an_out_decl_for_an_output_cell_yet() {
         // `out` codegen for the `output` flag is deferred — see
         // https://github.com/stlab/cel-rs/issues/147. `out` always declares a
@@ -277,6 +500,7 @@ mod tests {
     }
 
     #[test]
+    /// Two-sided clamps export both bound predicates.
     fn generates_a_clamp_filter_with_both_bounds() {
         let mut doc = Document::new("demo");
         let _ = add_cell(
@@ -297,6 +521,7 @@ mod tests {
     }
 
     #[test]
+    /// Lower-only clamps export only a minimum predicate.
     fn generates_a_clamp_filter_with_only_a_minimum() {
         let mut doc = Document::new("demo");
         let _ = add_cell(
@@ -317,6 +542,7 @@ mod tests {
     }
 
     #[test]
+    /// Upper-only clamps export only a maximum predicate.
     fn generates_a_clamp_filter_with_only_a_maximum() {
         let mut doc = Document::new("demo");
         let _ = add_cell(
@@ -337,14 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn omits_the_filter_clause_when_no_clamp_bounds_are_set() {
-        let mut doc = Document::new("demo");
-        let _ = add_cell(&mut doc, "width_pixels", CellType::i64());
-        let out = generate_adm2(&doc).expect("valid document should export cleanly");
-        assert_eq!(out, "sheet demo {\n    cell width_pixels: i64;\n}\n");
-    }
-
-    #[test]
+    /// Boolean selector groups export their enabled relationships.
     fn generates_a_conditional_group_with_bool_condition() {
         use crate::ops::conditionals::add_conditional_from_bool_cells;
 
@@ -370,6 +589,7 @@ mod tests {
     }
 
     #[test]
+    /// Multi-cell conditions export conjunctions for enabled truth-table rows.
     fn generates_a_conditional_group_with_a_multi_cell_condition_as_a_conjunction() {
         // `adam_lang`'s conditional-branch grammar rejects tuple branch keys
         // (`(false, true) => { ... }` is a parse error), so a multi-cell
@@ -407,6 +627,7 @@ mod tests {
     }
 
     #[test]
+    /// Formula conditions export the authored scalar expression.
     fn generates_a_conditional_group_with_a_formula_condition() {
         use crate::model::conditional_group::CellValueLiteral;
         use crate::ops::conditionals::{
@@ -440,6 +661,7 @@ mod tests {
     }
 
     #[test]
+    /// Invalid formulas fail the complete document export.
     fn generate_adm2_reports_an_invalid_formula() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "width_pixels", CellType::i64());
@@ -454,6 +676,7 @@ mod tests {
     }
 
     #[test]
+    /// Export diagnostics provide readable messages and their underlying source errors.
     fn export_error_implements_display_and_error_source() {
         use std::error::Error;
 

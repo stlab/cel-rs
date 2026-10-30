@@ -57,19 +57,36 @@ pub struct StackInfo {
 
 /// Formats recursive source-order type names for construction errors.
 ///
-/// - Complexity: O(d * s) for depth d and rendered name length s.
+/// - Complexity: O(n + s) time and O(d + s) space for n descriptor nodes,
+///   nesting depth d, and rendered name length s.
 fn descriptor_name(ty: &ValueType) -> String {
+    let mut output = String::new();
+    append_descriptor_name(ty, &mut output);
+    output
+}
+
+/// Appends a descriptor name without allocating intermediate strings or collections.
+///
+/// - Complexity: O(n + s) time and O(d) call space for n descriptor nodes,
+///   nesting depth d, and s appended bytes, excluding output growth.
+fn append_descriptor_name(ty: &ValueType, output: &mut String) {
     match ty.kind() {
-        ValueKind::Array(element) => format!("[{}]", descriptor_name(element)),
-        ValueKind::Tuple(fields) => format!(
-            "({})",
-            fields
-                .iter()
-                .map(|field| descriptor_name(&field.value_type))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        _ => ty.type_name().to_owned(),
+        ValueKind::Array(element) => {
+            output.push('[');
+            append_descriptor_name(element, output);
+            output.push(']');
+        }
+        ValueKind::Tuple(fields) => {
+            output.push('(');
+            for (index, field) in fields.iter().enumerate() {
+                if index != 0 {
+                    output.push_str(", ");
+                }
+                append_descriptor_name(&field.value_type, output);
+            }
+            output.push(')');
+        }
+        _ => output.push_str(ty.type_name()),
     }
 }
 
@@ -109,10 +126,15 @@ impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
 /// `new::<()>()` starts an independent body with borrowed positional reads.
 /// Other `new` argument lists retain the direct, preloaded opaque-leaf ABI.
 pub struct DynSegment {
+    /// Owns emitted operations and their captures.
     pub(crate) segment: RawSegment,
+    /// Retains preloaded argument identities in source order.
     pub(crate) argument_ids: Vec<TypeId>,
+    /// Describes every current live stack value in physical push order.
     pub(crate) stack_ids: Vec<StackInfo>,
+    /// Marks the caller-owned byte prefix beneath this fragment.
     pub(crate) base_stack_index: usize,
+    /// Records positional borrowed reads and their complete required shapes.
     pub(crate) argument_reads: Vec<(usize, ValueType)>,
     /// Records byte boundaries for construction-time layout, without runtime ownership.
     stack_ends: Vec<usize>,
@@ -436,7 +458,7 @@ impl DynSegment {
     /// # Examples
     /// ```
     /// let mut b = cel_runtime::DynSegment::new::<()>();
-    /// b.just(1i32); b.just(2i32); b.op2(|a: i32, b: i32| a + b).unwrap();
+    /// b.just(1f64); b.just(2f64); b.op2(|a: f64, b: f64| a + b).unwrap();
     /// ```
     pub fn op2<A: 'static, B: 'static, R: 'static, F: Fn(A, B) -> R + 'static>(
         &mut self,
@@ -454,7 +476,10 @@ impl DynSegment {
     /// # Examples
     /// ```
     /// let mut b = cel_runtime::DynSegment::new::<()>();
-    /// b.just(1i32); b.just(2i32); b.op2r(|a: i32, b: i32| Ok(a + b)).unwrap();
+    /// b.just(1i32); b.just(2i32);
+    /// b.op2r(|a: i32, b: i32| {
+    ///     a.checked_add(b).ok_or_else(|| anyhow::anyhow!("addition overflow"))
+    /// }).unwrap();
     /// ```
     pub fn op2r<A: 'static, B: 'static, R: 'static, F: Fn(A, B) -> Result<R> + 'static>(
         &mut self,
@@ -877,6 +902,8 @@ impl DynSegment {
                     Ok(())
                 })?
             };
+            // SAFETY: All children have moved into owner. Restore the ambient
+            // prefix before registering the new result or allowing unwinding.
             unsafe {
                 stack.release_top(n);
                 stack.truncate_to(ambient_start, false);
@@ -1361,10 +1388,13 @@ impl DynSegment {
             self.argument_ids.is_empty(),
             "closure invocation requires a positional body"
         );
+        let operands = arity
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("missing callee"))?;
         let first = self
             .stack_ids
             .len()
-            .checked_sub(arity + 1)
+            .checked_sub(operands)
             .ok_or_else(|| anyhow!("missing callee"))?;
         let callee_type = self.stack_ids[first].value_type.clone();
         let ValueKind::Callable { parameters, result } = callee_type.kind() else {
@@ -1423,7 +1453,7 @@ impl DynSegment {
                 }
             }
         });
-        self.replace(arity + 1, result_type);
+        self.replace(operands, result_type);
         Ok(())
     }
 
@@ -1487,6 +1517,43 @@ mod performance_tests {
     use std::cell::RefCell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::rc::Rc;
+
+    /// Rejects missing callees, including unrepresentable arities, without emitting instructions.
+    #[test]
+    fn invocation_rejects_missing_callee_without_changing_body() {
+        let mut body = DynSegment::new::<()>();
+        body.just(7i32);
+        for arity in [0, usize::MAX] {
+            assert!(body.invoke_closure(arity).is_err());
+            assert_eq!(body.call0::<i32>().unwrap(), 7);
+        }
+    }
+
+    /// Formats empty and nested descriptors in their source order.
+    #[test]
+    fn diagnostic_names_preserve_recursive_shape() {
+        assert_eq!(descriptor_name(&ValueType::tuple(vec![]).unwrap()), "()");
+        assert_eq!(
+            descriptor_name(&ValueType::leaf::<String>()),
+            std::any::type_name::<String>()
+        );
+        let row = ValueType::tuple(vec![
+            AssociatedType {
+                offset: 0,
+                value_type: ValueType::array(ValueType::leaf::<i32>()),
+            },
+            AssociatedType {
+                offset: 0,
+                value_type: ValueType::tuple(vec![AssociatedType {
+                    offset: 0,
+                    value_type: ValueType::leaf::<f64>(),
+                }])
+                .unwrap(),
+            },
+        ])
+        .unwrap();
+        assert_eq!(descriptor_name(&ValueType::array(row)), "[([i32], (f64))]");
+    }
 
     /// Records only live runtime owners, not borrowed sources or registration values.
     #[repr(align(128))]

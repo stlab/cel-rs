@@ -4,6 +4,25 @@
 //! directly, or a [`MatchExpr`] computed from multiple input cells — and holds a list of
 //! branches. During propagation the branch whose keys contain the current match value is
 //! activated; its relationships participate in the general planning pass.
+//!
+//! ```
+//! use adam_rs::{MatchExpr, Sheet};
+//! use std::any::TypeId;
+//! let mut sheet = Sheet::new();
+//! let flag = sheet.add_cell(true);
+//! let text = sheet.add_cell("yes!".to_string());
+//! let suffix = sheet.add_cell('!');
+//! let raw = MatchExpr::new(vec![flag], vec![TypeId::of::<bool>()], TypeId::of::<bool>(),
+//!     |a, b| a.downcast_ref::<bool>() == b.downcast_ref::<bool>(),
+//!     |v| Ok(Box::new(*v[0].downcast_ref::<bool>().unwrap())));
+//! for expression in [MatchExpr::cell(flag), raw,
+//!     MatchExpr::from_fn_1(text, |v: &String| Ok(!v.is_empty())),
+//!     MatchExpr::from_fn_2([text, suffix], |v: &String, c: &char| Ok(v.ends_with(*c)))] {
+//!     let id = sheet.add_conditional(expression, vec![(vec![true], vec![])], vec![])?;
+//!     assert_eq!(sheet.conditional_active_branch(id)?, Some(0));
+//! }
+//! # Ok::<(), adam_rs::Error>(())
+//! ```
 
 use std::any::{Any, TypeId};
 
@@ -13,6 +32,9 @@ use crate::{cell::CellId, relationship::RelationshipId};
 
 new_key_type! {
     /// A stable handle to a conditional in a [`crate::sheet::Sheet`].
+    ///
+    /// # Examples
+    /// See the [match-expression example](crate::conditional).
     pub struct ConditionalId;
 }
 
@@ -33,8 +55,12 @@ type MatchExprFn = Box<dyn Fn(&[&dyn Any]) -> Result<Box<dyn Any>, anyhow::Error
 /// their input values and immutable captured constants, with no externally observable
 /// side effects. Equal inputs produce equivalent outputs or errors. There is no
 /// guarantee that a callback executes, or when or how often it executes.
+///
+/// # Examples
+/// See the [match-expression example](crate::conditional).
 pub struct MatchExpr(pub(crate) MatchSource);
 
+/// Selects borrowed-cell evaluation or an owned expression result.
 pub(crate) enum MatchSource {
     /// The match value is `cell`'s current effective value, read directly with no
     /// allocation and no extra trait bounds.
@@ -43,6 +69,10 @@ pub(crate) enum MatchSource {
     Expr(MatchExprData),
 }
 
+/// Owns matching positional input/type signatures and an output-typed expression.
+///
+/// The equality function compares values of `output_type`; the callback returns
+/// that type on success. Sheet registration validates input cell identities.
 pub(crate) struct MatchExprData {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,
@@ -57,6 +87,9 @@ impl MatchExpr {
     /// - Postcondition: behaves exactly as a plain-cell conditional does today — the match
     ///   value is `cell`'s current effective value, with no extra allocation or trait
     ///   bounds beyond what [`crate::sheet::Sheet::add_conditional`] itself requires.
+    ///
+    /// # Examples
+    /// See the [match-expression example](crate::conditional).
     #[must_use]
     pub fn cell(cell: CellId) -> Self {
         MatchExpr(MatchSource::Cell(cell))
@@ -69,6 +102,9 @@ impl MatchExpr {
     /// - Precondition: `eq_fn` correctly compares two values of the type identified by
     ///   `output_type`.
     /// - Precondition: `f` and `eq_fn` satisfy [`MatchExpr`]'s purity contract.
+    ///
+    /// # Examples
+    /// See the [match-expression example](crate::conditional).
     #[must_use]
     pub fn new<F>(
         inputs: Vec<CellId>,
@@ -97,6 +133,9 @@ impl MatchExpr {
     /// [`crate::sheet::Sheet::add_conditional`].
     ///
     /// - Precondition: `f` satisfies [`MatchExpr`]'s purity contract.
+    ///
+    /// # Examples
+    /// See the [match-expression example](crate::conditional).
     #[must_use]
     pub fn from_fn_1<A, T, F>(input: CellId, f: F) -> Self
     where
@@ -125,6 +164,9 @@ impl MatchExpr {
     /// validated when passed to [`crate::sheet::Sheet::add_conditional`].
     ///
     /// - Precondition: `f` satisfies [`MatchExpr`]'s purity contract.
+    ///
+    /// # Examples
+    /// See the [match-expression example](crate::conditional).
     #[must_use]
     pub fn from_fn_2<A, B, T, F>(inputs: [CellId; 2], f: F) -> Self
     where
@@ -185,13 +227,64 @@ impl ConditionalData {
 mod tests {
     use super::*;
 
+    /// Preserves heterogeneous match arguments and concrete failures in typed adapters.
     #[test]
+    fn typed_adapters_preserve_order_and_errors() {
+        let mut sheet = crate::Sheet::new();
+        let a = sheet.add_cell(String::new());
+        let b = sheet.add_cell('!');
+        let MatchSource::Expr(expr) =
+            MatchExpr::from_fn_2([a, b], |a: &String, b: &char| Ok(format!("{a}{b}"))).0
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            (expr.function)(&[&"prefix".to_string(), &'!'])
+                .unwrap()
+                .downcast_ref::<String>()
+                .unwrap(),
+            "prefix!"
+        );
+        let MatchSource::Expr(one) =
+            MatchExpr::from_fn_1(a, |_: &String| -> anyhow::Result<String> {
+                Err(std::io::Error::other("one").into())
+            })
+            .0
+        else {
+            unreachable!()
+        };
+        let MatchSource::Expr(two) =
+            MatchExpr::from_fn_2([a, b], |_: &String, _: &char| -> anyhow::Result<String> {
+                Err(std::io::Error::other("two").into())
+            })
+            .0
+        else {
+            unreachable!()
+        };
+        assert!(
+            (one.function)(&[&String::new()])
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
+        assert!(
+            (two.function)(&[&String::new(), &'!'])
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
+    }
+
+    #[test]
+    /// Checks that conditional identities satisfy the Copy bound.
     fn conditional_id_is_copy() {
+        /// Accepts only carriers that implement Copy.
         fn takes_copy<T: Copy>(_: T) {}
         takes_copy(ConditionalId::default());
     }
 
     #[test]
+    /// Checks the wrapped cell identity of a cell-backed match expression.
     fn match_expr_cell_wraps_a_single_cell() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -204,6 +297,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks unary match-expression types and its computed value.
     fn match_expr_from_fn_1_stores_correct_type_ids_and_computes_value() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -227,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks binary match-expression types and its computed value.
     fn match_expr_from_fn_2_stores_correct_type_ids_and_computes_value() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -252,6 +347,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a cell-backed subject exposes its single input.
     fn match_cells_returns_single_cell_for_cell_variant() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -265,6 +361,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks that a computed subject exposes every declared input in order.
     fn match_cells_returns_all_inputs_for_expr_variant() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
@@ -283,6 +380,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preservation of an erased match callback's failure.
     fn match_expr_new_reports_the_error_a_failing_function_returns() {
         use slotmap::SlotMap;
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();

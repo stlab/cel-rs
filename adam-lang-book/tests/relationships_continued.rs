@@ -1,6 +1,7 @@
 //! Examples backing `book-src/relationships-continued.md` (Chapter 8). See `src/lib.rs` for how
 //! these `.adm2` files are wired into the book.
 
+/// Computes both outputs of the displayed destructuring method.
 #[test]
 fn destructuring_binding() {
     let mut parser = adam_lang_book::support::parser();
@@ -18,6 +19,7 @@ fn destructuring_binding() {
     assert_eq!(*parsed.read::<f64>(perimeter).unwrap(), 28.0); // 2.0 * (10.0 + 4.0)
 }
 
+/// Conforms a positive source and preserves already-conforming zero and negative values.
 #[test]
 fn self_referencing_method() {
     let mut parser = adam_lang_book::support::parser();

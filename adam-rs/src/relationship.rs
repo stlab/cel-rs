@@ -2,6 +2,28 @@
 //!
 //! Each relationship holds a list of [`Method`]s; the planner selects one
 //! method per relationship at propagation time based on cell strength.
+//!
+//! ```
+//! use adam_rs::{Method, Sheet};
+//! use std::any::TypeId;
+//! let mut sheet = Sheet::new();
+//! let a = sheet.add_source("prefix".to_string());
+//! let b = sheet.add_source('!');
+//! let raw = sheet.add_cell(String::new());
+//! let one = sheet.add_cell(String::new());
+//! let two = sheet.add_cell(String::new());
+//! sheet.add_relationship(vec![Method::new(vec![a], vec![raw],
+//!     vec![TypeId::of::<String>()], vec![TypeId::of::<String>()],
+//!     |v| Ok(vec![Box::new(v[0].downcast_ref::<String>().unwrap().clone())]))])?;
+//! sheet.add_relationship(vec![Method::from_fn_1_1(a, one, |v: &String| Ok(v.clone()))])?;
+//! sheet.add_relationship(vec![Method::from_fn_2_1([a, b], two,
+//!     |v: &String, suffix: &char| Ok(format!("{v}{suffix}")))])?;
+//! sheet.propagate()?;
+//! assert_eq!(sheet.read::<String>(raw)?, "prefix");
+//! assert_eq!(sheet.read::<String>(one)?, "prefix");
+//! assert_eq!(sheet.read::<String>(two)?, "prefix!");
+//! # Ok::<(), adam_rs::Error>(())
+//! ```
 
 use std::any::{Any, TypeId};
 
@@ -11,6 +33,9 @@ use crate::cell::CellId;
 
 new_key_type! {
     /// A stable handle to a relationship in a [`crate::sheet::Sheet`].
+    ///
+    /// # Examples
+    /// See the [relationship example](crate::relationship).
     pub struct RelationshipId;
 }
 
@@ -27,6 +52,11 @@ type MethodFn = Box<dyn Fn(&[&dyn Any]) -> Result<Vec<Box<dyn Any>>, anyhow::Err
 /// Equal inputs produce equivalent outputs or errors. There is no guarantee that
 /// the callback executes, or when or how often it executes.
 /// A self-referencing method must also be idempotent.
+/// Holding its other inputs fixed, substituting its outputs for overlapping inputs
+/// and applying it again produces equivalent outputs.
+///
+/// # Examples
+/// See the [relationship example](crate::relationship).
 pub struct Method {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) outputs: Vec<CellId>,
@@ -39,8 +69,14 @@ impl Method {
     /// Creates a method from explicit TypeIds and a type-erased function.
     ///
     /// - Precondition: `inputs.len() == input_types.len()` and `outputs.len() == output_types.len()`.
-    /// - Precondition: The function must return exactly `outputs.len()` values in the correct order.
     /// - Precondition: `f` satisfies [`Method`]'s purity and idempotence contract.
+    ///
+    /// Propagation validates the callback's output count and concrete types before
+    /// publishing staged values. Declared output order determines positional binding.
+    /// - Complexity: O(1) storage work, excluding ownership transfer of declared edges.
+    ///
+    /// # Examples
+    /// See the [relationship example](crate::relationship).
     pub fn new<F>(
         inputs: Vec<CellId>,
         outputs: Vec<CellId>,
@@ -68,6 +104,9 @@ impl Method {
     /// against its cell registrations when passed to [`crate::sheet::Sheet::add_relationship`].
     ///
     /// - Precondition: `f` satisfies [`Method`]'s purity and idempotence contract.
+    ///
+    /// # Examples
+    /// See the [relationship example](crate::relationship).
     pub fn from_fn_1_1<A, B, F>(input: CellId, output: CellId, f: F) -> Self
     where
         A: Any + 'static,
@@ -95,6 +134,9 @@ impl Method {
     /// [`crate::sheet::Sheet::add_relationship`].
     ///
     /// - Precondition: `f` satisfies [`Method`]'s purity and idempotence contract.
+    ///
+    /// # Examples
+    /// See the [relationship example](crate::relationship).
     pub fn from_fn_2_1<A, B, C, F>(inputs: [CellId; 2], output: CellId, f: F) -> Self
     where
         A: Any + 'static,
@@ -120,7 +162,7 @@ impl Method {
     }
 }
 
-/// Internal storage for a relationship; fields are used by `Sheet` (added in a later task).
+/// Owns validated methods and their shared, duplicate-free adjacent cell set.
 pub(crate) struct RelationshipData {
     pub(crate) methods: Vec<Method>,
     /// The set of cells referenced by every method in this relationship — every method
@@ -132,8 +174,44 @@ pub(crate) struct RelationshipData {
 mod tests {
     use super::*;
 
+    /// Preserves heterogeneous input order and typed errors through each typed adapter.
     #[test]
+    fn typed_adapters_preserve_order_and_errors() {
+        let mut sheet = crate::Sheet::new();
+        let a = sheet.add_cell(String::new());
+        let b = sheet.add_cell('!');
+        let c = sheet.add_cell(String::new());
+        let method = Method::from_fn_2_1([a, b], c, |a: &String, b: &char| Ok(format!("{a}{b}")));
+        let result = (method.function)(&[&"prefix".to_string(), &'!']).unwrap();
+        assert_eq!(result[0].downcast_ref::<String>().unwrap(), "prefix!");
+        let one = Method::from_fn_1_1(a, c, |_: &String| -> anyhow::Result<String> {
+            Err(std::io::Error::other("one").into())
+        });
+        let two = Method::from_fn_2_1(
+            [a, b],
+            c,
+            |_: &String, _: &char| -> anyhow::Result<String> {
+                Err(std::io::Error::other("two").into())
+            },
+        );
+        assert!(
+            (one.function)(&[&String::new()])
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
+        assert!(
+            (two.function)(&[&String::new(), &'!'])
+                .unwrap_err()
+                .downcast_ref::<std::io::Error>()
+                .is_some()
+        );
+    }
+
+    #[test]
+    /// Checks that relationship identities satisfy the Copy bound.
     fn relationship_id_is_copy() {
+        /// Accepts only carriers that implement Copy.
         fn takes_copy<T: Copy>(_: T) {}
         // RelationshipId must be Copy so it can be stored in adjacency Vecs cheaply.
         // This test fails to compile if RelationshipId is not Copy.
@@ -141,6 +219,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks preservation of an erased method's positional edges and types.
     fn method_new_stores_types_and_cell_ids() {
         use slotmap::SlotMap;
 
@@ -178,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks unary method signature types and its result.
     fn from_fn_1_1_stores_correct_type_ids() {
         use slotmap::SlotMap;
 
@@ -198,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    /// Checks binary method signature types and its result.
     fn from_fn_2_1_stores_correct_type_ids() {
         use slotmap::SlotMap;
 

@@ -1,24 +1,5 @@
-// Mounts a live SheetInspector into every `.adam-live` div that the live-examples preprocessor
-// inserted. Each `.adam-live-graph` div sharing that mount's `data-example` is not mounted on
-// its own; it's a plain container whose id is handed to the inspector's `mount` call, and the
-// inspector's own sheet drives it through a shared GraphView channel owner; no
-// Begin-specific hook or JavaScript constraint fallback is needed. Each
-// div's `data-example` (e.g. "cells/tuple_typed_cell") names one of the `adam-live-examples.json`
-// manifest's entries; the manifest and the compiled adam-lang-book-live wasm/js bundle are both
-// generated into `book-src/theme/` by the book build (see the CI workflow changes), and
-// mdBook's built-in theme-directory mechanism copies everything under `book-src/theme/` into
-// `book-dist/theme/` verbatim (at the site root), regardless of whether it's also named in
-// `book.toml`'s `additional-js`/`additional-css` (which this script itself is, so it is served
-// from a different path — alongside a copy of `book-src/` preserved verbatim — than its sibling
-// wasm/js/manifest files land at).
-//
-// A plain relative specifier can't paper over that split: `fetch()` resolves a relative URL
-// against the *document's* URL, but a dynamic `import()` in a classic (non-module) script
-// resolves its specifier against the *script's own* URL instead — two different base URLs in
-// the same function, confirmed by a real-browser check (see this task's report). Building one
-// absolute URL from `document.baseURI` and handing that same string to both calls sidesteps
-// the ambiguity entirely: `import()` accepts a fully-qualified absolute URL unconditionally,
-// with no dependency on which "referencing" URL it would otherwise use.
+// Mounts live inspectors and their graph containers from the generated example manifest.
+// Resolve assets against the page, not this classic script's additional-js copy.
 const themeBase = new URL("theme/", document.baseURI);
 const moduleUrl = new URL("adam_lang_book_live.js", themeBase).href;
 const manifestUrl = new URL("adam-live-examples.json", themeBase).href;
@@ -39,63 +20,105 @@ function loadScript(url, { module = false } = {}) {
   });
 }
 
-(async () => {
+// Creates independent script descriptors; graph-free pages need only Spectrum components.
+function dependencyScripts(hasGraphs) {
+  const scripts = [{ url: swcUrl, module: true }];
+  if (hasGraphs) {
+    scripts.push({ url: d3Url, module: false }, { url: graphJsUrl, module: false });
+  }
+  return scripts;
+}
+
+// Creates independent mount instructions from immutable example names and source strings.
+// Throws for malformed manifest entries, orphan graphs, or duplicate inspector names.
+// Each inspector name must be unique: live roots use it to namespace DOM controls,
+// even on graph-free pages. One inspector may own several graphs.
+// Time and space: O(i + g + e), for i inspectors, g graphs and e inspector-graph links.
+function createMountPlan(inspectors, graphs, manifest) {
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("adam-live: invalid example manifest");
+  }
+  if (!inspectors.every((name) => typeof name === "string" && name.length > 0)) {
+    throw new Error("adam-live: inspector has no example name");
+  }
+  const names = new Set();
+  inspectors.forEach((name) => {
+    if (names.has(name)) throw new Error(`adam-live: ambiguous inspector name "${name}"`);
+    names.add(name);
+  });
+  const graphIds = new Map();
+  graphs.forEach((name, index) => {
+    if (!names.has(name)) throw new Error(`adam-live: graph has no inspector for "${name}"`);
+    if (!graphIds.has(name)) graphIds.set(name, []);
+    graphIds.get(name).push(`adam-live-graph-${index}`);
+  });
+  return inspectors.map((name, index) => {
+    if (!Object.hasOwn(manifest, name) || typeof manifest[name] !== "string") {
+      throw new Error(`adam-live: no embedded source for "${name}"`);
+    }
+    return {
+      id: `adam-live-${index}`,
+      name,
+      source: manifest[name],
+      graphIds: [...(graphIds.get(name) || [])],
+    };
+  });
+}
+
+// Reads a manifest only after a successful HTTP response; propagates network and JSON errors.
+// Time and space: O(n) for n response bytes.
+async function readManifest(fetchResponse, url) {
+  const response = await fetchResponse(url);
+  if (!response.ok) throw new Error(`adam-live: manifest HTTP ${response.status}`);
+  return response.json();
+}
+
+// Replaces caller-owned mount contents with a visible, accessible load error.
+// Time and DOM space: O(n + m*n) for m mounts and n message characters.
+function showLoadFailure(mounts, error) {
+  const message = `Live example unavailable: ${error?.message || String(error)}`;
+  mounts.forEach((div) => {
+    div.setAttribute("role", "alert");
+    div.textContent = message;
+  });
+}
+
+// Loads page dependencies once, then mounts every validated inspector and its graphs.
+// A rejected dependency or mount operation leaves a visible diagnostic in every mount.
+// Time and space add DOM selection, dependency loading, and live-module mounting
+// to createMountPlan's O(i + g + e) bounds.
+async function mountLiveExamples() {
   const inspectorMounts = document.querySelectorAll(".adam-live");
   const graphMounts = document.querySelectorAll(".adam-live-graph");
   if (inspectorMounts.length === 0 && graphMounts.length === 0) {
     return;
   }
 
-  // `SheetInspector` renders `sp-*` elements (see `adam-web-ui/src/spectrum.rs`), but each
-  // mounted `VirtualDom` is rooted at its own `.adam-live` div — none of them ever renders a
-  // `<script>` tag of their own the way `begin/src/app.rs`'s top-level `App` component does for
-  // its single, page-wide desktop/web window. Left unloaded, every `sp-*` tag on the page stays
-  // an undefined custom element: no shadow DOM, so `SheetInspector`'s own `shadowRoot.querySelector`
-  // reads come back null and the number-field/slider write paths never fire, and no visible input
-  // box at all (an undefined custom element renders only its — here, absent — light-DOM children).
-  // Load `swc.js` once at the page level, in parallel with the wasm/manifest fetches below, so it
-  // defines every `sp-*` element exactly once regardless of how many examples the page mounts.
-  const loaders = [
-    import(moduleUrl),
-    fetch(manifestUrl).then((r) => r.json()),
-    loadScript(swcUrl, { module: true }),
-  ];
-  if (graphMounts.length > 0) {
-    // Loaded once at the page level for the same reason `swc.js` is: the sheet each inspector
-    // mount owns drives D3 through `window.beginGraph` (see `begin/assets/graph.js`), which
-    // expects a global `d3`, regardless of how many `.adam-live-graph` divs the page mounts.
-    loaders.push(loadScript(d3Url));
-    // `graph.js` defines `window.beginGraph`, the D3 driver each inspector mount's sheet calls
-    // once it has a graph container id to draw into. It's a classic (non-module) IIFE that sets
-    // `window.beginGraph` at load with no top-level `d3` dependency, so it can load in parallel
-    // with `d3.v7.min.js`; both must simply be present before any graph mounts.
-    loaders.push(loadScript(graphJsUrl));
+  try {
+    const loaders = [
+      import(moduleUrl),
+      readManifest(fetch, manifestUrl),
+      ...dependencyScripts(graphMounts.length > 0).map(({ url, module }) => loadScript(url, { module })),
+    ];
+    const [{ default: init, mount }, manifest] = await Promise.all(loaders);
+    const plan = createMountPlan(
+      Array.from(inspectorMounts, (div) => div.dataset.example),
+      Array.from(graphMounts, (div) => div.dataset.example),
+      manifest,
+    );
+    await init();
+    graphMounts.forEach((div, index) => {
+      div.id = `adam-live-graph-${index}`;
+    });
+    inspectorMounts.forEach((div, index) => {
+      const item = plan[index];
+      div.id = item.id;
+      mount(item.id, item.source, item.name, item.graphIds);
+    });
+  } catch (error) {
+    showLoadFailure([...inspectorMounts, ...graphMounts], error);
+    console.error(error);
   }
-  const [{ default: init, mount }, manifest] = await Promise.all(loaders);
-  await init();
+}
 
-  // Assign each graph container its own id and index it by the example it shows, so each
-  // inspector mount can install one GraphView channel owner per graph. The graph divs
-  // stay in their chapter positions, outside the inspector's Dioxus root.
-  const graphIdsByExample = new Map();
-  graphMounts.forEach((div, index) => {
-    const name = div.dataset.example;
-    const id = `adam-live-graph-${index}`;
-    div.id = id;
-    if (!graphIdsByExample.has(name)) graphIdsByExample.set(name, []);
-    graphIdsByExample.get(name).push(id);
-  });
-
-  inspectorMounts.forEach((div, index) => {
-    const name = div.dataset.example;
-    const source = manifest[name];
-    if (source === undefined) {
-      console.error(`adam-live: no embedded source for "${name}"`);
-      return;
-    }
-    const id = `adam-live-${index}`;
-    div.id = id;
-    const graphIds = graphIdsByExample.get(name) || [];
-    mount(id, source, name, graphIds);
-  });
-})();
+mountLiveExamples();

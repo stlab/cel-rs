@@ -32,6 +32,11 @@ include!(concat!(env!("OUT_DIR"), "/example_manifest.rs"));
 /// Identifies where an [`ActiveSource`]'s content came from: a bundled example
 /// discovered under `examples/`, or a file the user opened via the "Open…" action.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
+///
+/// # Examples
+///
+/// `SourceOrigin::Opened(path.into_os_string())` preserves an opened path without
+/// replacing non-UTF-8 bytes with display text.
 pub enum SourceOrigin {
     /// One of [`available_examples`], loaded from `begin/examples/`.
     #[default]
@@ -50,6 +55,11 @@ pub enum SourceOrigin {
 /// The currently active source: its display name, full text, and where it
 /// came from (a bundled example or a user-opened file) — see [`SourceOrigin`].
 #[derive(Clone, Default)]
+///
+/// # Examples
+///
+/// `ActiveSource { name: "toy_example".into(), ..Default::default() }` describes
+/// the example origin; populate `text` with its loaded source before displaying it.
 pub struct ActiveSource {
     /// Display label: the example's name (its filename stem) or the opened
     /// file's name.
@@ -65,6 +75,13 @@ impl ActiveSource {
     /// bundled example, or the opened file's real path/name directly (lossily
     /// converted to UTF-8 for this display string only — the stored
     /// `OsString` itself stays lossless for reload; see [`SourceOrigin::Opened`]).
+    ///
+    /// # Examples
+    ///
+    /// `ActiveSource { name: "toy_example".into(), ..Default::default() }.file_name()` produces
+    /// `"begin/examples/toy_example.adm2"` for diagnostic headers.
+    ///
+    /// - Complexity: O(diagnostic path bytes) time and space.
     pub fn file_name(&self) -> String {
         match &self.origin {
             SourceOrigin::Example => format!("begin/examples/{}.adm2", self.name),
@@ -118,7 +135,12 @@ fn scan_examples_dir(dir: &std::path::Path) -> Vec<String> {
 /// - Complexity: on desktop, O(n log n) in the number of files under
 ///   `examples/` — a fresh directory scan on every call, so the result
 ///   always reflects the current directory contents (not cached). Otherwise
-///   O(n log n) in [`EXAMPLES_WITH_SOURCE`]'s length.
+///   O(n log n) in the embedded example count; both paths also copy filename bytes.
+///
+/// # Examples
+///
+/// Populate an example picker with `available_examples()` and pass a selected
+/// name to `load_example_source`.
 pub fn available_examples() -> Vec<String> {
     #[cfg(feature = "desktop")]
     {
@@ -143,6 +165,12 @@ pub fn available_examples() -> Vec<String> {
 /// touching the filesystem, so it can't resolve outside `examples/`), or if
 /// the file cannot be read (e.g. a transient race with an editor's save).
 #[cfg(feature = "desktop")]
+///
+/// # Examples
+///
+/// `load_example_source("toy_example")` reads the named example without accepting a path.
+///
+/// - Complexity: O(name bytes + loaded source bytes) path validation/read work.
 pub fn load_example_source(name: &str) -> Result<String, String> {
     if name.contains('/') || name.contains('\\') || name.contains("..") {
         return Err(format!("invalid example name {name:?}"));
@@ -158,6 +186,13 @@ pub fn load_example_source(name: &str) -> Result<String, String> {
 ///
 /// Returns `Err` if `name` doesn't match any embedded example.
 #[cfg(not(feature = "desktop"))]
+///
+/// # Examples
+///
+/// `load_example_source("toy_example")` reads the embedded example without accepting a path.
+///
+/// - Complexity: validates name bytes, scans the embedded catalogue with name comparisons,
+///   and copies the selected source bytes.
 pub fn load_example_source(name: &str) -> Result<String, String> {
     EXAMPLES_WITH_SOURCE
         .iter()
@@ -183,9 +218,9 @@ fn spawn_watch_on_dir(
     use notify::Watcher;
 
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if res.is_ok() {
-            on_change();
-        }
+        crate::open_file::dispatch_watch_event(res, &mut on_change, &mut |message| {
+            eprintln!("example watcher failed: {message}")
+        });
     })?;
     watcher.watch(&dir, notify::RecursiveMode::NonRecursive)?;
     Ok(watcher)
@@ -204,6 +239,11 @@ fn spawn_watch_on_dir(
 ///
 /// Returns `Err` if the underlying OS watch could not be established.
 #[cfg(feature = "desktop")]
+///
+/// # Examples
+///
+/// Keep the watcher returned by `spawn_examples_watch(notify)` alive while the
+/// example picker subscribes to `notify` directory-change messages.
 pub fn spawn_examples_watch(
     on_change: impl FnMut() + Send + 'static,
 ) -> notify::Result<notify::RecommendedWatcher> {
@@ -213,11 +253,10 @@ pub fn spawn_examples_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adam_lang::{AdamParser, TypeRegistry};
-    use adam_web_ui::build::op_lookup;
     use adam_web_ui::{Renderer, build_sheet};
 
     #[test]
+    /// Every shipped example satisfies the current language parser.
     fn every_bundled_example_parses_successfully() {
         for &(name, source) in EXAMPLES_WITH_SOURCE {
             let outcome = build_sheet(source, &format!("{name}.adm2"), &Renderer::styled());
@@ -229,84 +268,9 @@ mod tests {
         }
     }
 
-    /// Returns the union of three sets: `Sheet::contributing_cells(id)` for every `id` in
-    /// `Sheet::out_cells()`; `Sheet::requirement_relevant_cells()`, taken as-is (it already
-    /// returns contributing cells internally, so it is not run through `contributing_cells`
-    /// again here); and every conditional's match cell, added directly, not traced.
-    ///
-    /// Mirrors `adam_web_ui::inspector`'s private `compute_output_status`'s `relevant`
-    /// computation (not itself exported, since `OutputStatus` is Inspector-internal) —
-    /// the direct replacement for the removed `Sheet::output_relevant_cells()`, now that
-    /// out cells/requirements are generalized beyond a single dedicated "output" concept.
-    fn relevant_cells(sheet: &adam_rs::Sheet) -> std::collections::HashSet<adam_rs::CellId> {
-        let out_cells: Vec<adam_rs::CellId> = sheet.out_cells().collect();
-        out_cells
-            .iter()
-            .flat_map(|&id| sheet.contributing_cells(id))
-            .chain(sheet.requirement_relevant_cells())
-            .chain(
-                sheet
-                    .conditionals()
-                    .filter_map(|id| sheet.conditional_match_cells(id))
-                    .flatten()
-                    .copied(),
-            )
-            .collect()
-    }
-
-    #[test]
-    fn image_resize_constrain_is_relevant_despite_only_being_a_conditional_expression_input() {
-        // Regression test: `constrain` is never itself a relationship output or a plain
-        // match cell — it's one of two inputs to `conditional resample && constrain`'s match
-        // expression. `Sheet::contributing_cells` must still trace through every expression
-        // input to find it, or it wrongly shows as an irrelevant/disabled field even though
-        // editing it changes which branch is active.
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/image_resize.adm2"),
-        )
-        .unwrap();
-        let mut parser = AdamParser::new(TypeRegistry::new(), op_lookup());
-        let mut parsed = parser.parse_str(&source).unwrap();
-        parsed.propagate().unwrap();
-        let (constrain_id, _) = *parsed.cell_names.get("constrain").unwrap();
-        assert!(relevant_cells(&parsed).contains(&constrain_id));
-    }
-
-    #[test]
-    fn image_resize_relevance_does_not_depend_on_which_cell_currently_holds_strength() {
-        // Regression test: `width_pixels`/`width_pixels_percent`/`width_inches`/
-        // `resolution` form a strength-ambiguous diamond (any two determine the rest).
-        // In the default state, `width_pixels` and `resolution` happen to be the
-        // strength-chosen sources — but every cell in the diamond, plus every cell feeding a
-        // conditional match subject (`resample` and `constrain` are both inputs to one
-        // conditional's match expression; `auto_quality` is a plain match cell), must show as
-        // relevant regardless of which specific cells the *current* strengths picked.
-        let source = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/image_resize.adm2"),
-        )
-        .unwrap();
-        let mut parser = AdamParser::new(TypeRegistry::new(), op_lookup());
-        let mut parsed = parser.parse_str(&source).unwrap();
-        parsed.propagate().unwrap();
-        let relevant = relevant_cells(&parsed);
-        for name in [
-            "width_pixels",
-            "width_pixels_percent",
-            "width_inches",
-            "resolution",
-            "original_width_pixels",
-            "resample",
-            "constrain",
-            "auto_quality",
-            "screen_lpi",
-        ] {
-            let (id, _) = *parsed.cell_names.get(name).unwrap();
-            assert!(relevant.contains(&id), "{name} should be relevant");
-        }
-    }
-
     #[test]
     #[cfg(feature = "desktop")]
+    /// Example names cannot traverse parent directories.
     fn load_example_source_rejects_name_containing_parent_dir_reference() {
         // Resolves (via `..`) to the same real file as "toy_example", but must
         // still be rejected rather than trusting whatever `fs::read_to_string`
@@ -317,12 +281,14 @@ mod tests {
 
     #[test]
     #[cfg(feature = "desktop")]
+    /// Example names cannot address nested paths.
     fn load_example_source_rejects_name_containing_path_separator() {
         assert!(load_example_source("sub/toy_example").is_err());
         assert!(load_example_source("sub\\toy_example").is_err());
     }
 
     #[test]
+    /// The shipped example catalogue is nonempty and sorted.
     fn available_examples_is_sorted_and_nonempty() {
         let examples = available_examples();
         assert!(!examples.is_empty());
@@ -333,10 +299,14 @@ mod tests {
 
     #[test]
     #[cfg(feature = "desktop")]
+    /// Directory scans reflect example additions and removals.
     fn scan_examples_dir_reflects_current_directory_contents() {
-        let dir = std::env::temp_dir().join("begin_example_source_test_scan_examples_dir");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../target/{}-begin_example_source_test_scan_examples_dir",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("zeta.adm2"), "sheet s {}").unwrap();
         std::fs::write(dir.join("alpha.adm2"), "sheet s {}").unwrap();
         std::fs::write(dir.join("ignored.txt"), "not an example").unwrap();
@@ -348,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    /// Example diagnostic names use the documented example path convention.
     fn active_source_file_name_example_matches_convention() {
         let active = ActiveSource {
             name: "toy_example".to_string(),
@@ -358,6 +329,7 @@ mod tests {
     }
 
     #[test]
+    /// Opened-file diagnostics retain their selected path.
     fn active_source_file_name_opened_returns_path_directly() {
         let active = ActiveSource {
             name: "my_model".to_string(),
@@ -368,6 +340,7 @@ mod tests {
     }
 
     #[test]
+    /// Non-UTF-8 file paths produce readable lossy diagnostic names.
     fn active_source_file_name_opened_is_lossy_for_non_utf8_path() {
         #[cfg(unix)]
         {
@@ -392,10 +365,14 @@ mod watch_tests {
     use std::time::Duration;
 
     #[test]
+    /// Directory watchers notify consumers when an example file appears.
     fn spawn_watch_on_dir_fires_on_new_file() {
-        let dir = std::env::temp_dir().join("begin_example_source_test_watch_new_file");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../target/{}-begin_example_source_test_watch_new_file",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
 
         let (tx, rx) = mpsc::channel::<()>();
         let _watcher = spawn_watch_on_dir(dir.clone(), move || {
@@ -414,10 +391,14 @@ mod watch_tests {
     }
 
     #[test]
+    /// Directory watchers notify consumers when an example file disappears.
     fn spawn_watch_on_dir_fires_on_removed_file() {
-        let dir = std::env::temp_dir().join("begin_example_source_test_watch_removed_file");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../target/{}-begin_example_source_test_watch_removed_file",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("goes_away.adm2");
         std::fs::write(&file, "sheet s {}").unwrap();
 

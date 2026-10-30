@@ -262,7 +262,7 @@ fn registered_leaf_locals_shadow_registered_functions() {
         if name == "Foreign" && args.is_empty() {
             Some(ResolvedLeafType::new(
                 "Foreign",
-                ValueType::leaf::<Foreign>(),
+                ValueType::cloneable_leaf::<Foreign>(),
             ))
         } else {
             cel_parser::builtin_type_resolver().resolve_named_type(name, args)
@@ -273,12 +273,15 @@ fn registered_leaf_locals_shadow_registered_functions() {
         "|f: Range(i32)| f(1i32)",
         "|f: Foreign| f(1i32)",
     ] {
+        let error = CELParser::with_type_resolver(shadowing_lookup(), resolver)
+            .parse_str(source)
+            .err()
+            .unwrap();
         assert!(
-            CELParser::with_type_resolver(shadowing_lookup(), resolver)
-                .parse_str(source)
-                .is_err(),
-            "{source}"
+            error.message().contains("no operation `()`"),
+            "{source}: {error}"
         );
+        assert!(!error.message().contains("clone"), "{source}: {error}");
         let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
             .parse_str_ast(source)
             .unwrap();

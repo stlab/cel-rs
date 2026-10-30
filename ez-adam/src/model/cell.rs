@@ -8,6 +8,11 @@ use slotmap::new_key_type;
 new_key_type! {
     /// A stable handle to a [`Cell`] in a
     /// [`crate::model::document::Document`].
+    ///
+    /// # Examples
+    ///
+    /// The ID returned by `add_cell(&mut document, "width", CellType::i64())`
+    /// addresses that cell only within its owning document.
     pub struct CellId;
 }
 
@@ -15,6 +20,10 @@ new_key_type! {
 /// concrete type so an out-of-range or fractional bound for that type
 /// cannot be represented.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// `ClampRange { min: Some(0), max: None }` expresses a lower-only bound.
 pub struct ClampRange<T> {
     /// The minimum bound for this range, if any.
     pub min: Option<T>,
@@ -25,6 +34,11 @@ pub struct ClampRange<T> {
 /// The value type of a [`Cell`], carrying a numeric variant's clamp range
 /// inline so a clamp bound can't be attached to a `Bool`/`Text` cell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// `CellType::i64()` creates an integer type with no clamp bounds;
+/// `CellType::Text` creates a nonnumeric cell type.
 pub enum CellType {
     /// A 64-bit floating-point cell type with optional clamp bounds.
     F64 {
@@ -44,6 +58,13 @@ pub enum CellType {
 
 impl CellType {
     /// An `F64` cell type with no clamp bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ez_adam::model::cell::CellType;
+    /// assert!(matches!(CellType::f64(), CellType::F64 { .. }));
+    /// ```
     #[must_use]
     pub fn f64() -> Self {
         CellType::F64 {
@@ -52,6 +73,13 @@ impl CellType {
     }
 
     /// An `I64` cell type with no clamp bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ez_adam::model::cell::CellType;
+    /// assert!(matches!(CellType::i64(), CellType::I64 { .. }));
+    /// ```
     #[must_use]
     pub fn i64() -> Self {
         CellType::I64 {
@@ -67,6 +95,11 @@ impl CellType {
 /// canvas — editing a `Cell`'s properties through any one of its nodes
 /// updates the single shared value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// Use `add_cell(&mut document, "width", CellType::i64())` to insert an ordinary
+/// integer cell, then `add_cell_node` to place it on the canvas.
 pub struct Cell {
     /// The name of this cell.
     pub name: String,
@@ -83,6 +116,16 @@ pub struct Cell {
 
 impl Cell {
     /// Creates a new, non-output cell with no restriction.
+    ///
+    /// - Complexity: O(name bytes) when converting borrowed text to an owned name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ez_adam::model::cell::{Cell, CellType};
+    /// let cell = Cell::new("width", CellType::i64());
+    /// assert_eq!(cell.name, "width");
+    /// ```
     #[must_use]
     pub fn new(name: impl Into<String>, ty: CellType) -> Self {
         Cell {
@@ -99,6 +142,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Floating-point defaults impose no clamp bounds.
     fn f64_has_no_clamp_bounds_by_default() {
         assert_eq!(
             CellType::f64(),
@@ -112,6 +156,7 @@ mod tests {
     }
 
     #[test]
+    /// Integer defaults impose no clamp bounds.
     fn i64_has_no_clamp_bounds_by_default() {
         assert_eq!(
             CellType::i64(),
@@ -125,6 +170,7 @@ mod tests {
     }
 
     #[test]
+    /// New cells are ordinary cells without restrictions.
     fn new_is_not_output_and_has_no_restrict() {
         let cell = Cell::new("width_pixels", CellType::i64());
         assert_eq!(cell.name, "width_pixels");
@@ -133,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    /// Clamp metadata can represent a lower-only bound.
     fn clamp_range_can_hold_only_a_minimum() {
         let range = ClampRange {
             min: Some(0i64),

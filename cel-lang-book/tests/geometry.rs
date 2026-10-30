@@ -57,5 +57,8 @@ fn reference_examples_match_documented_results() {
             checked += 1;
         }
     }
-    assert!(checked > 0, "the chapter must contain executable examples");
+    assert_eq!(
+        checked, 52,
+        "retain the complete executable example inventory"
+    );
 }

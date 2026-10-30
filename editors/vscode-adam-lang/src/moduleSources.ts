@@ -230,13 +230,15 @@ export interface ModuleSourceHandlers {
 
 /**
  * Creates editor-event handlers that select refreshes from the current configuration.
- * The loader owns dependency identities; the scheduler remains caller-owned.
- * Source-event time: O(p * d) for path bytes p and directory depth d; space: O(p).
- * Configuration events take O(1).
+ * The source owner supplies only identity checks; the scheduler remains caller-owned.
+ * Construction takes O(1) time and space. Each event adds O(1) handler overhead
+ * to the supplied operations' time and space: source events call isSource, and
+ * selected source/configuration events call requestRefresh. URI conversion before
+ * dispatch belongs to the caller; conversion within isSource belongs to its cost.
  * Example: createModuleSourceHandlers(sources, requestRefresh).configurationChanged(true).
  */
 export function createModuleSourceHandlers(
-  sources: ModuleSourceLoader,
+  sources: Pick<ModuleSourceLoader, 'isSource'>,
   requestRefresh: () => void,
 ): ModuleSourceHandlers {
   return {

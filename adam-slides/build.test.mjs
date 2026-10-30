@@ -65,8 +65,16 @@ test("successful publication uses merged sources for both displayed and mounted 
     const manifest = JSON.parse(await readFile(join(output, "theme", "adam-live-examples.json"), "utf8"));
     const markdown = await readFile(join(output, "slides.md"), "utf8");
     assert.deepEqual(manifest, { "tutorial/first_sheet": "sheet book {}", "local/custom": "sheet current {}" });
-    assert.ok(markdown.includes("sheet book {}\n```"));
-    assert.ok(markdown.includes("sheet current {}\n```"));
+    const slides = markdown.split("\n\n---\n\n");
+    assert.equal(slides.length, 2);
+    for (const [index, selector, source] of [
+      [0, "local/custom", "sheet current {}"],
+      [1, "tutorial/first_sheet", "sheet book {}"],
+    ]) {
+      assert.ok(slides[index].includes(`data-example="${selector}"`));
+      assert.ok(slides[index].includes(`example=${encodeURIComponent(selector)}&amp;graph=0`));
+      assert.ok(slides[index].includes(`\`\`\`adam\n${source}\n\`\`\``));
+    }
     assert.equal(await readFile(join(output, "example.html"), "utf8"), "example.html");
     assert.equal(await readFile(join(output, "theme", "swc.js"), "utf8"), "swc.js");
   } finally {

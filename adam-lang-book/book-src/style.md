@@ -2,25 +2,26 @@
 
 ## Canonical formatting
 
-Adam ships its own formatter (`adam fmt`, backed by
-[`format_sheet`](../adam_lang/fn.format_sheet.html)) with one canonical layout: 4-space
-indentation, opening braces on the same line as the keyword that introduces them, and no space
-before a declaration's closing `;`. Given input that doesn't already follow this layout,
-formatting normalizes it:
+`adam fmt`, backed by [`format_sheet`](../adam_lang/fn.format_sheet.html), applies
+one canonical layout: four-space indentation, opening braces on the keyword's line,
+and no space before a declaration's closing `;`:
 
 ```adam
 {{#include examples/style/canonical_formatting.adm2}}
 ```
 
-A formatter run is expected to be _idempotent_ (formatting already-canonical source
-reproduces it unchanged) and preserves every comment, doc comment, and blank line exactly
-where it appeared, including a file-header comment before `sheet` itself and a trailing comment
-before a block's own closing `}`. `adam-lsp`'s `textDocument/formatting` handler refuses to
-format a sheet with any recorded syntax error rather than guess at intent:
-[`format_sheet`](../adam_lang/fn.format_sheet.html)'s own precondition is that `sheet.errors`
-is empty.
+Formatting is *idempotent*: formatting canonical source leaves it unchanged.
+It preserves comments, doc comments, and blank lines in their original positions,
+including before `sheet` and before closing braces.
+The language server refuses formatting when syntax errors are recorded.
+Callers of `format_sheet` must supply a sheet with an empty `sheet.errors` list.
 
-CEL and Adam use strict LL(1) grammars with one token of lookahead. Commas separate
-list items; they do not terminate lists. Only singleton tuple values, types and
+Commas separate list items; they do not terminate lists. Only singleton tuple values, types and
 destructuring bindings require a terminal comma to distinguish them from grouping.
 Conditional branches have no comma separator or terminator.
+
+<!-- [knowledge]
+Preserve strict LL(1) parsing when editing syntax or examples: select alternatives
+from one current token and require an item after each separator. Only the required
+singleton-tuple comma is terminal; optional trailing commas would change the grammar.
+-->

@@ -1,6 +1,7 @@
 //! Examples backing `book-src/filters.md` (Chapter 5). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
+/// Retains the raw write until propagation applies the filter.
 #[test]
 fn write_never_filters() {
     let mut parser = adam_lang_book::support::parser();
@@ -18,6 +19,7 @@ fn write_never_filters() {
     assert_eq!(*parsed.read::<i32>(level).unwrap(), 100); // now conformed
 }
 
+/// Restores a filtered cell's original source aspiration when its bounds expand.
 #[test]
 fn raw_value_never_lost() {
     let mut parser = adam_lang_book::support::parser();
@@ -37,6 +39,7 @@ fn raw_value_never_lost() {
     assert_eq!(*parsed.read::<i32>(level).unwrap(), 50); // back to the original 50, not 10
 }
 
+/// Exposes inclusive range-filter metadata and its bounds.
 #[test]
 fn range_filter_kind() {
     let mut parser = adam_lang_book::support::parser();
@@ -53,6 +56,7 @@ fn range_filter_kind() {
     assert_eq!(parsed.filter_range::<i32>(level), Some((0, 100)));
 }
 
+/// Reports a derived cell's filter violation without clamping its value.
 #[test]
 fn derived_cell_diagnosed_not_corrected() {
     let mut parser = adam_lang_book::support::parser();
@@ -68,6 +72,7 @@ fn derived_cell_diagnosed_not_corrected() {
     assert!(parsed.filter_violated_cells().any(|id| id == bound));
 }
 
+/// Diagnoses an output filter after an edit moves the derived value out of range.
 #[test]
 fn filter_on_an_out_cell() {
     let mut parser = adam_lang_book::support::parser();
@@ -80,4 +85,9 @@ fn filter_on_an_out_cell() {
 
     parsed.propagate().unwrap();
     assert_eq!(*parsed.read::<i32>(area).unwrap(), 4); // within range, unclamped
+    let width = parsed.cell_names["width"].0;
+    parsed.write(width, 500i32).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(area).unwrap(), 500);
+    assert!(parsed.filter_violated_cells().any(|id| id == area));
 }

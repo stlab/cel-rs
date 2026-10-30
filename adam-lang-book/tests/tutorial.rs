@@ -1,6 +1,135 @@
 //! Examples backing `book-src/tutorial.md` (Chapter 1). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
+/// Computes the displayed output again after a source edit.
+#[test]
+fn basic_output_tracks_source_edits() {
+    let mut parsed = adam_lang_book::support::parser()
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/basic_output.adm2"
+        ))
+        .unwrap();
+    parsed.propagate().unwrap();
+    let area = parsed.output_names["area"];
+    let width = parsed.cell_names["width"].0;
+    assert_eq!(*parsed.read::<i32>(area).unwrap(), 200);
+    parsed.write(width, 3i32).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(area).unwrap(), 60);
+}
+
+/// Reverses the displayed two-way relationship after an edit.
+#[test]
+fn basic_relationship_changes_direction() {
+    let mut parsed = adam_lang_book::support::parser()
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/basic_relationship.adm2"
+        ))
+        .unwrap();
+    parsed.propagate().unwrap();
+    let a = parsed.cell_names["a"].0;
+    let b = parsed.cell_names["b"].0;
+    assert_eq!(*parsed.read::<f64>(a).unwrap(), 4.0);
+    parsed.write(a, 12.0f64).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<f64>(b).unwrap(), 6.0);
+}
+
+/// Restores self-referencing source values when the forcing edit is reversed.
+#[test]
+fn inequality_restores_shadow_values() {
+    let mut parsed = adam_lang_book::support::parser()
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/inequality.adm2"
+        ))
+        .unwrap();
+    let a = parsed.cell_names["a"].0;
+    let b = parsed.cell_names["b"].0;
+    let c = parsed.cell_names["c"].0;
+    parsed.write(a, 100i32).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*parsed.read::<i32>(c).unwrap(), 100);
+    parsed.write(a, 0i32).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(b).unwrap(), 20);
+    assert_eq!(*parsed.read::<i32>(c).unwrap(), 30);
+}
+
+/// Activates the displayed equality relationship only while its subject is true.
+#[test]
+fn constrain_activates_and_releases_relationship() {
+    let mut parsed = adam_lang_book::support::parser()
+        .parse_str(include_str!("../book-src/examples/tutorial/constrain.adm2"))
+        .unwrap();
+    let flag = parsed.cell_names["constrain"].0;
+    let a = parsed.cell_names["a"].0;
+    let b = parsed.cell_names["b"].0;
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(a).unwrap(), 5);
+    parsed.write(flag, true).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(a).unwrap(), 10);
+    parsed.write(flag, false).unwrap();
+    parsed.propagate().unwrap();
+    parsed.write(a, 3i32).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(a).unwrap(), 3);
+    assert_eq!(*parsed.read::<i32>(b).unwrap(), 10);
+}
+
+/// Restores the source value after removing a forced conditional assignment.
+#[test]
+fn conditional_forced_preserves_source() {
+    let mut parsed = adam_lang_book::support::parser()
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/conditional_forced.adm2"
+        ))
+        .unwrap();
+    let flag = parsed.cell_names["constrain"].0;
+    let a = parsed.cell_names["a"].0;
+    parsed.write(flag, true).unwrap();
+    parsed.propagate().unwrap();
+    assert!(parsed.is_forced(a));
+    assert_eq!(*parsed.read::<i32>(a).unwrap(), 42);
+    assert_eq!(*parsed.source::<i32>(a).unwrap(), 5);
+    parsed.write(flag, false).unwrap();
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(a).unwrap(), 5);
+}
+
+/// Reports an out-of-domain derived value without changing the relationship's result.
+#[test]
+fn requirements_filter_diagnostic_preserves_derived_value() {
+    let mut parsed = adam_lang_book::support::parser()
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/requirements_filter_diagnostic.adm2"
+        ))
+        .unwrap();
+    let width = parsed.cell_names["width"].0;
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(width).unwrap(), 150);
+    assert!(parsed.filter_violated_cells().any(|id| id == width));
+}
+
+/// Retains invalid writes to both source and plain cells and reports failed requirements.
+#[test]
+fn requirements_are_diagnostics_not_input_gates() {
+    for kind in ["source", "cell"] {
+        let source = format!("sheet s {{ {kind} value = 1 require {{ @positive value > 0; }}; }}");
+        let mut parsed = adam_lang_book::support::parser()
+            .parse_str(&source)
+            .unwrap();
+        let value = parsed.cell_names["value"].0;
+        parsed.write(value, -1i32).unwrap();
+        assert_eq!(*parsed.read::<i32>(value).unwrap(), -1);
+        parsed.propagate().unwrap();
+        assert_eq!(*parsed.read::<i32>(value).unwrap(), -1);
+        assert!(!parsed.cell_requirements_valid(value));
+    }
+}
+
+/// Reads the displayed initial width.
 #[test]
 fn first_sheet() {
     let mut parser = adam_lang_book::support::parser();
@@ -14,6 +143,7 @@ fn first_sheet() {
     assert_eq!(*parsed.read::<i32>(width).unwrap(), 1920);
 }
 
+/// Defers range filtering until propagation.
 #[test]
 fn clamp_demo() {
     let mut parser = adam_lang_book::support::parser();
@@ -31,6 +161,7 @@ fn clamp_demo() {
     assert_eq!(*parsed.read::<i32>(level).unwrap(), 100); // now clamped
 }
 
+/// Reports an output requirement violation after both dimensions increase.
 #[test]
 fn area_with_requirement() {
     let mut parser = adam_lang_book::support::parser();
@@ -52,6 +183,7 @@ fn area_with_requirement() {
     assert!(!parsed.cell_requirements_valid(output)); // 100 * 100 == 10000 > 1000
 }
 
+/// Recomputes the product while retaining the two source operands.
 #[test]
 fn multiplication_triangle() {
     let mut parser = adam_lang_book::support::parser();
@@ -76,6 +208,7 @@ fn multiplication_triangle() {
     assert_eq!(*parsed.read::<f64>(c).unwrap(), 10.0); // 2.0 * 5.0, re-derived
 }
 
+/// Produces both tuple outputs and retains them on repeated propagation.
 #[test]
 fn destructuring_demo() {
     let mut parser = adam_lang_book::support::parser();
@@ -98,6 +231,7 @@ fn destructuring_demo() {
     assert_eq!(*parsed.read::<f64>(perimeter).unwrap(), 28.0);
 }
 
+/// Preserves source shadows across forced and self-referencing branch changes.
 #[test]
 fn forced_and_self_ref_shadow() {
     let mut parser = adam_lang_book::support::parser();

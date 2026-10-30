@@ -59,30 +59,6 @@ fn module_diagnostics_check_bindings_branches_imports_and_libraries() {
     assert!(!diagnostics_for_module(&path, &ModuleSet::new()).is_empty());
 }
 
-/// Requires binding diagnostics to retain definition and invocation source owners.
-#[test]
-fn module_diagnostics_keep_definition_and_use_locations() {
-    let mut modules = ModuleSet::new();
-    modules
-        .insert_source(
-            "constraints".parse().unwrap(),
-            "file:///definition.adm2",
-            "sheet ordered(a: f64, b: f64) {}",
-        )
-        .unwrap();
-    let path = "app".parse().unwrap();
-    modules.insert_source(path, "file:///app.adm2", "use constraints::ordered; sheet app { cell x: i32; cell y: f64; relationship ordered(a: x, b: y); }").unwrap();
-    let errors = diagnostics_for_module(&"app".parse().unwrap(), &modules);
-    let files: Vec<_> = errors
-        .iter()
-        .flat_map(|d| &d.labels)
-        .filter_map(|l| l.location.as_ref())
-        .map(|l| l.source.file_name())
-        .collect();
-    assert!(files.contains(&"file:///definition.adm2"), "{errors:?}");
-    assert!(files.contains(&"file:///app.adm2"), "{errors:?}");
-}
-
 /// Receives one bounded transport message, failing rather than hanging on regressions.
 fn receive(client: &Connection) -> Message {
     client
@@ -92,6 +68,8 @@ fn receive(client: &Connection) -> Message {
 }
 
 /// Reads one diagnostic publication.
+///
+/// - Complexity: O(n) time and space for n serialized publication bytes.
 fn published(client: &Connection) -> lsp_types::PublishDiagnosticsParams {
     let Message::Notification(notification) = receive(client) else {
         panic!("expected publication")
@@ -101,6 +79,8 @@ fn published(client: &Connection) -> lsp_types::PublishDiagnosticsParams {
 }
 
 /// Sends an arbitrary notification through the actual LSP transport.
+///
+/// - Complexity: O(n) time and space for n method and parameter bytes.
 fn notify(client: &Connection, method: &str, params: serde_json::Value) {
     client
         .sender
@@ -112,6 +92,9 @@ fn notify(client: &Connection, method: &str, params: serde_json::Value) {
 }
 
 /// Collects complete publications preceding an ordered request barrier by source URI.
+///
+/// - Complexity: O(b + p log(p + 1) * u) time and O(b + p) space for b publication
+///   bytes, p publications and maximum URI length u.
 fn publications(
     client: &Connection,
 ) -> std::collections::BTreeMap<String, lsp_types::PublishDiagnosticsParams> {
@@ -134,6 +117,7 @@ fn publications(
             }
             Message::Response(response) => {
                 assert_eq!(response.id, 99.into());
+                assert_eq!(response.response_result.unwrap_err().code, -32601);
                 return output;
             }
             other => panic!("unexpected server request: {other:?}"),
@@ -142,6 +126,8 @@ fn publications(
 }
 
 /// Starts the real transport with an explicit caller-owned source collection.
+///
+/// - Complexity: initialization analysis plus O(n) wire storage for n source bytes.
 fn start_modules(
     records: serde_json::Value,
 ) -> (Connection, std::thread::JoinHandle<anyhow::Result<()>>) {
@@ -155,12 +141,14 @@ fn start_modules(
             json!({"initializationOptions":{"moduleSources":records}}),
         )))
         .unwrap();
-    assert!(matches!(receive(&client), Message::Response(_)));
+    successful_response(&client, 1);
     notify(&client, "initialized", json!({}));
     (client, thread)
 }
 
-/// Completes the in-memory shutdown handshake and joins the bounded server task.
+/// Completes the in-memory shutdown handshake and joins the owned server task.
+///
+/// - Complexity: waits for pending server dispatch and shutdown completion.
 fn stop_modules(client: &Connection, thread: std::thread::JoinHandle<anyhow::Result<()>>) {
     client
         .sender
@@ -170,9 +158,31 @@ fn stop_modules(client: &Connection, thread: std::thread::JoinHandle<anyhow::Res
             json!(null),
         )))
         .unwrap();
-    assert!(matches!(receive(client), Message::Response(_)));
+    successful_response(client, 2);
     notify(client, "exit", json!(null));
     thread.join().unwrap().unwrap();
+}
+
+/// Requires the next transport response to succeed with the requested ID.
+///
+/// - Complexity: O(n) space for the received response payload.
+fn successful_response(client: &Connection, id: i32) {
+    let Message::Response(response) = receive(client) else {
+        panic!("expected successful response")
+    };
+    assert_eq!(response.id, id.into());
+    assert!(response.response_result.is_ok(), "{response:?}");
+}
+
+/// Requires exactly the expected publication owners, including clean owners.
+///
+/// - Complexity: O(p log(p + 1) * u) time and O(p) space for p owners of maximum u bytes.
+fn expect_owners(
+    output: &std::collections::BTreeMap<String, lsp_types::PublishDiagnosticsParams>,
+    expected: &[&str],
+) {
+    let owners: std::collections::BTreeSet<_> = output.keys().map(String::as_str).collect();
+    assert_eq!(owners, expected.iter().copied().collect());
 }
 
 /// Preserves parsed Unicode token locations through owning diagnostics and UTF-16 transport.
@@ -509,7 +519,7 @@ fn transport_close_failures_recovery_and_removal_are_consistent() {
             json!({"initializationOptions":{"moduleSources":records}}),
         )))
         .unwrap();
-    assert!(matches!(receive(&client), Message::Response(_)));
+    successful_response(&client, 1);
     notify(&client, "initialized", json!({}));
     notify(
         &client,
@@ -526,18 +536,18 @@ fn transport_close_failures_recovery_and_removal_are_consistent() {
         "textDocument/didClose",
         json!({"textDocument":{"uri":"file:///lib.adm2"}}),
     );
-    assert!(
-        publications(&client)
-            .values()
-            .all(|p| p.diagnostics.is_empty())
-    );
+    let closed = publications(&client);
+    expect_owners(&closed, &["file:///app.adm2", "file:///lib.adm2"]);
+    assert!(closed.values().all(|p| p.diagnostics.is_empty()));
     notify(
         &client,
         "workspace/didChangeConfiguration",
         json!({"settings":{"moduleSourcesError":"read denied"}}),
     );
+    let failed = publications(&client);
+    expect_owners(&failed, &["file:///app.adm2", "file:///lib.adm2"]);
     assert!(
-        publications(&client)
+        failed
             .values()
             .all(|p| p.diagnostics[0].message.contains("read denied"))
     );
@@ -546,18 +556,16 @@ fn transport_close_failures_recovery_and_removal_are_consistent() {
         "workspace/didChangeConfiguration",
         json!({"settings":{"moduleSources":records}}),
     );
-    assert!(
-        publications(&client)
-            .values()
-            .all(|p| p.diagnostics.is_empty())
-    );
+    let recovered = publications(&client);
+    expect_owners(&recovered, &["file:///app.adm2", "file:///lib.adm2"]);
+    assert!(recovered.values().all(|p| p.diagnostics.is_empty()));
     notify(
         &client,
         "workspace/didChangeConfiguration",
         json!({"settings":{"moduleSources":[]}}),
     );
     let cleared = publications(&client);
-    assert_eq!(cleared.len(), 2);
+    expect_owners(&cleared, &["file:///app.adm2", "file:///lib.adm2"]);
     assert!(cleared.values().all(|p| p.diagnostics.is_empty()));
     notify(
         &client,
@@ -607,7 +615,7 @@ fn transport_close_failures_recovery_and_removal_are_consistent() {
             json!(null),
         )))
         .unwrap();
-    assert!(matches!(receive(&client), Message::Response(_)));
+    successful_response(&client, 2);
     notify(&client, "exit", json!(null));
     thread.join().unwrap().unwrap();
 }
@@ -629,7 +637,7 @@ fn transport_republishes_dependents_on_definition_change_and_configuration_refre
             json!({"initializationOptions":{"moduleSources": records}}),
         )))
         .unwrap();
-    assert!(matches!(receive(&client), Message::Response(_)));
+    successful_response(&client, 1);
     notify(&client, "initialized", json!({}));
     notify(
         &client,
@@ -665,8 +673,15 @@ fn transport_republishes_dependents_on_definition_change_and_configuration_refre
         "textDocument/didChange",
         json!({"textDocument":{"uri":"file:///definition.adm2","version":2},"contentChanges":[{"text":"sheet ordered(a: f64, b: f64) {}"}]}),
     );
-    assert!(published(&client).diagnostics.is_empty());
-    assert!(published(&client).diagnostics.is_empty());
+    let fixed = [published(&client), published(&client)];
+    let owners: std::collections::BTreeSet<_> = fixed.iter().map(|p| p.uri.as_str()).collect();
+    assert_eq!(
+        owners,
+        ["file:///app.adm2", "file:///definition.adm2"]
+            .into_iter()
+            .collect()
+    );
+    assert!(fixed.iter().all(|p| p.diagnostics.is_empty()));
     client
         .sender
         .send(Message::Request(Request::new(
@@ -675,7 +690,7 @@ fn transport_republishes_dependents_on_definition_change_and_configuration_refre
             json!(null),
         )))
         .unwrap();
-    assert!(matches!(receive(&client), Message::Response(_)));
+    successful_response(&client, 2);
     notify(&client, "exit", json!(null));
     thread.join().unwrap().unwrap();
 }

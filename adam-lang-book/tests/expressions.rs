@@ -3,6 +3,7 @@
 //! only — it needs a parser built without `cel-std`, so it is never `{{#include}}`d into the
 //! chapter itself; see `NO_LIVE_MOUNT` in `adam-lang-book-live-config`.
 
+/// Reports an unavailable standard-library operation in an unextended parser.
 #[test]
 fn no_standard_library() {
     let mut parser =

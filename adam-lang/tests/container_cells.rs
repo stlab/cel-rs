@@ -94,6 +94,7 @@ fn recursive_sources_update_twice() {
             result.as_slice()[0].0.1.as_slice().as_ptr()
         );
         assert_ne!(original.as_slice().as_ptr(), result.as_slice().as_ptr());
+        /// Describes a singleton tuple containing the persistent array.
         type Wrapped = Cons<Pairs, Nil>;
         let wrapped = sheet
             .read_compound::<Wrapped>(sheet.cell_names["wrapped"].0)
@@ -225,6 +226,7 @@ fn default_availability_rejects_before_effects() {
             .parse_str(&source)
             .unwrap();
         assert_eq!(DEFAULT_CALLS.with(|calls| calls.get()), 2, "{source}");
+        /// Describes the recursive default fixture's leaves, tuples, and arrays.
         type Defaults = Cons<
             Leaf<Effect>,
             Cons<
@@ -267,6 +269,7 @@ fn callable_capabilities_are_explicit() {
     assert!(default_array.span().start().column > 0);
     let mut cel = cel_parser::CELParser::new(OpLookup::new());
     let body = cel.parse_str("[|x: i32| x]: [Fn((i32,), i32)]").unwrap();
+    /// Describes an array of integer-to-integer callables.
     type Functions = ArrayOf<cel_runtime::FnOf<Cons<Leaf<i32>, Nil>, Leaf<i32>>>;
     let mut prepared = body.prepare::<Nil, Functions>().unwrap();
     assert_eq!(prepared.call(&().into_c_stack_list()).unwrap().len(), 1);
@@ -297,6 +300,7 @@ fn destructuring_moves_recursive_outputs() {
     sheet
         .read_compound::<Nil>(sheet.cell_names["unit"].0)
         .unwrap();
+    /// Describes a singleton tuple containing an integer array.
     type One = Cons<ArrayOf<Leaf<i32>>, Nil>;
     assert_eq!(
         sheet
@@ -460,6 +464,7 @@ fn failing_multioutput_cleans_completed_compounds() {
             sheet.read_compound::<TrackedRows>(left).unwrap(),
             aspiration
         );
+        /// Describes a singleton tuple containing the tracked source array.
         type WrappedRows = Cons<TrackedRows, Nil>;
         assert_eq!(
             sheet.read_compound::<WrappedRows>(right).unwrap().1,
@@ -569,7 +574,9 @@ fn registered_generic_leaves_and_missing_defaults() {
         }",
         )
         .unwrap();
+    /// Describes an inclusive integer range paired with an integer array.
     type Item = Cons<Leaf<std::ops::RangeInclusive<i32>>, Cons<ArrayOf<Leaf<i32>>, Nil>>;
+    /// Describes the complete array of range-and-array tuples.
     type Items = ArrayOf<Item>;
     let xs = sheet.cell_names["xs"].0;
     sheet
@@ -689,6 +696,7 @@ fn source_unit_composes_with_empty_and_singleton_shapes() {
         "sheet s { source units: [()] = [(), ()]; out nested: ([()], (), ((),)) := (units, (), ((),)); }"
     ).unwrap();
     sheet.propagate().unwrap();
+    /// Describes an array of units, a unit, and a singleton unit tuple.
     type Nested = Cons<ArrayOf<Nil>, Cons<Nil, Cons<Cons<Nil, Nil>, Nil>>>;
     let value = sheet
         .read_compound::<Nested>(sheet.cell_names["nested"].0)
