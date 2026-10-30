@@ -6,52 +6,42 @@
 source_decl = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 ```
 
-A `source` declaration looks exactly like a [`cell`](cells.md#cell-declarations)
-declaration: the same `cell_type_init` (a type, an initializer, or both), evaluated the same
-way, with no cell scope; the same optional trailing `filter` clause and `require`
-block. `source` and `cell` even share one namespace with `out`, so declaring `source width` and
-`cell width` in the same sheet is the same "duplicate cell" error two `cell width` declarations
-would be.
+A `source` declaration uses the same type and initializer rules as a
+[`cell`](cells.md#cell-declarations), including evaluation without cell scope.
+It accepts an optional `filter` clause and `require` block.
+`source`, `cell`, and `out` share one namespace; declaring both `source width`
+and `cell width` is a "duplicate cell" error.
 
 ```adam
 {{#include examples/source/basic_source.adm2}}
 ```
 
-Both `width` and `height` above are declared `source`: ordinary inputs to the `out` that
-multiplies them, with nothing in this sheet ever claiming either as a relationship or
-conditional output.
+`width` and `height` supply inputs to the output that multiplies them.
 
 ## Always a source, never derived
 
-A `source` cell is the mirror image of an [`out`](outputs.md) cell. Where an `out` cell is
-always derived by its own fixed writer, a `source` cell is always left alone by the solver:
-never claimable as a `relationship` binding's output, a `conditional` branch's output, or an
-`out`'s own writer target. Naming a `source` cell on a binding's left-hand side is an error.
+A `source` cell cannot be claimed as a method's output, including in a conditional branch.
+Naming it on a binding's left-hand side is an error. An [`out`](outputs.md) cell,
+by contrast, always has its own fixed writer.
 
 A plain `cell`'s source/derived status is a per-round decision the solver makes from
 [strength](relationships.md#strength-who-gets-to-stay-a-source) — the same cell might be a
-source in one round and derived in the next, depending on what's been written recently. A
-`source` cell opts out of that entirely: whatever a host last wrote to it (or its own declared
-initializer, before any write) is always its value, unconditionally.
+source in one round and derived in the next, depending on what's been written recently.
+A `source` cell retains its last external write, or its initializer before any write.
+A filter may conform its effective value without changing that source value.
 
 ## A source cell can be filtered too
 
-A `source` cell is ordinary in every other respect: it can be read anywhere a plain `cell`
-can, written directly at any time (that's the whole point — a `source` cell always reflects
-whatever was last supplied from outside the sheet), can carry a `require` block for domain
-diagnostics, exactly like a `cell` or `out`:
+A `source` cell can be read wherever a plain cell can and written directly by the host.
+A `require` block reports domain diagnostics:
 
 ```adam
 {{#include examples/source/source_with_a_requirement.adm2}}
 ```
 
-and can carry a [`filter`](filters.md) clause, exactly like a `cell` or `out`: whatever a host
-writes to a filtered `source` cell is conformed the same way a filtered plain `cell`'s value
-is, live, whenever the sheet resolves:
+A [`filter`](filters.md) clause conforms its effective value during resolution,
+not during a write:
 
 ```adam
 {{#include examples/source/source_with_a_filter.adm2}}
 ```
-
-See the [filters chapter](filters.md) for `filter`'s full rules — everything there applies to a `source`
-cell unchanged.

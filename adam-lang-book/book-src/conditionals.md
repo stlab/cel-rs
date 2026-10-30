@@ -8,20 +8,17 @@ conditional_branch = (literal_pattern | "_") "=>" "{" { relationship_decl | rela
 literal_pattern    = [ "-" ] literal.
 ```
 
-A `conditional` evaluates its _match subject_ (the `expression` right after the
-`conditional` keyword) and activates the one branch, if any, whose literal equals the current
-match value. Only that branch's `relationship` blocks participate in the round's solve; every
-other branch's relationships are invisible to the planner, exactly as if they weren't declared.
-A branch's own body holds nothing but `relationship` declarations: a `conditional` cannot
-declare cells, and cannot nest another `conditional` directly inside a branch.
+A `conditional` evaluates its *match subject*, the expression after the keyword,
+and activates the branch, if any, whose literal equals the result.
+Only that branch's relationships participate in resolution.
+Branch bodies accept relationship declarations and component uses, but no cell
+declarations or nested conditionals.
 Branches have no comma separator or terminator.
 
 ## The match subject
 
-A bare cell name (`conditional mode { ... }`) is the common case: the match value is just that
-cell's current value. The match subject can also be a general expression over several
-already-declared cells, [deduced](expressions.md#deduced-dependencies) exactly like a
-relationship binding's body:
+The match subject may be a cell name (`conditional mode { ... }`) or an expression
+with [deduced dependencies](expressions.md#deduced-dependencies):
 
 ```adam
 {{#include examples/conditionals/multi_cell_match_subject.adm2}}
@@ -34,54 +31,49 @@ patterns, so such a conditional can use only the `_` default branch.
 
 ## Forced cells
 
-A relationship with exactly one method has no alternative binding to choose: its output cell
-is claimed every time the sheet resolves, regardless of strength. Such a cell is _forced_
-— `Sheet::is_forced` reports this, and it's `false` for a cell whose relationship has two or
-more methods, even if strength happens to pick the same direction every round.
+A relationship with exactly one method claims its output whenever active,
+regardless of strength. The output is *forced*, as reported by `Sheet::is_forced`.
+This query returns `false` for a relationship with multiple methods, even when strength
+selects the same direction every round.
 
-A common convention in a host UI is to disable the editable widget for a forced cell:
-writing it would have no lasting effect once the sheet next resolves, so there's nothing
-useful for the user to type into. This is a UI convention, not a language rule — `adam-lang`
-and `adam-rs` never disable anything themselves; a host is always free to accept the write
-anyway (see [shadow state: forced and self-referencing cells](#shadow-state-forced-and-self-referencing-cells) below for what happens if it does).
+Host UIs commonly disable editing for forced cells because resolution overrides their writes.
+The language does not require this convention; a host may accept a write and preserve it
+as [shadow state](#shadow-state-forced-and-self-referencing-cells).
 
 ## Shadow state: forced and self-referencing cells
 
-The [raw value is never lost](filters.md#the-raw-value-is-never-lost) section's filters and the
-[self-referencing methods](relationships-continued.md#self-referencing-methods) section's self-referencing
-methods both keep a cell's own raw *source* value forever, underneath whatever *derived*
-value a live correction currently computes. A forced cell works the same way: forcing it
-shadows its own source, never overwrites it.
+A forced cell preserves its source underneath its derived value, as
+[filters](filters.md#the-raw-value-is-never-lost) and
+[self-referencing methods](relationships-continued.md#self-referencing-methods) do.
 
 ```adam
 {{#include examples/conditionals/forced_and_self_ref_shadow.adm2}}
 ```
 
-With `mode == 0` (the declared default), the self-referencing branch is active — two methods,
-`low := min(low, high)` and `high := max(low, high)`, exactly like the triangle from the [relationships chapter](relationships.md#strength-who-gets-to-stay-a-source): only one is ever selected, and which one is decided by strength. `low`, declared
+With `mode == 0` (the declared default), the self-referencing branch is active.
+Strength selects one of its two methods, `low := min(low, high)` or
+`high := max(low, high)`. `low`, declared
 first, is stalest, so the solver picks `low := min(low, high)`; `high` is left alone as an
 ordinary source, its own `max` method never invoked. `low` and `high` start at `4` and `9`,
 already satisfying `low <= high`, so nothing visibly changes.
 
 Writing `high` to `42` and switching to `mode == 1` activates the single-method branch,
-forcing `low` from `high`: `low` reads `42`, but its own *source* is still `4` — the write
-that actually changed something (`high`) never touched `low`'s source at all. Switching back
+forcing `low` from `high`: `low` reads `42`, but its source is still `4`.
+Writing `high` did not change `low`'s source. Switching back
 to `mode == 0` reselects `low := min(low, high)` (still the stalest cell) and recomputes it
-fresh from both cells' own sources — `4` and `42` — not from the stale forced `42`: `low`
+from both cells' sources, `4` and `42`, rather than the forced `42`: `low`
 reads back down to `4`; `high`, never written since the first round, is still the one left as
 a source, at `42`.
 
 Writing `low` to `100` promotes it to freshest, flipping the solver's choice: now
 `high := max(low, high)` is the one selected, deriving `high` and leaving `low` as the
-source instead — `high` reads `100`, pulled up to match. Either binding can fire; which one
-does is strength's call, exactly as in the [relationships chapter](relationships.md#strength-who-gets-to-stay-a-source),
-never both at once.
+source instead. `high` reads `100`, pulled up to match.
 
 ## The default branch and reverting to source
 
-`_ => { ... }` matches whatever value none of the named branches list and (because it's
-defined that way) must be the last branch textually; a named branch written after `_` is a
-syntax error. Leaving off `_` entirely is legal: if the match value doesn't equal any branch's
+`_ => { ... }` matches any value not listed by a named branch and must appear last.
+A named branch after `_` is a syntax error. The default branch is optional:
+if the match value doesn't equal any branch's
 literal, none of the conditional's relationships are active that round, and their outputs
 become freely writable. Forced and self-referencing cells preserve a separate source
 value, so releasing those cells restores their last external write or declared default.
@@ -96,8 +88,6 @@ the shadow-state mechanism for forced and self-referencing cells.
 
 ## Nested and chained conditionals
 
-Two `conditional`s in the same sheet compose freely at the sheet level: one conditional's
-output cells can be another's match subject or a relationship input, exactly like any other
-cell, even though a branch body itself can only hold `relationship`s, not another
-`conditional`. A resize dialog, for example, might have two sibling conditionals this way: one
-gated on `resample`, the other on `resample && constrain`.
+Sibling conditionals may read one another's outputs as match subjects or relationship inputs.
+Branch bodies cannot contain conditionals. A resize dialog might use two sibling
+conditionals, one gated on `resample`, the other on `resample && constrain`.

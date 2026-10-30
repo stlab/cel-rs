@@ -1,9 +1,6 @@
 # Reference Manual
 
-This appendix is for looking things up, not reading start to finish: it restates the rules
-from the preceding chapters in one terse pass, plus the grammar and error messages in full. Where a rule
-needs justification or an example, the appropriate chapter is linked instead of repeating it
-here.
+This appendix collects Adam's grammar, type rules, solver behavior, and error messages.
 
 ## Grammar
 
@@ -42,18 +39,18 @@ require_block      = "require" "{" { requirement } "}".
 requirement        = [ "@" identifier ] expression ";".
 ```
 
-`expression` and everything it expands to (`literal`, `identifier`, operators, `if`/`else`,
-`as` casts, ranges, closures, function calls) is CEL grammar, defined by `cel-parser`; see
+`expression`, literals, identifiers, operators, `if`/`else`, casts, ranges, closures,
+and function calls use CEL grammar; see
 [expressions are CEL](expressions.md#expressions-are-cel).
 
-`cell_filter` and `require_block` both attach identically to all three of `cell_decl`,
-`source_decl`, and `out_decl` — neither has a cell-kind restriction (see
+`cell_filter` and `require_block` may attach to `cell_decl`, `source_decl`, and `out_decl` (see
 [a source cell can be filtered too](source.md#a-source-cell-can-be-filtered-too)).
 
-A `cell_decl`'s grammar also has a design-level provision for an optional trailing
-`":=" expression` clause (making a `cell` double as a relationship-bound output in one
-declaration), **not implemented** as of this writing; only the `"=" expression` one-time
-initializer and the `cell_filter`/`require_block` clauses shown above exist today.
+<!-- [knowledge]
+Document only implemented productions here. A combined cell declaration with a
+trailing := expression is a design proposal, not accepted syntax; keep it out of
+the grammar until the parser implements it.
+-->
 
 ## Sheets and namespaces
 
@@ -67,8 +64,8 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
   a unary operation directly, ignoring same-named cells; `expr.name(a)` passes
   the receiver first. `(expr.name)()` instead calls the operation's result.
   Only value references contribute dependencies, including inside closures.
-- **No forward references.** An identifier is only recognized as a cell dependency if that
-  cell was declared earlier in the same sheet's token order. Referencing an undeclared name is
+- Cell dependencies must be declared earlier in the same sheet.
+  Referencing an undeclared name is
   an "undeclared cell" error. See [names and declaration order](cells.md#names-and-declaration-order).
 
 ## Components, modules and roots
@@ -151,20 +148,18 @@ definition locations.
 - Compound reads return independent owners; `source_compound` reads the original
   aspiration, even when filtering changes the effective value. Wrong complete
   read/write witnesses fail at the external boundary before a write mutates state.
-  The private `CellValue` retains one canonical owner, not per-element erasure.
 - Prepared relationship, output, filter, and requirement frames bind recursive
   storage once during sheet construction. Propagation executes the raw CEL
   engine without recursive shape checks. Value-dependent failures still propagate.
 - `Fn((A,), R)` and `Fn((), R)` denote one and zero parameters. Callable cells,
   including empty arrays of callables, fail without equality; CEL container
   storage alone does not require equality. Debug formatting is independent.
-- `source name: T;` / `source name = expr;` / `source name: T = expr;`: identical rules to the
-  three `cell` forms above, evaluated the same way — a `source` declaration is a `cell`
-  declaration in every respect except its fixed `CellKind` (below).
+- `source name: T;`, `source name = expr;`, and `source name: T = expr;` use the
+  corresponding `cell` type and initializer rules, but have a fixed source kind.
 - Every cell has a fixed _kind_, assigned once at declaration and never reassigned: a plain
   `cell` may be a planner source or claimed as a method's output, chosen per round; a `source`
   cell is always a source, never claimable as any method's output; an `out` cell is always
-  derived by its own fixed writer, never `write()`-able. See [source cells](source.md) for
+  derived by its own fixed writer and rejects direct writes. See [source cells](source.md) for
   `source` and [outputs and requirements](outputs.md) for `out`.
 
 See [sheets, cells, and types](cells.md) and [the type registry](#the-type-registry) for the built-in type table.
@@ -179,13 +174,12 @@ See [sheets, cells, and types](cells.md) and [the type registry](#the-type-regis
 | `bool` | `false` |
 | `String` | `""` |
 
-A host application can register additional Rust types under new Adam type names via
+A host registers additional Rust types under Adam names with
 [`TypeRegistry::register`](../adam_lang/type_registry/struct.TypeRegistry.html#method.register) (with a
 `Default`) or
 [`TypeRegistry::register_no_default`](../adam_lang/type_registry/struct.TypeRegistry.html#method.register_no_default)
-(without one, such a type can only be used with an explicit initializer, never a bare `: T`
-declaration). This is a Rust-level embedding decision made before parsing a sheet, not
-something sheet source itself can do.
+(without one). A type without a default requires an initializer; a bare `: T` declaration
+fails at parse time. Registration happens in the host before parsing, not in sheet source.
 
 Record syntax requires a separate `OpLookup::register_record` schema, and dot
 operations require host implementations (optionally with registered operation
@@ -220,15 +214,14 @@ type in the current design.
   assignment still exists across every active relationship. See
   [strength: who gets to stay a source](relationships.md#strength-who-gets-to-stay-a-source).
 - Every method in a relationship must reference the same `inputs ∪ outputs` cell set as
-  every other method in that relationship, or resolution fails to parse with `` `methods in a
+  every other method in that relationship, or parsing fails with `` `methods in a
   relationship must reference the same set of cells` ``. See
   [the rules a relationship's methods must satisfy](relationships.md#the-rules-a-relationships-methods-must-satisfy).
 - A method's own `outputs` must be duplicate-free, and no two methods in a relationship may
-  share an identical `outputs` set, or resolution fails to parse with `` `a method's outputs
+  share an identical `outputs` set, or parsing fails with `` `a method's outputs
   must be duplicate-free, and no two methods in a relationship may share an outputs set` ``.
   See [the rules a relationship's methods must satisfy](relationships.md#the-rules-a-relationships-methods-must-satisfy).
-- A cell may appear in both a method's inputs and its own outputs — a self-referencing method
-  — which is explicitly allowed. See
+- A *self-referencing method* includes a cell in both its inputs and outputs. See
   [self-referencing methods](relationships-continued.md#self-referencing-methods).
 - Resolving the sheet fails with a _conflict_ if no valid assignment exists at all, or a
   _cycle_ if every valid assignment forms a closed dependency loop with no source anywhere in
@@ -261,19 +254,14 @@ See [conditionals](conditionals.md).
 
 ## Filters
 
-- `cell_filter = "filter" expression`, trailing a `cell_decl`, `source_decl`, or `out_decl` —
-  a filter attaches to any cell kind, with no per-kind restriction (see
-  [a source cell can be filtered too](source.md#a-source-cell-can-be-filtered-too)). A filter
-  carries no name; `_` inside the expression denotes the candidate value (of the cell's own
-  declared type); every other identifier is a deduced dependency. The expression must
-  reference `_` at least once (unless it's a range expression, `lo..=hi`, which is exempt)
-  and must produce the filtered cell's own type.
-- **Writing a cell never applies a filter.** A filter is applied live, each time the sheet
-  resolves, against the cell's current value.
-- A filtered cell keeps a raw _source_ value (last written, untouched by any filter forever)
-  and a computed _derived_ value (the filter's live output, recomputed every time the sheet
-  resolves); reading the cell returns the derived value when present, the source value
-  otherwise.
+- A `filter` clause may follow a `cell`, `source`, or `out` initializer.
+  Filters have no names. `_` denotes a candidate of the cell's declared type;
+  other cell references are deduced dependencies. A non-range filter must reference `_`
+  and return exactly the cell's type. A range filter `lo..=hi` need not reference `_`;
+  its bounds must match the cell's numeric type. Violations are parse-time errors.
+- Writing a cell never applies its filter. Filtering occurs during resolution.
+- A filtered cell preserves its last-written *source* value separately from its
+  computed *derived* value. Reads return the derived value when present, otherwise the source.
 - A filter attached to a cell a relationship currently claims (a *derived* cell that round) is
   diagnostic-only: it never corrects the value, only flags a mismatch, queryable by a host; see
   [the host embedding API](#the-host-embedding-api). The same is true, unconditionally, of a filter
@@ -284,28 +272,24 @@ See the [filters chapter](filters.md) for the full model and worked examples.
 
 ## Outputs and requirements
 
-- `out name := expr;` declares a new cell, always derived by `expr` and never writable
-  directly — not by a host write, not a `relationship`, not another `out` — but otherwise an
-  ordinary, freely-referenceable cell: any later declaration may read it by name exactly like
-  any other already-declared cell. See [outputs and requirements](outputs.md).
+- `out name := expr;` declares a cell derived only by `expr`.
+  Host writes, relationships, and additional `out` declarations cannot write it.
+  Later declarations may read it; see [outputs and requirements](outputs.md).
 - `require { [ "@" name ] expr; ... }` attaches boolean checks, each with an optional
-  `@name` label. Unlike `filter`, `require` is not tied to `out`: a `require` block may
-  trail a `cell`, `source`, or `out` declaration's initializer, with the same meaning in
-  every case. Each `requirement`'s own dependencies are deduced separately from its
-  declaration's own expression. A failing requirement never stops the sheet from resolving,
-  or its cell's own value from being computed: it's reported as a diagnostic, nothing more,
-  queryable by a host (see [the host embedding API](#the-host-embedding-api)).
+  `@name` label to a `cell`, `source`, or `out` declaration, after any filter.
+  Each requirement deduces its dependencies separately from the declaration's expression.
+  A failing requirement does not stop resolution or value computation; hosts query its
+  diagnostic through the [embedding API](#the-host-embedding-api).
 
 See [requirements: diagnostics, not gates](outputs.md#requirements-diagnostics-not-gates) and [cell declarations](cells.md#cell-declarations)
 for `require` on a plain `cell`, and [source cells](source.md) for `require` on a `source` cell.
 
 ## Error messages
 
-Adam reports every diagnostic as a [`ParseError`](../cel_parser/struct.ParseError.html)
-carrying a source span; there is no separate runtime error type for a malformed sheet; if
-`parse_str` returns `Ok`, the sheet is syntactically and structurally valid (though it may
-still fail *when resolved* for the solver reasons in [relationships and the solver](#relationships-and-the-solver)).
-Selected messages, verbatim:
+`parse_str` reports malformed sheets as [`ParseError`](../cel_parser/struct.ParseError.html)
+with source spans. Success establishes syntactic and structural validity, but resolution
+may still fail; see [relationships and the solver](#relationships-and-the-solver).
+The following table lists selected messages:
 
 | Message (abbreviated) | Cause |
 |---|---|
@@ -329,8 +313,7 @@ Selected messages, verbatim:
 
 ## The host embedding API
 
-This book documents the *language*; the Rust API a host application uses to parse and drive a
-sheet is documented by the crates themselves:
+The crate documentation describes the Rust APIs for parsing and driving sheets:
 
 - [`AdamParser`](../adam_lang/struct.AdamParser.html): parses source into a live
   [`ParsedSheet`](../adam_lang/struct.ParsedSheet.html), which derefs to
@@ -339,12 +322,11 @@ sheet is documented by the crates themselves:
   parser is built with;
   [`TypeRegistry::new`](../adam_lang/type_registry/struct.TypeRegistry.html#method.new) pre-populates the
   built-ins in [the type registry](#the-type-registry).
-- [`OpLookup`](../cel_parser/op_table/struct.OpLookup.html): the function-library table a parser is
-  built with; this book's own examples install `cel-std` via `support::parser` (see
-  `adam-lang-book`'s own crate source).
+- [`OpLookup`](../cel_parser/op_table/struct.OpLookup.html): the parser's function-library table.
+  This book's examples install `cel-std`.
 - [`Sheet`](../adam_rs/sheet/struct.Sheet.html): `read`, `write`, `propagate`, `is_source`,
   `is_forced`, `cell_kind`, `filter_*`, `cell_requirements`, `cell_requirements_valid`,
-  `violated_requirements`, and every other runtime operation this book has used throughout.
+  `violated_requirements`, and other runtime operations.
 - [`AdamAstParser`](../adam_lang/struct.AdamAstParser.html) /
   [`format_sheet`](../adam_lang/fn.format_sheet.html) /
   [`check_sheet`](../adam_lang/fn.check_sheet.html): the span-carrying CST, formatter, and

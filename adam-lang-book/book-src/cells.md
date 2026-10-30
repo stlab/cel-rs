@@ -31,13 +31,10 @@ cell height: i32 = 1080;     // type and initializer
 cell area = 0;               // initializer only — type is inferred
 ```
 
-At least one of `: type_expr` / `= expression` must be present: `cell width;` alone is a
-syntax error ("expected `:` or `=` in cell declaration"). A `cell` may also carry an optional
-trailing `filter` clause and/or `require` block — a standing domain constraint and named
-boolean diagnostics, respectively, both covered in full in the [filters chapter](filters.md) and
-[requirements: diagnostics, not gates](outputs.md#requirements-diagnostics-not-gates) (those two chapters introduce the
-mechanisms via `out`, but both also apply to a plain `cell` or a
-[`source`](source.md) cell).
+`cell width;` is a syntax error ("expected `:` or `=` in cell declaration").
+A cell may also carry a trailing [`filter`](filters.md) clause for a domain constraint,
+a [`require`](outputs.md#requirements-diagnostics-not-gates) block for boolean diagnostics,
+or both. These clauses also apply to [`source`](source.md) and [`out`](outputs.md) cells.
 
 A cell's initializer may reference literals and CEL operators, but not other cells: it's
 evaluated before the sheet has any state to read.
@@ -57,14 +54,14 @@ a cell declares a type but no initializer:
 | `bool` | `bool` | `false` |
 | `String` | `String` | `""` |
 
-When a cell has an initializer but no `: type_expr` annotation, its type is inferred from the
-initializer expression's own result type (an ordinary CEL literal-defaulting rule: an
-unsuffixed integer literal like `0` is `i32`, an unsuffixed float literal like `0.0` is `f64`;
-see `cel-parser`'s documentation for the full literal grammar). When both are present, they
-must agree exactly, or the sheet fails to parse with a "type mismatch: expected `T`, got `U`" error (see [error messages](reference.md#error-messages)).
+Without a `: type_expr` annotation, the initializer's result determines the cell's type.
+CEL defaults an unsuffixed integer literal such as `0` to `i32` and an unsuffixed float
+such as `0.0` to `f64`; see the [CEL literal grammar](../cel-book/literals-and-types.html).
+When both a type annotation and an initializer are present, their types must agree exactly,
+or parsing fails with "type mismatch: expected `T`, got `U`"
+(see [error messages](reference.md#error-messages)).
 
-A host application can also register additional Rust types under their own Adam type
-names; that's a Rust-level embedding concern, not something a sheet author does; see
+A host application can register additional Rust types under Adam type names through
 the [type registry](reference.md#the-type-registry).
 
 ## Cells with no default
@@ -82,11 +79,9 @@ type_expr = identifier [ "(" type_expr { "," type_expr } ")" ]
           | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 ```
 
-A parenthesized type list is a tuple type. `()` is the empty tuple (an inert, zero-element
-value; see the [relationships chapter](relationships.md) for where it's useful); `(T)` with no comma is plain
-grouping, identical to `T` (types have no precedence to disambiguate, but the parentheses are
-accepted for symmetry with expression grammar); `(T,)` (trailing comma mandatory) is a
-genuine one-element tuple; `(T, U, ...)` is the general case:
+A parenthesized type list is a *tuple type*. `()` is the empty tuple;
+`(T)` groups the type `T`; `(T,)` is a one-element tuple with a required comma;
+`(T, U, ...)` is a tuple with multiple elements:
 
 ```adam
 {{#include examples/cells/tuple_typed_cell.adm2}}
@@ -111,19 +106,23 @@ containing array and tuple shapes need no additional registration.
 `Fn((A, B), R)` describes a callable with two parameters; `(A,)` and `()` describe one
 and zero parameters. A callable has no default and requires an initializer. Every Adam
 cell also requires cloning and value equality: CEL can store callable values, but Adam
-rejects a callable cell when its descriptor lacks equality. Adam does not invent function
-identity or suppress propagation. Registered host function markers retain the concrete
+rejects a callable cell when its descriptor lacks equality.
+Registered host function markers retain the concrete
 capabilities their type registration supplies.
 
 ## Executable host boundary
 
-`CellValue` is Adam's private whole-value compound owner, not a wrapper around
-each array element. A host supplies `ArrayOf`, `Cons`, `Nil`, and `Leaf` witnesses
+A host supplies `ArrayOf`, `Cons`, `Nil`, and `Leaf` witnesses
 to the checked `ParsedSheet` boundary. A wrong nested shape fails before mutation.
 Cloning and equality are required for persistence/propagation; debug formatting
 is an independent capability. Containers themselves do not impose those bounds.
-Even an empty array of callable elements lacks equality when its element
-descriptor lacks equality; emptiness does not manufacture that capability.
+An empty array of callable elements also lacks equality when its element descriptor does.
+
+<!-- [knowledge]
+Keep CellValue as one canonical whole-value owner, rather than erasing each array
+element. Preserve descriptor capabilities for empty containers; do not substitute
+function identity for value equality.
+-->
 
 This example defaults recursive compounds, writes an array of concrete tuple
 lists, propagates it to an output, and reads the source aspiration:
@@ -132,7 +131,7 @@ lists, propagates it to an output, and reads the source aspiration:
 {{#include ../tests/composable_containers.rs:compound-cells}}
 ```
 
-The corresponding capability error is also executable:
+This example checks the missing-equality error:
 
 ```rust
 {{#include ../tests/composable_containers.rs:callable-cell-capability}}
@@ -145,11 +144,10 @@ ordinary behavior. Formatting does not imply an editable source round trip.
 
 ## Names and declaration order
 
-A cell's name must be unique across the whole sheet: `cell`s and [`out`](outputs.md)
-declarations share one namespace, so declaring `cell result: i32 = 0;` and later
-`out result := ...;` in the same sheet is a duplicate-name error, exactly as two `cell result`
-declarations would be.
+A cell's name must be unique across the sheet. `cell`, [`source`](source.md),
+and [`out`](outputs.md) declarations share one namespace; declaring both
+`cell result: i32 = 0;` and `out result := ...;` is a duplicate-name error.
 
-Referencing a name before its declaration — as a `relationship` binding's output, a dependency
-inside any expression, a `conditional`'s match subject, or a `filter`'s dependency — is an
+Referencing a name before its declaration, whether as a binding output or an expression
+dependency, is an
 "undeclared cell `name`" error (see [error messages](reference.md#error-messages)).

@@ -8,12 +8,10 @@ out_decl    = "out" identifier [ ":" type_expr ] ":=" expression
 requirement = [ "@" identifier ] expression ";".
 ```
 
-An `out` declares a new cell computed by exactly one expression: there's no alternative
-binding to choose between, unlike a `relationship`. Its dependencies are
-[deduced](expressions.md#deduced-dependencies) the same way. The `: type_expr` annotation is
-optional; when absent, the output's type is inferred from the initializer, the same rule
-[built-in types and inference](cells.md#built-in-types-and-inference) gives for a plain `cell`. An `out` may
-also carry a `filter` clause, exactly like a plain `cell`; see the [filters chapter](filters.md).
+An `out` declares a cell computed by one expression, with
+[deduced dependencies](expressions.md#deduced-dependencies).
+The optional `: type_expr` annotation must match the expression's type; without it,
+Adam infers the type. An output may also carry a [`filter`](filters.md) clause.
 
 ```adam
 {{#include examples/outputs/basic_output.adm2}}
@@ -21,16 +19,11 @@ also carry a `filter` clause, exactly like a plain `cell`; see the [filters chap
 
 ## An output cell can be read anywhere, written nowhere
 
-`out` shares one namespace with `cell`: declaring `out result := ...;` after (or before) a
-`cell result` in the same sheet is a duplicate-name error, exactly like two `cell` declarations
-would be. An output cell is an ordinary cell for *reading*: a later declaration in the same
-sheet can reference an earlier `out` by name in its own expression — as a relationship input, a
-conditional's match subject, a filter argument, or another `out`'s own initializer — exactly
-like referencing any other already-declared cell. What stays restricted is *writing*: an
-output's cell can never be produced by more than one method, and can never be written directly,
-not by a host write, not by a `relationship` binding, not by a second `out`. Its value
-comes from its own initializer and nothing else. The initializer is purely functional;
-resolving the sheet may reuse its result rather than evaluate it again:
+An output shares the cell namespace and must have a unique name.
+Later declarations may read it as a relationship input, conditional subject, filter
+argument, or another output's input. Only its own expression may write it:
+host writes, relationship bindings, and additional `out` declarations cannot.
+The expression is purely functional; resolution may reuse its result:
 
 ```adam
 {{#include examples/outputs/output_cell_can_be_referenced.adm2}}
@@ -38,15 +31,10 @@ resolving the sheet may reuse its result rather than evaluate it again:
 
 ## Requirements: diagnostics, not gates
 
-`require` is not an outputs-only mechanism: a `require { ... }` block can trail a plain `cell`
-or a [`source`](source.md) declaration's initializer too, with the same meaning described here
-— see [cell declarations](cells.md#cell-declarations) and [source cells](source.md) for those forms. A
-`filter` clause is just as unrestricted — see
-[a filter on an output cell](filters.md#a-filter-on-an-output-cell) for a filter attached to an `out`
-declaration. Trailing an `out`'s initializer, `require { ... }` names zero or more boolean
-checks. Each `requirement`'s own dependencies are deduced separately from the output's
-initializer; a requirement commonly reads the output's own value by name, alongside whatever
-other cells it needs:
+A `require { ... }` block attaches zero or more boolean checks to a `cell`,
+[`source`](source.md), or `out` declaration, after any filter.
+Each *requirement* deduces its dependencies separately from the initializer.
+It may read the cell it checks and any other declared cells:
 
 ```adam
 {{#include examples/outputs/requirement_diagnostic.adm2}}
@@ -58,18 +46,14 @@ Equal inputs produce equivalent results or errors. There is no guarantee that a
 requirement executes, or when or how often it executes; current diagnostics may use
 a previously computed result.
 
-A failed requirement never stops the sheet from resolving, and never stops `area` from being
-computed and readable; a host can query which requirements are currently failing precisely
-because nothing else in the sheet notices a requirement failing on its own (see the
-[host embedding API](reference.md#the-host-embedding-api)). A requirement's `@name` is
-optional — present only when an application wants to report *which* requirement failed; it
-happens to read naturally when it echoes a cell name (`@not_too_big`, `@width_max`), but it
-isn't a cell reference and doesn't have to match one.
+A failed requirement does not stop resolution or prevent a cell's value from being
+computed and read. Hosts can query failures through the
+[embedding API](reference.md#the-host-embedding-api).
+The optional `@name` identifies a requirement for reporting; it is not a cell reference.
 
 ## Multiple requirements
 
-An output can list any number of requirements; a host can query exactly the ones currently
-failing, identified individually (see the [host embedding API](reference.md#the-host-embedding-api)):
+A declaration can list any number of requirements, which hosts can query individually:
 
 ```adam
 {{#include examples/outputs/multiple_requirements.adm2}}
