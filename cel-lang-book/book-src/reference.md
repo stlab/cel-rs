@@ -1,22 +1,22 @@
 # Reference Manual
 
-This chapter is the compact language reference for CEL expressions. It
-gathers the core grammar, token categories, type names, literal forms,
-operators, standard-library operations, collections, closures, and sharp edges in one
-place.
+This chapter defines CEL's grammar, tokens, types, literals, operators,
+standard-library operations, collections, and closures.
 
 ## Concept
 
-CEL is an expression language. Every source form in this chapter produces
-a value or helps compose one. Use the tutorial chapters for worked prose,
-and use this chapter when you need the exact grammar or a concise rule
-table.
+CEL is an expression language. Use the tutorial chapters for worked examples.
 
 ## Syntax
 
-CEL uses strict LL(1) parsing with one token of lookahead. A comma requires
-another item, except for the required terminal comma in a singleton tuple value
-or type. No other list accepts a trailing comma.
+CEL uses strict LL(1) parsing.
+
+<!-- [knowledge]
+Keep these productions consistent with the parser's single-token decisions.
+In CEL's grammar, consuming a separator commits to another item; the required
+comma marking a singleton tuple value or type is the exception. Do not add
+optional trailing commas when editing the grammar or examples.
+-->
 
 ```text
 expression = closure_expression | range_expression .
@@ -69,17 +69,15 @@ expressions and accept bare closures.
 A call suffix directly after a named member dispatches that member. Parenthesize
 the member before the call suffix to call its result instead.
 
-Expand the productions in ordinary and header modes. Header mode removes
-`record_fields` from its primary production, reserving the following `{` for the
-body. A condition enters header mode; a closure body inherits its enclosing mode.
-Groups, arguments, arrays, record field values, and branch bodies enter ordinary
-mode. `value_identifier` excludes `if`, `else`, `as`, `true`, and `false`.
+`value_identifier` excludes `if`, `else`, `as`, `true`, and `false`.
 
-The first token distinguishes closures (`|` or `||`) from range expressions.
-Each precedence level selects its continuation from the current token and returns
-at a lower-precedence operator or expression boundary. Boundaries include closing
-delimiters, commas, body braces, and end of input. A consumed comma always requires
-another item, except the required comma marking a singleton tuple.
+<!-- [knowledge]
+Expand the productions in ordinary and header modes. Header mode removes
+record_fields from its primary production, reserving the following brace for
+the body. A condition enters header mode; a closure body inherits its enclosing
+mode. Groups, arguments, arrays, record field values, and branch bodies enter
+ordinary mode. The user-facing condition restriction is documented in Exact rules.
+-->
 
 ## Worked examples
 
@@ -176,13 +174,6 @@ when the evaluation environment installs it. See
 | `sqrt(x)` | `f32`, `f64` | same as operand | Float-only. Inputs below zero yield `NaN` rather than an error. |
 | `floor(x)`, `ceil(x)`, `trunc(x)`, `fract(x)`, `round_ties_even(x)` | `f32`, `f64` | same as operand | Float-only. Successful calls are infallible. |
 
-- None of the documented functions are integer-only.
-- `sqrt`, `floor`, `ceil`, `trunc`, `fract`, and `round_ties_even` are
-  float-only.
-- `min`, `max`, and `clamp` support both integers and floats.
-- `abs` and `signum` support signed integers and floats, but not unsigned
-  integers.
-
 ## Collection table
 
 | Form | Syntax | Rules |
@@ -226,7 +217,6 @@ when the evaluation environment installs it. See
   preparation, not each invocation. Clone, equality, and formatting are
   explicit independent capabilities.
 - Native Rust operations can serve interpreted CEL through typed adapters.
-  A macro-compiled CEL backend does not yet exist.
 - Comparison expressions consume one comparison operator.
 - Range forms do not chain.
 - Closures require parentheses as operator operands, including range endpoints,

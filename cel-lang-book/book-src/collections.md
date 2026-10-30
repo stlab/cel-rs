@@ -1,16 +1,13 @@
 # Collections
 
-CEL uses tuples and arrays for compound values. Tuples preserve fixed
-positional shape. Arrays hold homogeneous sequences of values; an empty array
-uses a type annotation to state its element type. For the complete grammar,
-see the [Reference Manual](reference.md).
+CEL uses *tuples* for fixed positional values and *arrays* for homogeneous
+sequences. An empty array uses a type annotation to state its element type.
+For the complete grammar, see the [Reference Manual](reference.md).
 
 ## Concept
 
 Parentheses and brackets build different kinds of values. Parentheses can
-mean unit, grouping, or tuples. Brackets always mean arrays. That shape
-difference matters because tuple indexing uses `.N`, while arrays follow
-their own literal rules and do not use tuple indexing syntax.
+mean unit, grouping, or tuples. Brackets always mean arrays.
 
 ## Syntax
 
@@ -50,9 +47,6 @@ if ready { [1, 2] } else { [3, 4] }
 - A non-empty array annotation must match the element type exactly.
 - Nested arrays are valid when each element is itself an array of the
   same element type.
-- Tuples and arrays are distinct value forms: tuples are positional and
-  use `.N`, while arrays use bracket literals and homogeneous element
-  typing.
 - Tuple indexing uses an unsuffixed integer such as `.0` or `.1`. Named
   postfixes such as `value.name` invoke host-provided operations; they do not
   select tuple fields.
@@ -62,7 +56,7 @@ if ready { [1, 2] } else { [3, 4] }
 
 ## Rust interoperability
 
-The recursive mapping uses concrete values, not per-element erased owners:
+CEL values map recursively to concrete Rust values:
 
 | CEL shape | Rust value | Representation witness |
 | --- | --- | --- |
@@ -75,8 +69,12 @@ The recursive mapping uses concrete values, not per-element erased owners:
 Here `R(T)` is the recursively canonical value and `W(T)` its witness.
 `IntoCStackList` and `IntoRustTuple` move between lists and ordinary Rust tuples
 without requiring `Clone`, equality, or formatting. Logical list order is source
-order even though the `repr(C)` cons cell physically stores its tail first.
-Never cast native Rust tuple bytes to a list.
+order.
+
+<!-- [knowledge]
+The repr(C) cons cell physically stores its tail first. Preserve logical source
+order through the conversion APIs; native Rust tuple bytes cannot be cast to a list.
+-->
 
 This executable example prepares an array of actual lists, then moves each row
 into a native Rust tuple:
@@ -88,11 +86,10 @@ into a native Rust tuple:
 ### Nested vectors and slices
 
 `Array<T>::from_vec` and `into_vec` transfer the allocation in O(1);
-`as_slice` borrows the same elements as `&[T]`. They do not reinterpret Rust's
-unspecified `Vec<T>` header.
+`as_slice` borrows the same elements as `&[T]`.
 
 The representation of `[[i32]]` is `Array<Array<i32>>`. Its allocation-preserving
-vector view is `Vec<Array<i32>>`, and its slice view is `&[Array<i32>]`, **not**
+vector view is `Vec<Array<i32>>`, and its slice view is `&[Array<i32>]`, not
 `Vec<Vec<i32>>` or `&[Vec<i32>]`. An explicit deep conversion builds a new outer
 vector while transferring each inner allocation independently:
 
@@ -114,15 +111,22 @@ the complete signature and emitter:
 {{#include ../tests/composable_containers.rs:shared-operation}}
 ```
 
-This is native Rust construction, **not** a macro-compiled CEL backend.
-`cel-rs-macros` validates CEL at compile time; it does not generate native CEL.
+<!-- [knowledge]
+The example constructs native Rust operations; it is not evidence of a compiled
+CEL backend. cel-rs-macros validates CEL at compile time but does not generate
+native CEL.
+-->
 
 ### Checked boundaries and prepared execution
 
 `ValueType` records complete identity, layout, ownership, and optional
 capabilities. `ResolvedType` and the checker type `Ty` retain recursive shapes,
-including callable signatures. Equal sizes or shared carrier IDs cannot prove
-identity, even for empty arrays.
+including callable signatures.
+
+<!-- [knowledge]
+Preserve complete type identity at checked boundaries. Equal sizes or shared
+carrier IDs do not establish identity, even for empty arrays.
+-->
 
 `OwnedValue::try_into_typed` checks arbitrary external ownership against a full
 witness. `DynSegment::prepare::<Args, Result>` instead checks a typed frame once
@@ -136,8 +140,7 @@ Neither API removes value-dependent bounds checks or body errors.
 Clone, equality, and debug formatting are separate capabilities. Construction
 and moving ownership do not require them; borrowing an emitted argument read
 requires cloning, and requesting comparison or formatting requires the matching
-capability. The examples use built-in capabilities, not an implicit bound on
-all CEL values.
+capability.
 
 ## Edge cases
 

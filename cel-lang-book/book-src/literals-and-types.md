@@ -17,9 +17,8 @@ typed closure parameters.
 | Floating-point numbers | `f32`, `f64` |
 | Other scalars | `bool`, `String` |
 
-The language also accepts character, byte-string, C-string, and unit values in
-expressions. The named scalar type set remains the sixteen type names listed
-above.
+Character, byte-string, C-string, and unit values are also valid in expressions,
+but are not additional built-in scalar type names.
 
 ## Syntax
 
@@ -138,8 +137,7 @@ CEL also builds compound values from ordinary expressions:
 
 Source `()` and the empty tuple type are one canonical type, witnessed by `Nil`
 and represented by `CNil<()>`. Bridge ordinary Rust `()` with the zero-element
-`IntoCStackList` / `IntoRustTuple` conversion; it is not a separate source leaf
-that merely shares a zero-sized layout. An explicitly registered opaque host
+`IntoCStackList` / `IntoRustTuple` conversion. An explicitly registered opaque host
 `Leaf<()>` remains a distinct host identity.
 
 ```rust
@@ -161,7 +159,7 @@ separate namespace from values, so a value named `Sample` does not hide the
 constructor. The host must separately register any operation such as `.value`;
 a record schema does not automatically create accessors.
 
-This executable embedding example registers a real Rust value and accessor.
+This embedding example registers a Rust value and accessor.
 Both bare and parenthesized member spellings return `3.0`; calling that numeric
 result with `(record.value)()` fails.
 
@@ -187,6 +185,3 @@ Endpoint-bearing ranges require homogeneous numeric endpoints. Each endpoint
 is a full expression, so operators inside either side are parsed before the
 range is formed. The [Operators](operators.md) chapter defines precedence and
 the non-chaining rule for range expressions.
-
-Use this chapter for value categories and [Reference Manual](reference.md)
-for the complete grammar of literal, tuple, array, range, and closure syntax.

@@ -1,12 +1,10 @@
 # Lexical conventions
 
-The lexer tokenizes a stream of characters into tokens before the parser reads
-them as expressions. It is built on Rust
+The *lexer* divides source characters into *tokens*. It uses Rust
 [token trees](https://doc.rust-lang.org/proc_macro/enum.TokenTree.html) and
 inherits many behaviors from the Rust
 [lexical structure](https://doc.rust-lang.org/reference/lexical-structure.html).
-This chapter describes the token forms that participate in CEL source. For the
-full CEL expression grammar, see the [Reference Manual](reference.md).
+For the full CEL expression grammar, see the [Reference Manual](reference.md).
 
 ## Syntax
 
@@ -16,7 +14,7 @@ compound_token = "&&" | "||" | "==" | "!=" | "<=" | ">="
 identifier = identifier_start { identifier_continue } .
 ```
 
-## Whitespace and Compound tokens
+## Whitespace and compound tokens
 
 Spaces, tabs, and line breaks separate tokens. They do not otherwise change the
 meaning of an expression.
@@ -31,7 +29,7 @@ if flag {
 }
 ```
 
-Certain punctuation characters combine to form single tokens so long as there is no intervening white space. This includes, `&&`, `||`,
+Adjacent punctuation characters combine into single tokens: `&&`, `||`,
 `==`, `!=`, `<=`, `>=`, `<<`, `>>`, `..`, and `..=`.
 
 ```text
@@ -42,8 +40,7 @@ x<=y
 
 ## Comments and trivia
 
-Comments are source trivia. They may appear between tokens in the same places
-as whitespace.
+Comments may appear between tokens wherever whitespace is allowed.
 
 ```text
 x /* midpoint */ + 1
@@ -108,8 +105,7 @@ b"bytes"
 c"header"
 ```
 
-The grammar describes the unit value `()` rather than a standalone literal
-token.
+The grammar defines the unit value `()`; it is not a literal token.
 
 ## Delimiters and punctuation
 
