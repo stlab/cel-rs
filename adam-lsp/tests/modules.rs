@@ -59,6 +59,35 @@ fn module_diagnostics_check_bindings_branches_imports_and_libraries() {
     assert!(!diagnostics_for_module(&path, &ModuleSet::new()).is_empty());
 }
 
+/// Uses module syntax diagnostics for editor documents without an explicit mapping.
+#[test]
+fn unregistered_document_supports_module_syntax() {
+    let (client, thread) = start_modules(json!([]));
+    notify(
+        &client,
+        "textDocument/didOpen",
+        json!({"textDocument":{
+            "uri":"file:///unregistered.adm2", "languageId":"adam-lang", "version":1,
+            "text":"sheet helper() {} sheet app { relationship helper(); }"
+        }}),
+    );
+    let result = published(&client);
+    assert!(result.diagnostics.is_empty(), "{result:?}");
+    notify(
+        &client,
+        "textDocument/didChange",
+        json!({"textDocument":{"uri":"file:///unregistered.adm2","version":2},
+            "contentChanges":[{"text":"use missing::helper; sheet app {}"}]}),
+    );
+    let result = published(&client);
+    assert_eq!(result.diagnostics.len(), 1, "{result:?}");
+    assert!(
+        result.diagnostics[0].message.contains("missing"),
+        "{result:?}"
+    );
+    stop_modules(&client, thread);
+}
+
 /// Receives one bounded transport message, failing rather than hanging on regressions.
 fn receive(client: &Connection) -> Message {
     client
