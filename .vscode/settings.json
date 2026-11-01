@@ -1,4 +1,10 @@
 {
+    "adam-lang.modules": {
+        "relationships": "adam-lang/examples/relationships.adm2",
+        "composed": "adam-lang/examples/composed.adm2",
+        "image_constraints": "cel-euclid/examples/image_constraints.adm2",
+        "resize_straighten": "cel-euclid/examples/resize_straighten.adm2"
+    },
     "editor.formatOnSave": true,
     "rust-analyzer.debug.engine": "vadimcn.vscode-lldb",
     "rust-analyzer.lens.debug.enable": true,
