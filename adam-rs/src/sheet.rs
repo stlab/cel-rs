@@ -2219,13 +2219,19 @@ impl Sheet {
         !plan.certificate.contains_cell(id) || plan.certificate.is_released(id)
     }
 
-    /// Iterates the input cells of the last successful propagation for value capture.
+    /// Iterates snapshot sources contributing to `results` in the last successful plan.
     ///
-    /// Includes unclaimed cells and outputs read by their own selected method.
-    /// Each cell appears once, in unspecified order. Pure derived outputs and
-    /// `Out` cells are excluded. Returns an empty iterator before any successful
-    /// propagation. Like [`Self::is_source`], classification describes the last
-    /// successful plan; newly added non-`Out` cells count as unclaimed.
+    /// An empty `results` slice selects the entire sheet: unclaimed cells and outputs
+    /// read by their own selected method. Otherwise, selects only those sources in
+    /// the requested cells' selected producer paths, including conforming filter
+    /// arguments and conditional selectors governing those paths. Unselected methods'
+    /// inputs and diagnostic-only filter arguments do not contribute.
+    ///
+    /// Each source appears once, in unspecified order, even when results repeat or
+    /// share dependencies. Pure derived outputs and `Out` cells are excluded.
+    /// Returns an empty iterator before any successful propagation. Like
+    /// [`Self::is_source`], classification describes the last successful plan;
+    /// newly added non-`Out` cells count as unclaimed.
     ///
     /// To capture a settled result, iterate after successful propagation and before
     /// further edits, reading effective values with [`Self::read`], not the
@@ -2234,17 +2240,22 @@ impl Sheet {
     ///
     /// Replay writes all captured values in any order as one batch before
     /// propagation. For a settled solution satisfying its relationships and filters,
-    /// a compatible graph with matching uncaptured inputs reproduces the same
-    /// effective values. Relationship methods must preserve an already-satisfied
-    /// assignment, and self-referencing methods and filters must be idempotent;
+    /// a compatible graph with matching uncaptured inputs reproduces the requested
+    /// effective values (or all values when `results` is empty). Relationship methods
+    /// must preserve an already-satisfied assignment, and self-referencing methods
+    /// and filters must be idempotent;
     /// these caller contracts make the solution a fixed point even if replay
     /// selects different methods. No strengths or write history need to be captured.
     /// A snapshot does not preserve original aspirations, priority history,
     /// diagnostics, or behavior under subsequent edits, including spring-back.
     ///
-    /// - Complexity: O(C + S + Σ(I × O)) traversal time and O(1) auxiliary space,
-    ///   for C cells, S selected steps, and each selected method's I inputs and
-    ///   O outputs. Does not allocate or copy values.
+    /// - Precondition: every result is a live cell belonging to this sheet.
+    /// - Complexity: empty results take O(C + S + Σ(I × O)) traversal time and O(1)
+    ///   auxiliary space, for C cells, S selected steps, and each selected method's
+    ///   I inputs and O outputs. Nonempty results add expected O(N + V + E + V × G)
+    ///   time and O(N + V + E) auxiliary space, for N requested results, V reachable
+    ///   value/producer pairs, E their dependency edges, and G the total size of the
+    ///   registered conditional graph. Does not copy cell values.
     ///
     /// # Examples
     ///
@@ -2252,15 +2263,19 @@ impl Sheet {
     /// use adam_rs::Sheet;
     /// let mut sheet = Sheet::new();
     /// let width = sheet.add_source(10_i32);
+    /// sheet.add_source(false);
     /// sheet.propagate()?;
-    /// let capture = sheet.source_cells()
+    /// assert_eq!(sheet.source_cells(&[]).count(), 2);
+    /// let capture = sheet.source_cells(&[width])
     ///     .map(|id| Ok((id, *sheet.read::<i32>(id)?)))
     ///     .collect::<Result<Vec<_>, adam_rs::Error>>()?;
     /// assert_eq!(capture, [(width, 10)]);
     /// // Use host-defined names or schema keys, not live CellIds, for persistence.
     /// # Ok::<(), adam_rs::Error>(())
     /// ```
-    pub fn source_cells(&self) -> impl Iterator<Item = CellId> + '_ {
+    pub fn source_cells(&self, results: &[CellId]) -> impl Iterator<Item = CellId> + use<'_> {
+        debug_assert!(results.iter().all(|id| self.cells.contains_key(*id)));
+        let contributors = (!results.is_empty()).then(|| self.capture_contributors(results));
         let unclaimed = self.cells.keys().filter(|&id| self.is_source(id));
         let self_referencing = self
             .last_plan
@@ -2277,9 +2292,87 @@ impl Sheet {
                     .copied()
                     .filter(|id| method.inputs.contains(id))
             });
-        unclaimed
-            .chain(self_referencing)
-            .filter(|&id| self.cells[id].kind != CellKind::Out)
+        unclaimed.chain(self_referencing).filter(move |&id| {
+            self.cells[id].kind != CellKind::Out
+                && contributors
+                    .as_ref()
+                    .is_none_or(|cells| cells.contains(&id))
+        })
+    }
+
+    /// Returns the source leaves of `results`' selected value and control dependencies.
+    ///
+    /// Producer identities distinguish a filter's incoming source from its effective
+    /// output. Self-referencing inputs terminate at their captured effective value,
+    /// rather than introducing a cycle or following alternative seed methods.
+    ///
+    /// - Precondition: every result is a live cell belonging to this sheet.
+    /// - Complexity: expected O(N + V + E + V × G) time and O(N + V + E) space,
+    ///   for N results, V reachable value/producer pairs, E dependency edges, and
+    ///   G the total size of the registered conditional graph.
+    fn capture_contributors(&self, results: &[CellId]) -> HashSet<CellId> {
+        let Some(prepared) = &self.last_plan else {
+            return HashSet::new();
+        };
+        let provenance = &prepared.provenance;
+        let current_value = |cell| (cell, provenance.output_producers.get(&cell).copied());
+        let mut pending: Vec<_> = results.iter().copied().map(current_value).collect();
+        let mut visited = HashSet::new();
+        let mut contributors = HashSet::new();
+
+        while let Some((cell, producer)) = pending.pop() {
+            if !visited.insert((cell, producer)) {
+                continue;
+            }
+            pending.extend(
+                self.conditionals
+                    .values()
+                    .filter(|conditional| {
+                        conditional
+                            .branches
+                            .iter()
+                            .flat_map(|branch| branch.relationships.iter())
+                            .chain(conditional.default.iter())
+                            .any(|&relationship| {
+                                matches!(
+                                    producer,
+                                    Some(PlanStep::Method(selected, _)) if selected == relationship
+                                ) || (!prepared.active.contains(&relationship)
+                                    && self.relationships[relationship]
+                                        .methods
+                                        .iter()
+                                        .any(|method| method.outputs.contains(&cell)))
+                            })
+                    })
+                    .flat_map(|conditional| conditional.match_cells().iter().copied())
+                    .map(current_value),
+            );
+            let Some(step) = producer else {
+                contributors.insert(cell);
+                continue;
+            };
+            let step_provenance = &provenance.steps[&step];
+            let inputs = match step {
+                PlanStep::Method(relationship, index) => {
+                    &self.relationships[relationship].methods[index].inputs
+                }
+                PlanStep::FilterReclamp(filtered) => {
+                    pending.push((filtered, step_provenance.source_producer));
+                    &self.cells[filtered]
+                        .filter
+                        .as_ref()
+                        .expect("planned filter reclamps have an attached filter")
+                        .args
+                }
+            };
+            pending.extend(
+                inputs
+                    .iter()
+                    .copied()
+                    .zip(step_provenance.input_producers.iter().copied()),
+            );
+        }
+        contributors
     }
 
     /// Returns whether `id` belongs to the last successful plan's forced pure-output set.

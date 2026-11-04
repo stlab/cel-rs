@@ -166,17 +166,24 @@
 //!
 //! # Capture and playback
 //!
-//! After successful propagation, [`Sheet::source_cells`] identifies unclaimed cells
-//! and selected self-referencing inputs. Capture their effective [`Sheet::read`]
-//! values, not their [`Sheet::source`] aspirations. Pure derived outputs need not
-//! be recorded.
+//! After successful propagation, `sheet.source_cells(&[])` identifies all unclaimed
+//! cells and selected self-referencing inputs. Pass a nonempty slice of result cells
+//! to [`Sheet::source_cells`] to restrict capture to their contributing snapshot
+//! sources. This follows selected producer paths, conforming filters, and relevant
+//! conditional selectors, not the alternative method directions considered by
+//! [`Sheet::contributing_cells`] for widget relevance.
+//!
+//! Capture effective [`Sheet::read`] values, not [`Sheet::source`] aspirations.
+//! Pure derived outputs are never recorded. Duplicate results and overlapping
+//! dependency paths do not duplicate sources.
 //!
 //! Replay writes all captured values, in any order, before calling
 //! [`Sheet::propagate`]. For a settled solution satisfying its relationships and
 //! filters, a compatible sheet with matching uncaptured inputs reproduces the same
-//! effective values. Semantic consistency and idempotence make the recorded solution
-//! a fixed point even when the new write priorities select different methods. No
-//! strengths or write history need to be recorded.
+//! requested effective values, or all values for an empty result slice. Semantic
+//! consistency and idempotence make the recorded solution a fixed point even when
+//! the new write priorities select different methods. No strengths or write history
+//! need to be recorded.
 //!
 //! Clients choose their initial state after construction and own change comparison,
 //! relevance filtering, stable cell names or schema keys, and typed codecs. Do not
