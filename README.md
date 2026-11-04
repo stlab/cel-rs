@@ -3,6 +3,10 @@
 [![CI](https://github.com/stlab/cel-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/stlab/cel-rs/actions/workflows/ci.yml)
 [![Docs](https://github.com/stlab/cel-rs/actions/workflows/docs.yml/badge.svg)](https://github.com/stlab/cel-rs/actions/workflows/docs.yml)
 
+To try the property-model environment without installing anything, open
+[Begin in your browser](https://stlab.github.io/cel-rs/begin/).
+To build and run it yourself, see [Run Begin](#run-begin).
+
 ## Documentation
 
 | Component | Documentation |
@@ -12,10 +16,10 @@
 | CEL libraries | [cel-rs](https://stlab.github.io/cel-rs/cel_rs/) · [Runtime](https://stlab.github.io/cel-rs/cel_runtime/) · [Parser](https://stlab.github.io/cel-rs/cel_parser/) · [Macros](https://stlab.github.io/cel-rs/cel_rs_macros/) · [Standard library](https://stlab.github.io/cel-rs/cel_std/) |
 | Adam libraries | [Property-model runtime](https://stlab.github.io/cel-rs/adam_rs/) · [Language](https://stlab.github.io/cel-rs/adam_lang/) · [Web UI](https://stlab.github.io/cel-rs/adam_web_ui/) |
 | Adam tools | [Formatter](https://stlab.github.io/cel-rs/adam_fmt/) · [Language server](https://stlab.github.io/cel-rs/adam_lsp/) · [VS Code extension](editors/vscode-adam-lang/README.md) |
-| Applications | [Begin architecture](docs/VISION.md) · [EZ Adam design](docs/superpowers/specs/2026-08-24-ez-adam-design.md) |
+| Applications | [Begin web app](https://stlab.github.io/cel-rs/begin/) · [Begin architecture](docs/VISION.md) · [EZ Adam design](docs/superpowers/specs/2026-08-24-ez-adam-design.md) |
 
 The [Docs workflow](.github/workflows/docs.yml) builds and checks the guides,
-component APIs, and live slides on pull requests, then publishes the site on
+component APIs, live slides, and Begin on pull requests, then publishes the site on
 pushes to `main`. Newly added pages become available after their changes reach
 `main` and the Pages deployment finishes.
 
@@ -26,6 +30,116 @@ long-term direction behind each crate in this workspace.
 
 > **Status:** this project has not been released and has no clients yet. It is in
 > active development and the API may change at any time.
+
+## Run Begin
+
+Begin lets you explore Adam property models, inspect their cells, and change
+values to see constraints propagate. Choose a bundled model under **Examples**,
+or select **Open…** to load an `.adm2` file from your computer. The hosted app
+uses the same browser build as the local web server; it needs no backend.
+
+### Build and run on macOS
+
+Use Terminal for these steps. Install [Git](https://git-scm.com/downloads/mac)
+and stable [Rust through rustup](https://rustup.rs/) before building.
+Node.js is not required: the repository includes the JavaScript bundles.
+
+1. Install Apple's command-line developer tools if you don't already have them:
+
+   ```bash
+   xcode-select --install
+   ```
+
+   Finish the installer before continuing. These tools provide the native linker
+   and SDK; you don't need the full Xcode application.
+
+2. Clone the repository and enter the Begin directory:
+
+   ```bash
+   git clone https://github.com/stlab/cel-rs.git
+   cd cel-rs/begin
+   ```
+
+3. Install the Dioxus CLI version used by this project:
+
+   ```bash
+   cargo install dioxus-cli --version 0.7.10 --locked
+   ```
+
+4. Build and launch the desktop app:
+
+   ```bash
+   dx serve --platform desktop
+   ```
+
+   The first build downloads and compiles dependencies, then opens the Begin
+   window. Keep Terminal open while using the app. Press **Control+C** to stop it.
+
+### Build and run on Windows
+
+Use PowerShell on Windows, not WSL, for these steps. Before building, install
+[Git for Windows](https://git-scm.com/downloads/win),
+[Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+with **Desktop development with C++** (including the MSVC tools and Windows SDK),
+and stable [Rust through rustup](https://rustup.rs/) with its default MSVC
+toolchain. The desktop app also needs the
+[Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/),
+which is included with many Windows installations. Node.js is not required.
+
+1. Open a fresh PowerShell window after installing the prerequisites, then clone
+   the repository and enter the Begin directory:
+
+   ```powershell
+   git clone https://github.com/stlab/cel-rs.git
+   cd cel-rs/begin
+   ```
+
+2. Install the Dioxus CLI version used by this project:
+
+   ```powershell
+   cargo install dioxus-cli --version 0.7.10 --locked
+   ```
+
+3. Build and launch the desktop app:
+
+   ```powershell
+   dx serve --platform desktop --windows-subsystem console
+   ```
+
+   The first build downloads and compiles dependencies, then opens the Begin
+   window. The console subsystem keeps desktop diagnostics visible. Keep
+   PowerShell open while using the app. Press **Ctrl+C** to stop it.
+
+### Run locally in a browser
+
+After completing the setup for your operating system, run these commands from
+`cel-rs/begin` in Terminal or PowerShell:
+
+```sh
+rustup target add wasm32-unknown-unknown
+dx serve --platform web --no-default-features --features web --port 8080
+```
+
+Open [localhost:8080](http://localhost:8080/) after the build finishes. The explicit
+feature flags select the browser renderer instead of the default desktop
+renderer. Press **Ctrl+C** in the terminal to stop the server.
+
+### Verify the app and find errors
+
+On launch, Begin selects **diamond** and shows its graph and **Cells** panel.
+Change a cell value to see the model update, or select **image_resize** to
+explore an image-sizing model.
+
+Desktop builds reload opened files and bundled examples when you edit them on
+disk. Browser builds embed the bundled examples at build time and don't watch
+your filesystem. In browsers that support file handles, select **Refresh** to
+reread an opened file after saving it in your editor. If **Refresh** isn't
+available, select **Open…** again.
+
+For browser builds, including the hosted app, open your browser's developer
+tools and select **Console** to see parse, propagation, and file-reading errors.
+Desktop builds report these errors in the launching terminal. The **cycle**
+example deliberately reports a constraint-cycle error.
 
 ## Workspace layout
 

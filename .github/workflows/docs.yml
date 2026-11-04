@@ -10,6 +10,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MDBOOK_VERSION: 0.5.4
+  DIOXUS_CLI_VERSION: 0.7.10
 
 # Only one Pages deployment may run at a time; let a newer push supersede an
 # in-flight one rather than queuing behind it.
@@ -85,6 +86,17 @@ jobs:
     - name: Build the CEL language book
       run: mdbook build cel-lang-book
 
+    - name: Install the Dioxus CLI
+      run: cargo install dioxus-cli --version "$DIOXUS_CLI_VERSION" --locked
+
+    - name: Build Begin for GitHub Pages
+      working-directory: begin
+      run: |
+        rustup target add wasm32-unknown-unknown
+        dx build --platform web --no-default-features --features web \
+          --release --debug-symbols false --locked \
+          --base-path "/${{ github.event.repository.name }}/begin/"
+
     # `cp -r src dst` only produces a flat `dst` when `dst` doesn't already exist; if
     # `target/doc/book` survived from a cached `target/` (Swatinem/rust-cache persists it
     # across runs), `cp -r` instead nests the source *into* it as `target/doc/book/book-dist`,
@@ -105,6 +117,11 @@ jobs:
       run: |
         mkdir -p target/doc/adam-slides
         cp -r adam-slides/dist/. target/doc/adam-slides/
+
+    - name: Copy Begin into the docs site
+      run: |
+        rm -rf target/doc/begin
+        cp -r target/dx/begin/release/web/public target/doc/begin
 
     - uses: actions/upload-pages-artifact@v5
       if: github.event_name == 'push'
