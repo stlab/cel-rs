@@ -2219,6 +2219,69 @@ impl Sheet {
         !plan.certificate.contains_cell(id) || plan.certificate.is_released(id)
     }
 
+    /// Iterates the input cells of the last successful propagation for value capture.
+    ///
+    /// Includes unclaimed cells and outputs read by their own selected method.
+    /// Each cell appears once, in unspecified order. Pure derived outputs and
+    /// `Out` cells are excluded. Returns an empty iterator before any successful
+    /// propagation. Like [`Self::is_source`], classification describes the last
+    /// successful plan; newly added non-`Out` cells count as unclaimed.
+    ///
+    /// To capture a settled result, iterate after successful propagation and before
+    /// further edits, reading effective values with [`Self::read`], not the
+    /// aspirations returned by [`Self::source`]. Clients own baseline comparison,
+    /// relevance filtering, stable cell identity, and typed serialization.
+    ///
+    /// Replay writes all captured values in any order as one batch before
+    /// propagation. For a settled solution satisfying its relationships and filters,
+    /// a compatible graph with matching uncaptured inputs reproduces the same
+    /// effective values. Relationship methods must preserve an already-satisfied
+    /// assignment, and self-referencing methods and filters must be idempotent;
+    /// these caller contracts make the solution a fixed point even if replay
+    /// selects different methods. No strengths or write history need to be captured.
+    /// A snapshot does not preserve original aspirations, priority history,
+    /// diagnostics, or behavior under subsequent edits, including spring-back.
+    ///
+    /// - Complexity: O(C + S + Σ(I × O)) traversal time and O(1) auxiliary space,
+    ///   for C cells, S selected steps, and each selected method's I inputs and
+    ///   O outputs. Does not allocate or copy values.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use adam_rs::Sheet;
+    /// let mut sheet = Sheet::new();
+    /// let width = sheet.add_source(10_i32);
+    /// sheet.propagate()?;
+    /// let capture = sheet.source_cells()
+    ///     .map(|id| Ok((id, *sheet.read::<i32>(id)?)))
+    ///     .collect::<Result<Vec<_>, adam_rs::Error>>()?;
+    /// assert_eq!(capture, [(width, 10)]);
+    /// // Use host-defined names or schema keys, not live CellIds, for persistence.
+    /// # Ok::<(), adam_rs::Error>(())
+    /// ```
+    pub fn source_cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        let unclaimed = self.cells.keys().filter(|&id| self.is_source(id));
+        let self_referencing = self
+            .last_plan
+            .iter()
+            .flat_map(|prepared| &prepared.plan.execution_order)
+            .filter_map(|step| match *step {
+                PlanStep::Method(id, index) => Some(&self.relationships[id].methods[index]),
+                PlanStep::FilterReclamp(_) => None,
+            })
+            .flat_map(|method| {
+                method
+                    .outputs
+                    .iter()
+                    .copied()
+                    .filter(|id| method.inputs.contains(id))
+            });
+        unclaimed
+            .chain(self_referencing)
+            .filter(|&id| self.cells[id].kind != CellKind::Out)
+    }
+
     /// Returns whether `id` belongs to the last successful plan's forced pure-output set.
     ///
     /// The planner intersects pure outputs across viable methods and eliminates
