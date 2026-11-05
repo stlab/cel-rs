@@ -1,12 +1,469 @@
 //! Exercises graph ownership, filter provenance and publication contracts.
 
-use adam_rs::{Error, Filter, MatchExpr, Method, Sheet};
+use adam_rs::{CellId, Error, Filter, MatchExpr, Method, Sheet};
 use std::any::TypeId;
 use std::collections::HashSet;
 
 /// Carries an owned scalar without imposing value-copy semantics.
 #[derive(Debug, PartialEq)]
 struct NonClone(i32);
+
+/// Reports no capture sources until a propagation has succeeded.
+#[test]
+fn source_cells_are_empty_before_successful_propagation() {
+    let mut sheet = Sheet::new();
+    assert_eq!(sheet.source_cells(&[]).count(), 0);
+    let cell = sheet.add_cell(1_i32);
+    assert_eq!(sheet.source_cells(&[]).count(), 0);
+    assert_eq!(sheet.source_cells(&[cell]).count(), 0);
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.source_cells(&[]).count(), 1);
+    assert_eq!(sheet.source_cells(&[cell]).collect::<Vec<_>>(), [cell]);
+}
+
+/// Includes unclaimed and self-referencing inputs once, excluding pure outputs.
+#[test]
+fn source_cells_include_shadowed_inputs_without_requiring_clone() {
+    let mut sheet = Sheet::new();
+    let host = sheet.add_source(NonClone(7));
+    let input = sheet.add_cell(10_i32);
+    let shadowed = sheet.add_cell(20_i32);
+    let output = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_2_1(
+            [input, shadowed],
+            shadowed,
+            |a: &i32, b: &i32| Ok((*a).max(*b)),
+        )])
+        .unwrap();
+    sheet
+        .add_out(
+            Method::from_fn_1_1(shadowed, output, |v: &i32| Ok(*v)),
+            vec![],
+        )
+        .unwrap();
+    sheet.write(input, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    let sources: Vec<_> = sheet.source_cells(&[]).collect();
+    assert_eq!(sources.len(), 3);
+    assert_eq!(
+        sources.into_iter().collect::<HashSet<_>>(),
+        HashSet::from([host, input, shadowed])
+    );
+    assert!(!sheet.is_source(shadowed));
+    assert_eq!(sheet.read::<NonClone>(host).unwrap().0, 7);
+    assert_eq!(*sheet.source::<i32>(shadowed).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(shadowed).unwrap(), 100);
+}
+
+/// Adds an inequality chain with distinct initial aspirations.
+fn add_snapshot_chain(sheet: &mut Sheet) -> [CellId; 3] {
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    // Constrain each neighboring pair without discarding either aspiration.
+    for [left, right] in [[a, b], [b, c]] {
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([left, right], left, |x: &i32, y: &i32| Ok((*x).min(*y))),
+                Method::from_fn_2_1([left, right], right, |x: &i32, y: &i32| Ok((*x).max(*y))),
+            ])
+            .unwrap();
+    }
+    [a, b, c]
+}
+
+/// Replays effective shadow values in every order using host identities, not live IDs.
+#[test]
+fn source_cells_snapshot_replays_inequality_chain_in_any_write_order() {
+    let mut original = Sheet::new();
+    let cells = add_snapshot_chain(&mut original);
+    original.propagate().unwrap();
+    original.write(cells[0], 100_i32).unwrap();
+    original.propagate().unwrap();
+    let captured: Vec<_> = original
+        .source_cells(&[])
+        .map(|id| {
+            (
+                cells.iter().position(|&cell| cell == id).unwrap(),
+                *original.read::<i32>(id).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(captured.len(), 3);
+    assert!(captured.iter().all(|&(_, value)| value == 100));
+
+    // Replay the complete batch before propagating, independent of dictionary order.
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let mut replay = Sheet::new();
+        replay.add_source(());
+        let targets = add_snapshot_chain(&mut replay);
+        replay.propagate().unwrap();
+        for index in order {
+            let (identity, value) = captured[index];
+            replay.write(targets[identity], value).unwrap();
+        }
+        replay.propagate().unwrap();
+        assert_eq!(
+            targets.map(|id| *replay.read::<i32>(id).unwrap()),
+            [100, 100, 100]
+        );
+
+        replay.write(targets[0], 0_i32).unwrap();
+        replay.propagate().unwrap();
+        assert_eq!(
+            targets.map(|id| *replay.read::<i32>(id).unwrap()),
+            [0, 100, 100]
+        );
+    }
+    original.write(cells[0], 0_i32).unwrap();
+    original.propagate().unwrap();
+    assert_eq!(
+        cells.map(|id| *original.read::<i32>(id).unwrap()),
+        [0, 20, 30]
+    );
+}
+
+/// Captures only the winning input after a priority-only write changes direction.
+#[test]
+fn source_cells_snapshot_tracks_multiway_direction_after_same_value_writes() {
+    // Choose each direction by rewriting its input without changing its value.
+    for winner in 0..2 {
+        let mut original = Sheet::new();
+        let cells = [original.add_cell(1_i32), original.add_cell(2_i32)];
+        original
+            .add_relationship(vec![
+                Method::from_fn_1_1(cells[0], cells[1], |v: &i32| Ok(*v)),
+                Method::from_fn_1_1(cells[1], cells[0], |v: &i32| Ok(*v)),
+            ])
+            .unwrap();
+        original.write(cells[0], 9_i32).unwrap();
+        original.write(cells[1], 9_i32).unwrap();
+        original.write(cells[winner], 9_i32).unwrap();
+        original.propagate().unwrap();
+        let captured: Vec<_> = original.source_cells(&[]).collect();
+        assert_eq!(captured, [cells[winner]]);
+        let value = *original.read::<i32>(captured[0]).unwrap();
+
+        let mut replay = Sheet::new();
+        replay.add_source(());
+        let targets = [replay.add_cell(0_i32), replay.add_cell(17_i32)];
+        replay
+            .add_relationship(vec![
+                Method::from_fn_1_1(targets[0], targets[1], |v: &i32| Ok(*v)),
+                Method::from_fn_1_1(targets[1], targets[0], |v: &i32| Ok(*v)),
+            ])
+            .unwrap();
+        replay.propagate().unwrap();
+        replay.write(targets[winner], value).unwrap();
+        replay.propagate().unwrap();
+        assert_eq!(targets.map(|id| *replay.read::<i32>(id).unwrap()), [9, 9]);
+        assert!(replay.is_source(targets[winner]));
+    }
+}
+
+/// Adds a dynamically filtered input and a conditional pure output.
+fn add_filtered_snapshot(sheet: &mut Sheet) -> [CellId; 4] {
+    let enabled = sheet.add_source(false);
+    let limit = sheet.add_source(50_i32);
+    let input = sheet.add_cell(40_i32);
+    let output = sheet.add_cell(7_i32);
+    sheet
+        .add_filter(
+            input,
+            Filter::range(
+                TypeId::of::<i32>(),
+                vec![limit],
+                vec![TypeId::of::<i32>()],
+                |value, args| {
+                    Ok(Box::new(
+                        (*value.downcast_ref::<i32>().unwrap())
+                            .clamp(0, *args[0].downcast_ref::<i32>().unwrap()),
+                    ))
+                },
+                |args| Some((Box::new(0_i32), Box::new(*args[0].downcast_ref::<i32>()?))),
+            ),
+        )
+        .unwrap();
+    let relationship = sheet
+        .add_relationship(vec![Method::from_fn_1_1(input, output, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(enabled),
+            vec![(vec![true], vec![relationship])],
+            vec![],
+        )
+        .unwrap();
+    [enabled, limit, input, output]
+}
+
+/// Replays filtered values and a conditional selector without capturing the forced output.
+#[test]
+fn source_cells_snapshot_replays_filters_and_conditionals_in_any_write_order() {
+    let mut original = Sheet::new();
+    let [enabled, limit, input, output] = add_filtered_snapshot(&mut original);
+    original.propagate().unwrap();
+    original.write(enabled, true).unwrap();
+    original.write(limit, 20_i32).unwrap();
+    original.propagate().unwrap();
+    let sources: Vec<_> = original.source_cells(&[]).collect();
+    assert_eq!(sources.len(), 3);
+    assert_eq!(
+        sources.into_iter().collect::<HashSet<_>>(),
+        HashSet::from([enabled, limit, input])
+    );
+    assert_eq!(*original.source::<i32>(input).unwrap(), 40);
+    assert_eq!(*original.read::<i32>(input).unwrap(), 20);
+    assert_eq!(*original.read::<i32>(output).unwrap(), 20);
+    let captured_enabled = *original.read::<bool>(enabled).unwrap();
+    let captured_limit = *original.read::<i32>(limit).unwrap();
+    let captured_input = *original.read::<i32>(input).unwrap();
+
+    // Host schema positions identify typed fields across independently built sheets.
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let mut replay = Sheet::new();
+        replay.add_source(());
+        let targets = add_filtered_snapshot(&mut replay);
+        replay.propagate().unwrap();
+        for field in order {
+            match field {
+                0 => replay.write(targets[0], captured_enabled).unwrap(),
+                1 => replay.write(targets[1], captured_limit).unwrap(),
+                2 => replay.write(targets[2], captured_input).unwrap(),
+                _ => unreachable!(),
+            }
+        }
+        replay.propagate().unwrap();
+        assert!(*replay.read::<bool>(targets[0]).unwrap());
+        assert_eq!(*replay.read::<i32>(targets[1]).unwrap(), 20);
+        assert_eq!(*replay.read::<i32>(targets[2]).unwrap(), 20);
+        assert_eq!(*replay.read::<i32>(targets[3]).unwrap(), 20);
+    }
+}
+
+/// Omits downstream shadow inputs and unrelated sources from an upstream result.
+#[test]
+fn source_cells_scope_follows_only_the_selected_direction() {
+    let mut sheet = Sheet::new();
+    let [a, b, c] = add_snapshot_chain(&mut sheet);
+    sheet.add_source(777_i32);
+    sheet.write(a, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        [a, b, c].map(|id| *sheet.read::<i32>(id).unwrap()),
+        [100, 100, 100]
+    );
+    assert_eq!(
+        sheet.source_cells(&[a]).collect::<HashSet<_>>(),
+        HashSet::from([a])
+    );
+    assert_eq!(
+        sheet.source_cells(&[b]).collect::<HashSet<_>>(),
+        HashSet::from([a, b])
+    );
+    assert_eq!(
+        sheet.source_cells(&[c]).collect::<HashSet<_>>(),
+        HashSet::from([a, b, c])
+    );
+}
+
+/// Unions result cones without duplicates or selectors governing only downstream users.
+#[test]
+fn source_cells_scope_unions_results_and_ignores_downstream_conditionals() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_source(11_i32);
+    let b = sheet.add_source(29_i32);
+    let enabled = sheet.add_source(true);
+    sheet.add_source(777_i32);
+    let first = sheet.add_cell(0_i32);
+    let second = sheet.add_cell(0_i32);
+    let third = sheet.add_cell(0_i32);
+    let downstream = sheet.add_cell(0_i32);
+    for (input, output) in [(a, first), (first, second), (b, third)] {
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(input, output, |v: &i32| Ok(*v))])
+            .unwrap();
+    }
+    let relationship = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(second, downstream, |v: &i32| Ok(*v)),
+            Method::from_fn_1_1(downstream, second, |v: &i32| Ok(*v)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(enabled),
+            vec![(vec![true], vec![relationship])],
+            vec![],
+        )
+        .unwrap();
+    sheet.propagate().unwrap();
+
+    let sources: Vec<_> = sheet.source_cells(&[first, second, third, first]).collect();
+    assert_eq!(sources.len(), 2);
+    assert_eq!(
+        sources.into_iter().collect::<HashSet<_>>(),
+        HashSet::from([a, b])
+    );
+}
+
+/// Includes filter arguments and branch selectors, including an absent producer's selector.
+#[test]
+fn source_cells_scope_tracks_filters_and_conditional_absence() {
+    let mut sheet = Sheet::new();
+    let [enabled, limit, input, output] = add_filtered_snapshot(&mut sheet);
+    sheet.add_source(777_i32);
+    sheet.write(enabled, true).unwrap();
+    sheet.write(limit, 20_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        sheet.source_cells(&[output]).collect::<HashSet<_>>(),
+        HashSet::from([enabled, limit, input])
+    );
+
+    sheet.write(enabled, false).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        sheet.source_cells(&[output]).collect::<HashSet<_>>(),
+        HashSet::from([enabled, output])
+    );
+}
+
+/// Excludes filter arguments that only diagnose a forced derived result.
+#[test]
+fn source_cells_scope_ignores_diagnostic_filter_inputs() {
+    let mut sheet = Sheet::new();
+    let input = sheet.add_source(7_i32);
+    let limit = sheet.add_source(10_i32);
+    let output = sheet.add_cell(0_i32);
+    sheet
+        .add_filter(
+            output,
+            Filter::from_fn_1(limit, |value: &i32, limit: &i32| Ok((*value).min(*limit))),
+        )
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(input, output, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 7);
+    assert_eq!(
+        sheet.source_cells(&[output]).collect::<HashSet<_>>(),
+        HashSet::from([input])
+    );
+}
+
+/// Resolves derived filter bounds and expression guards back to their actual sources.
+#[test]
+fn source_cells_scope_traces_derived_filter_and_guard_inputs() {
+    let mut sheet = Sheet::new();
+    let enabled = sheet.add_source(true);
+    let bound = sheet.add_source(20_i32);
+    sheet.add_source(777_i32);
+    let guard = sheet.add_cell(false);
+    let limit = sheet.add_cell(50_i32);
+    let input = sheet.add_cell(40_i32);
+    let output = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(enabled, guard, |v: &bool| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(bound, limit, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_filter(
+            input,
+            Filter::from_fn_1(limit, |value: &i32, limit: &i32| Ok((*value).min(*limit))),
+        )
+        .unwrap();
+    let relationship = sheet
+        .add_relationship(vec![Method::from_fn_1_1(input, output, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::from_fn_1(guard, |v: &bool| Ok(*v)),
+            vec![(vec![true], vec![relationship])],
+            vec![],
+        )
+        .unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 20);
+    assert_eq!(
+        sheet.source_cells(&[output]).collect::<HashSet<_>>(),
+        HashSet::from([enabled, bound, input])
+    );
+}
+
+/// Returns no sources for a constant result, while an empty query still selects all cells.
+#[test]
+fn source_cells_scope_distinguishes_constant_results_from_empty_queries() {
+    let mut sheet = Sheet::new();
+    let unrelated = sheet.add_source(17_i32);
+    let output = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::new(
+            vec![],
+            vec![output],
+            vec![],
+            vec![TypeId::of::<i32>()],
+            |_| Ok(vec![Box::new(42_i32)]),
+        )])
+        .unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 42);
+    assert_eq!(sheet.source_cells(&[output]).count(), 0);
+    assert_eq!(sheet.source_cells(&[]).collect::<Vec<_>>(), [unrelated]);
+}
+
+/// Replays a result-scoped shadow snapshot in either batch-write order.
+#[test]
+fn source_cells_scope_replays_requested_result_in_any_write_order() {
+    let mut original = Sheet::new();
+    let cells = add_snapshot_chain(&mut original);
+    original.write(cells[0], 100_i32).unwrap();
+    original.propagate().unwrap();
+    let captured: Vec<_> = original
+        .source_cells(&[cells[1]])
+        .map(|id| {
+            (
+                cells.iter().position(|&cell| cell == id).unwrap(),
+                *original.read::<i32>(id).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(captured.len(), 2);
+
+    for order in [[0, 1], [1, 0]] {
+        let mut replay = Sheet::new();
+        replay.add_source(());
+        let targets = add_snapshot_chain(&mut replay);
+        replay.propagate().unwrap();
+        for index in order {
+            let (identity, value) = captured[index];
+            replay.write(targets[identity], value).unwrap();
+        }
+        replay.propagate().unwrap();
+        assert_eq!(*replay.read::<i32>(targets[1]).unwrap(), 100);
+    }
+}
 
 /// Returns freshly evaluated range bounds without copying their concrete carrier.
 #[test]

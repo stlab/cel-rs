@@ -2,6 +2,7 @@
 
 ## Knowledge
 
+- [[knowledge/adam-effective-value-capture-is-a-source-snapshot-not-an-editable-state-checkpoint.md|Adam effective-value capture is a source snapshot, not an editable-state checkpoint]] (decision, 1.00) `adam-rs` `capture` `playback` `source-cells` `invariants`
 - [[knowledge/adam-forced-classification-is-not-free-source-feasibility.md|Adam Forced Classification Is Not Free-Source Feasibility]] (pattern, 0.97) `adam-rs` `planner` `contributors` `source-feasibility` `component-isolation`
 - [[knowledge/adam-lang-dual-parsing-pipeline.md|Adam-lang Dual Parsing Pipeline]] (concept, 0.80) `adam-lang` `adam-parser` `ast-parser` `type-registry` `adm2`
 - [[knowledge/adam-lsp-server-loop-and-diagnostic-publishing-flow.md|Adam-lsp Server Loop and Diagnostic Publishing Flow]] (observation, 0.75) `adam-lsp` `lsp` `diagnostics` `formatting` `server-loop`

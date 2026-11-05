@@ -154,6 +154,9 @@
 //!
 //! - All method, filter, conditional-expression, and requirement callbacks satisfy
 //!   the callback-purity contract above, with no invocation guarantee.
+//! - Every method of a relationship conforms the same constraint and preserves an
+//!   assignment that already satisfies it. This semantic consistency is stronger
+//!   than the runtime's check that methods reference the same cell set.
 //! - A self-referencing method must be idempotent: applying it twice to the same inputs
 //!   must produce the same result as applying it once.
 //! - A filter must be idempotent and conform its cell's value using its argument
@@ -161,15 +164,36 @@
 //! - Iteration order used to break ties among equal-strength cells is not stable API
 //!   and must not be relied on by callers.
 //!
-//! The source-capture property:
+//! # Capture and playback
 //!
-//! Capturing every cell's `source` value and reapplying the highest-strength sources
-//! reconstructs the sheet's *current* state, but not what a subsequent edit will do,
-//! since no method-selection state is captured, only values. This holds even for a
-//! self-referencing cell: `planner::evaluate_seeds` reconstructs its contribution to a
-//! sibling relationship's method purely from current `source` values (recursively, for
-//! any other self-referencing cell that sibling method itself reads), so no state
-//! beyond `source` needs to be captured to reproduce the derived state.
+//! After successful propagation, `sheet.source_cells(&[])` identifies all unclaimed
+//! cells and selected self-referencing inputs. Pass a nonempty slice of result cells
+//! to [`Sheet::source_cells`] to restrict capture to their contributing snapshot
+//! sources. This follows selected producer paths, conforming filters, and relevant
+//! conditional selectors, not the alternative method directions considered by
+//! [`Sheet::contributing_cells`] for widget relevance.
+//!
+//! Capture effective [`Sheet::read`] values, not [`Sheet::source`] aspirations.
+//! Pure derived outputs are never recorded. Duplicate results and overlapping
+//! dependency paths do not duplicate sources.
+//!
+//! Replay writes all captured values, in any order, before calling
+//! [`Sheet::propagate`]. For a settled solution satisfying its relationships and
+//! filters, a compatible sheet with matching uncaptured inputs reproduces the same
+//! requested effective values, or all values for an empty result slice. Semantic
+//! consistency and idempotence make the recorded solution a fixed point even when
+//! the new write priorities select different methods. No strengths or write history
+//! need to be recorded.
+//!
+//! Clients choose their initial state after construction and own change comparison,
+//! relevance filtering, stable cell names or schema keys, and typed codecs. Do not
+//! persist live [`CellId`] values. Filtering out an input makes its replay value
+//! part of the context that must match; it is not reconstructed by capture.
+//!
+//! A value snapshot is not an editable-state checkpoint. It does not preserve
+//! original aspirations, priority history, diagnostics, or behavior under subsequent
+//! edits, including spring-back. Capture only after successful propagation and
+//! before further edits; this API neither consumes a journal nor changes the sheet.
 
 pub mod cell;
 pub mod conditional;

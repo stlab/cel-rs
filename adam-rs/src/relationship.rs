@@ -55,6 +55,10 @@ type MethodFn = Box<dyn Fn(&[&dyn Any]) -> Result<Vec<Box<dyn Any>>, anyhow::Err
 /// Holding its other inputs fixed, substituting its outputs for overlapping inputs
 /// and applying it again produces equivalent outputs.
 ///
+/// Every method in a relationship must conform the same constraint and preserve
+/// an assignment that already satisfies it. The runtime checks shared cell sets,
+/// not this semantic consistency.
+///
 /// # Examples
 /// See the [relationship example](crate::relationship).
 pub struct Method {

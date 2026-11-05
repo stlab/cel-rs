@@ -33,7 +33,7 @@ pub(super) struct PreparedPlan {
     pub(super) plan: Plan,
     pub(super) active: HashSet<RelationshipId>,
     pub(super) certificate: SourceCertificate,
-    provenance: PlanProvenance,
+    pub(super) provenance: PlanProvenance,
     prerequisite_steps: Vec<PlanStep>,
     seeds: SeedRecipes,
     signatures: Rc<SeedSignatures>,
