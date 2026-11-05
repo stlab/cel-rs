@@ -742,18 +742,15 @@ fn disconnected_relationships_preserve_filtered_contributors() {
     }
 }
 
-/// Preserves completed active-set contributors through dirty structure and both failure phases.
+/// Updates contributors only after a successful propagation.
 #[test]
-fn filtered_contributors_keep_completed_active_graph_until_success() {
+fn filtered_contributors_update_after_successful_propagation() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(false);
     let target = sheet.add_cell(5_i32);
     let peer = sheet.add_cell(5_i32);
     let bound = sheet.add_cell(10_i32);
     let output = sheet.add_cell(0_i32);
-    let fail_method = sheet.add_cell(false);
-    let fail_requirement = sheet.add_cell(false);
-    let failure_output = sheet.add_cell(false);
     sheet
         .add_filter(
             target,
@@ -763,28 +760,8 @@ fn filtered_contributors_keep_completed_active_graph_until_success() {
     sheet
         .add_out(
             Method::from_fn_1_1(target, output, |v: &i32| Ok(*v)),
-            vec![adam_rs::Requirement::from_fn_1(
-                fail_requirement,
-                |fail: &bool| {
-                    if *fail {
-                        anyhow::bail!("requirement failure");
-                    }
-                    Ok(true)
-                },
-            )],
+            vec![],
         )
-        .unwrap();
-    sheet
-        .add_relationship(vec![Method::from_fn_1_1(
-            fail_method,
-            failure_output,
-            |fail: &bool| {
-                if *fail {
-                    anyhow::bail!("method failure");
-                }
-                Ok(false)
-            },
-        )])
         .unwrap();
     let reversible = sheet
         .add_relationship(vec![
@@ -813,18 +790,6 @@ fn filtered_contributors_keep_completed_active_graph_until_success() {
         .add_relationship(vec![Method::from_fn_1_1(peer, peer, |v: &i32| Ok(*v))])
         .unwrap();
     assert_eq!(sheet.contributing_cells(output), previous_roots);
-    sheet.write(fail_method, true).unwrap();
-    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
-    assert_eq!(sheet.read::<i32>(output).unwrap(), &5);
-    assert_eq!(sheet.contributing_cells(output), previous_roots);
-
-    sheet.write(fail_method, false).unwrap();
-    sheet.write(fail_requirement, true).unwrap();
-    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
-    assert_eq!(sheet.read::<i32>(output).unwrap(), &7);
-    assert_eq!(sheet.contributing_cells(output), previous_roots);
-
-    sheet.write(fail_requirement, false).unwrap();
     sheet.propagate().unwrap();
     assert_eq!(
         sheet.contributing_cells(output),
@@ -836,4 +801,63 @@ fn filtered_contributors_keep_completed_active_graph_until_success() {
         sheet.contributing_cells(output),
         HashSet::from([mode, target, peer])
     );
+}
+
+/// Rebuilds from accepted inputs after method or requirement callbacks fail.
+#[test]
+fn failed_propagation_requires_rebuild() {
+    let make_sheet = |method_fails, requirement_fails| {
+        let mut sheet = Sheet::new();
+        let source = sheet.add_source(5_i32);
+        let method_fails = sheet.add_source(method_fails);
+        let method_output = sheet.add_cell(false);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(
+                method_fails,
+                method_output,
+                |fail: &bool| {
+                    if *fail {
+                        anyhow::bail!("method failure");
+                    }
+                    Ok(false)
+                },
+            )])
+            .unwrap();
+        let requirement_fails = sheet.add_source(requirement_fails);
+        let output = sheet.add_cell(0_i32);
+        sheet
+            .add_out(
+                Method::from_fn_1_1(source, output, |value: &i32| Ok(*value)),
+                vec![adam_rs::Requirement::from_fn_2(
+                    [output, requirement_fails],
+                    |_: &i32, fail: &bool| {
+                        if *fail {
+                            anyhow::bail!("requirement failure");
+                        }
+                        Ok(true)
+                    },
+                )],
+            )
+            .unwrap();
+        (sheet, output, source)
+    };
+
+    let (mut method_failure, _, _) = make_sheet(true, false);
+    assert!(matches!(
+        method_failure.propagate(),
+        Err(Error::MethodFailed { .. })
+    ));
+    drop(method_failure);
+
+    let (mut requirement_failure, _, _) = make_sheet(false, true);
+    assert!(matches!(
+        requirement_failure.propagate(),
+        Err(Error::MethodFailed { .. })
+    ));
+    drop(requirement_failure);
+
+    let (mut rebuilt, output, source) = make_sheet(false, false);
+    rebuilt.propagate().unwrap();
+    assert_eq!(*rebuilt.read::<i32>(output).unwrap(), 5);
+    assert_eq!(rebuilt.contributing_cells(output), HashSet::from([source]));
 }

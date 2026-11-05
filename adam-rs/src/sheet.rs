@@ -105,6 +105,9 @@ use cached::{CachedPlan, PreparedPlan};
 /// then call [`Sheet::propagate`] to update derived cells. Propagation automatically
 /// reuses eligible prepared plans or plans again when necessary.
 ///
+/// After a mutating operation returns an error, the sheet's state is unspecified.
+/// Do not inspect or reuse it; discard it and rebuild from host-owned inputs.
+///
 /// # Example
 ///
 /// ```rust
@@ -1426,15 +1429,13 @@ impl Sheet {
         Ok(cell.source.downcast_ref::<T>().expect("type checked above"))
     }
 
-    /// Iterates over the cells that were updated during the last `propagate()` call.
+    /// Iterates over cells updated during the most recent successful `propagate()` call.
     ///
     /// This includes cells written by selected methods and cells that reverted to their
     /// source values because the relationship that had been shadowing them (self-referencing
     /// or conditionally forced) is no longer producing them this round (Phase 5), even though
     /// no method wrote to them this round. It does not attempt to compare old/new values for
-    /// equality. A `propagate()` call that returns `Error::SeedCycle` leaves this iterator
-    /// empty: propagation clears stale changed-state before staged seed validation and
-    /// aborts before committing any writes.
+    /// equality.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
     ///
@@ -2063,8 +2064,7 @@ impl Sheet {
     /// each with its own released sources and active relationships. Successful writes
     /// to released sources preserve that phase's eligibility; writes to claimed cells
     /// (including self-referencing claimants) discard it. Filter reclamps do not claim
-    /// released sources. Actual structural mutations discard both entries, including
-    /// partial mutations before an error; rejected writes leave eligibility unchanged.
+    /// released sources. Actual structural mutations discard both entries.
     /// Prepared plans retain structural seed recipes, not values from earlier calls.
     ///
     /// **Phase 0 — Staging:** propagation starts from each cell's source value, excluding
@@ -2108,16 +2108,8 @@ impl Sheet {
     /// scratch, so [`Sheet::cell_requirements_valid`] and [`Sheet::violated_requirements`]
     /// reflect this round.
     ///
-    /// If staged seed validation detects a non-self sibling dependency cycle, or compatibility
-    /// checking returns a prerequisite conflict, `propagate()` returns its error after validation
-    /// and changed-state clearing but before commit. Live cell values therefore remain untouched
-    /// and [`Sheet::changed`] stays empty for that failing call.
-    ///
-    /// Requirement callback errors occur after commit: published values and changed-state
-    /// remain visible. Any propagation error discards both phases' reuse eligibility,
-    /// but retains the last successful display snapshot. Static validation errors occur
-    /// before changed-state clearing. Filter failures remain diagnostics rather than
-    /// propagation errors, and diagnostic results use current values.
+    /// Filter failures remain diagnostics rather than propagation errors, and diagnostic
+    /// results use current values.
     ///
     /// - Complexity: on a cache miss, prerequisite-cone indexing, traversal, and producer
     ///   preparation take O(V + E) per selected plan, distinct from assignment matching.
@@ -2578,51 +2570,44 @@ mod tests {
         assert_eq!(sheet.cell_type_id(cell), Some(TypeId::of::<String>()));
     }
 
-    /// Discards all staged outputs when the last output fails type validation.
+    /// Rebuilds a fresh sheet after a staged type error.
     #[test]
-    fn late_output_type_failure_preserves_published_state_and_recovers() {
-        let mut sheet = Sheet::new();
-        let source = sheet.add_cell(5_i32);
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        let relationship = sheet
-            .add_relationship(vec![Method::new(
-                vec![source],
-                vec![a, b],
-                vec![TypeId::of::<i32>()],
-                vec![TypeId::of::<i32>(); 2],
-                |args| {
-                    let value = *args[0].downcast_ref::<i32>().unwrap();
-                    let last: Box<dyn Any> = if value < 0 {
-                        Box::new(false)
-                    } else {
-                        Box::new(value)
-                    };
-                    Ok(vec![Box::new(value), last])
-                },
-            )])
-            .unwrap();
+    fn late_output_type_failure_requires_rebuilding_the_sheet() {
+        let make_sheet = |source_value| {
+            let mut sheet = Sheet::new();
+            let source = sheet.add_cell(source_value);
+            let a = sheet.add_cell(0_i32);
+            let b = sheet.add_cell(0_i32);
+            sheet
+                .add_relationship(vec![Method::new(
+                    vec![source],
+                    vec![a, b],
+                    vec![TypeId::of::<i32>()],
+                    vec![TypeId::of::<i32>(); 2],
+                    |args| {
+                        let value = *args[0].downcast_ref::<i32>().unwrap();
+                        let last: Box<dyn Any> = if value < 0 {
+                            Box::new(false)
+                        } else {
+                            Box::new(value)
+                        };
+                        Ok(vec![Box::new(value), last])
+                    },
+                )])
+                .unwrap();
+            (sheet, source, a, b)
+        };
+
+        let (mut sheet, source, _, _) = make_sheet(5_i32);
         sheet.propagate().unwrap();
-        let strengths = [sheet.cells[a].strength, sheet.cells[b].strength];
-        let selected = sheet.selected_method(relationship);
         sheet.write(source, -9_i32).unwrap();
         assert!(matches!(sheet.propagate(), Err(Error::TypeMismatch { .. })));
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
-        assert_eq!(*sheet.read::<i32>(b).unwrap(), 5);
-        assert_eq!(
-            [sheet.cells[a].strength, sheet.cells[b].strength],
-            strengths
-        );
-        assert_eq!(sheet.selected_method(relationship), selected);
-        assert_eq!(sheet.changed().count(), 0);
-        sheet.write(source, 12_i32).unwrap();
-        sheet.propagate().unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 12);
-        assert_eq!(*sheet.read::<i32>(b).unwrap(), 12);
-        assert_eq!(
-            sheet.changed().collect::<HashSet<_>>(),
-            HashSet::from([a, b])
-        );
+        drop(sheet);
+
+        let (mut rebuilt, _, a, b) = make_sheet(12_i32);
+        rebuilt.propagate().unwrap();
+        assert_eq!(*rebuilt.read::<i32>(a).unwrap(), 12);
+        assert_eq!(*rebuilt.read::<i32>(b).unwrap(), 12);
     }
 
     #[test]
