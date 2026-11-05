@@ -101,10 +101,15 @@ operation recovery rule.
 
 ### Callbacks
 
-Method, filter, conditional-expression, and requirement callbacks remain
-side-effect-free. The API does not guarantee whether, when, or how often a
-callback runs. A callback error is not an application-level rejection and does
-not permit reuse of the failed sheet.
+Method, conditional-expression, and requirement callbacks remain side-effect
+free. The API does not guarantee whether, when, or how often a callback runs.
+An `Err` returned by one of these callbacks makes the mutating propagation fail,
+so the host discards the sheet and rebuilds it from host-owned inputs.
+
+Filter callbacks remain side-effect-free, and the API does not guarantee when
+or how often they run. A filter failure is a nonfatal diagnostic: propagation
+still returns `Ok(())`, so the host may continue using the successfully
+propagated sheet.
 
 ### Capture and replay
 

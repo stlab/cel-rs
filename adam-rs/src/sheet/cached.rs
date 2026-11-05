@@ -869,7 +869,30 @@ mod tests {
                 std::mem::discriminant(&right)
             );
             assert_eq!(left.to_string(), right.to_string());
+            if matches!(left, Error::Cycle { .. }) {
+                assert!(same_cycle_sites(left.sites(), right.sites()));
+            } else {
+                assert_eq!(left.sites(), right.sites());
+            }
         }
+    }
+
+    /// Returns whether two ordered site lists are rotations of the same cycle.
+    ///
+    /// - Postcondition: Returns `true` only when `left` is a rotation of `right`.
+    ///
+    /// - Complexity: O(S²) time and O(1) space for S sites.
+    fn same_cycle_sites(left: &[ErrorSite], right: &[ErrorSite]) -> bool {
+        left.len() == right.len()
+            && (left.is_empty()
+                || (0..left.len()).any(|offset| {
+                    left.iter().copied().eq(right
+                        .iter()
+                        .copied()
+                        .cycle()
+                        .skip(offset)
+                        .take(right.len()))
+                }))
     }
 
     /// Builds a pure input-controlled method or requirement failure fixture.
@@ -926,6 +949,7 @@ mod tests {
                 std::mem::discriminant(&reference)
             );
             assert_eq!(error.to_string(), reference.to_string());
+            assert_eq!(error.sites(), reference.sites());
         }
     }
 
@@ -964,6 +988,7 @@ mod tests {
             std::mem::discriminant(&right)
         );
         assert_eq!(left.to_string(), right.to_string());
+        assert_eq!(left.sites(), right.sites());
     }
 
     /// Attaches the two self-referencing directions of an integer inequality.
@@ -1234,6 +1259,7 @@ mod tests {
                 std::mem::discriminant(&right)
             );
             assert_eq!(left.to_string(), right.to_string());
+            assert_eq!(left.sites(), right.sites());
         }
     }
 
@@ -1307,6 +1333,7 @@ mod tests {
             std::mem::discriminant(&right)
         );
         assert_eq!(left.to_string(), right.to_string());
+        assert_eq!(left.sites(), right.sites());
     }
 
     /// Creates an identity relationship whose later-added cell initially wins.

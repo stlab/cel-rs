@@ -1465,9 +1465,7 @@ impl Sheet {
     ///
     /// A filter's argument cells and a conditional's match cells must not depend on any
     /// cell governed by that filter or conditional in the static dependency graph. A
-    /// successful call records the current structure as validated; a failed call leaves
-    /// it unvalidated, so the same structure reports the dependency cycle again on the
-    /// next [`Sheet::validate`] or [`Sheet::propagate`] call.
+    /// successful call records the current structure as validated.
     ///
     /// # Errors
     ///
