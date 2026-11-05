@@ -31,8 +31,8 @@ override. Each successful write takes effect independently.
 `Sheet::propagate` stages planning and method execution before publishing derived
 values. It evaluates requirements after that publication. Therefore the same
 `Error::MethodFailed` can arise before or after derived values are published.
-Under the project error contract, the host discards the mutated sheet after
-either error, so the commit phase does not change the host's recovery action.
+This design establishes that the host discards the mutated sheet after either
+error, so the commit phase does not change the host's recovery action.
 
 A requirement that returns `false` is not an error. Propagation completes and the
 sheet reports the violated requirement. Filter callback failures are also
@@ -63,10 +63,10 @@ The relevant behavior is documented by `Sheet::write` and `Sheet::propagate` in
 ### Writes
 
 `Sheet::new` creates an empty sheet. Graph declaration, validation, writes, and
-propagation then mutate that sheet. When a mutating operation returns `Err`, its
-state is unspecified under the project error contract. Do not inspect, retry, or
-capture from that sheet; discard it and rebuild from host-owned inputs. This
-recovery rule applies during graph construction as well as during edits.
+propagation then mutate that sheet. When a mutating operation returns `Err`, this
+design makes the sheet's state unspecified. Do not inspect, retry, or capture
+from that sheet; discard it and rebuild from host-owned inputs. This recovery
+rule applies during graph construction as well as during edits.
 
 Each successful `write` immediately updates its source value. A sequence of
 writes is not atomic. If an operation in a batch returns `Err`, discard the
@@ -125,7 +125,7 @@ recordings consistent.
 
 - Roll back explicit writes or make a sequence of writes atomic.
 - Guarantee that a failed `Sheet` remains readable or reusable.
-- Add a stronger failure guarantee than the project-wide error contract.
+- Add a stronger failure guarantee than this design's discard-and-rebuild policy.
 - Distinguish propagation failure phases when the host discards the sheet for
   every propagation error.
 - Convert callback errors into validation results.

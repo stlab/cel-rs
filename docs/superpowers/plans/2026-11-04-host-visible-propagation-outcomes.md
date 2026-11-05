@@ -15,7 +15,7 @@
 - The host does not need to know whether propagation published derived values before returning an error.
 - Each successful write takes effect independently.
 - A false requirement and a filter failure remain nonfatal diagnostics.
-- Do not add a stronger failure guarantee than the project-wide error contract.
+- Do not add a stronger failure guarantee than the design's discard-and-rebuild policy.
 
 ## Review Focus
 
