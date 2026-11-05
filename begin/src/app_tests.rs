@@ -102,13 +102,16 @@ fn file_replies_require_current_source_and_request() {
 
 /// Mounts a picker or platform-specific open controls over a real parsed sheet.
 fn host(picker: bool) -> Element {
-    let (parsed, labels, active_source, displayed_source) = use_hook(|| {
+    let (model, initial_error, active_source, displayed_source) = use_hook(|| {
         let (sheet, mut source, _) = load_example("diamond");
         let (parsed, labels) = sheet.expect("diamond builds successfully");
         source.origin = SourceOrigin::Opened("diamond".into());
         (
-            Signal::new(parsed),
-            Signal::new(labels),
+            Signal::new(Some(LiveSheet {
+                parsed: Signal::new(parsed),
+                labels: Signal::new(labels),
+            })),
+            Signal::new(None),
             Signal::new(source.clone()),
             Signal::new(source),
         )
@@ -124,17 +127,17 @@ fn host(picker: bool) -> Element {
     let watcher_slot = use_signal(|| None);
     if picker {
         rsx! { ExamplesPicker {
-            parsed, labels, active_source, displayed_source, example_names: names,
+            model, initial_error, active_source, displayed_source, example_names: names,
             on_select: move |_| callbacks.set(callbacks.get() + 1),
         } }
     } else {
         #[cfg(not(feature = "desktop"))]
         {
-            rsx! { OpenFileControls { parsed, labels, active_source, displayed_source, refresh_handle } }
+            rsx! { OpenFileControls { model, initial_error, active_source, displayed_source, refresh_handle } }
         }
         #[cfg(feature = "desktop")]
         {
-            rsx! { OpenFileControls { parsed, labels, active_source, displayed_source, reload_tx, watcher_slot } }
+            rsx! { OpenFileControls { model, initial_error, active_source, displayed_source, reload_tx, watcher_slot } }
         }
     }
 }
@@ -216,4 +219,169 @@ fn app_renders_all_main_adapters() {
     for expected in ["<sp-theme", "Examples", "Cells", "graph-legend", "Open…"] {
         assert!(html.contains(expected), "missing {expected}");
     }
+}
+
+/// Recovers a mounted application from an initial construction failure.
+#[test]
+fn mounted_app_recovers_after_initial_build_failure() {
+    let observer: AppLifecycleObserver = Rc::new(RefCell::new(None));
+    let mut dom = VirtualDom::new(recovery_host);
+    dom.provide_root_context(observer.clone());
+    let edits = dom.rebuild_to_vec().edits;
+
+    let initial_html = dioxus_ssr::render(&dom);
+    assert!(initial_html.contains("adam-live-error"));
+    assert!(!initial_html.contains("graph-container"));
+    #[cfg(feature = "desktop")]
+    assert!(
+        observer
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| state.4.is_some()),
+        "the example reload channel remains available after initial failure"
+    );
+
+    let click = edits
+        .into_iter()
+        .find_map(|edit| match edit {
+            Mutation::NewEventListener { name, id } if name == "click" => Some(id),
+            _ => None,
+        })
+        .expect("test recovery action is mounted");
+    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+    dom.runtime().handle_event(
+        "click",
+        Event::new(
+            Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                dioxus_html::SerializedMouseData::default(),
+            ))),
+            true,
+        )
+        .into_any(),
+        click,
+    );
+    dom.render_immediate_to_vec();
+
+    let recovered_html = dioxus_ssr::render(&dom);
+    assert!(!recovered_html.contains("adam-live-error"));
+    assert!(recovered_html.contains("graph-container"));
+}
+
+/// Mounts the initial failure and a test action that applies a successful reload result.
+fn recovery_host() -> Element {
+    let observer = consume_context::<AppLifecycleObserver>();
+    rsx! {
+        AppWithExample { initial_name: "cycle".to_string() }
+        button {
+            onclick: move |_| {
+                let (model, error, active, displayed, _reload_tx) = observer
+                    .borrow()
+                    .as_ref()
+                    .expect("the app publishes state before the click")
+                    .clone();
+                let source = "sheet recovered { cell x: i64 = 10i64; }";
+                let built = build_sheet(source, "recovered.adm2")
+                    .expect("replacement source builds");
+                install_loaded_source(
+                    model,
+                    error,
+                    active,
+                    displayed,
+                    Some((built.parsed, built.labels)),
+                    ActiveSource {
+                        name: "cycle".to_string(),
+                        text: source.to_string(),
+                        origin: SourceOrigin::Example,
+                    },
+                );
+            },
+            "Recover"
+        }
+    }
+}
+
+/// Sends one explicit event to the app's production reload consumer.
+#[cfg(feature = "desktop")]
+#[component]
+fn ReloadHost(initial_name: String) -> Element {
+    let observer = consume_context::<AppLifecycleObserver>();
+    rsx! {
+        AppWithExample { initial_name }
+        button {
+            onclick: move |_| {
+                let sender = observer
+                    .borrow()
+                    .as_ref()
+                    .and_then(|state| state.4.clone())
+                    .expect("desktop app creates the reload channel");
+                sender.unbounded_send(()).expect("reload receiver remains mounted");
+            },
+            "Reload"
+        }
+    }
+}
+
+/// Removes a temporary example file created by a desktop reload test.
+#[cfg(feature = "desktop")]
+struct ExampleFileGuard(std::path::PathBuf);
+
+#[cfg(feature = "desktop")]
+impl Drop for ExampleFileGuard {
+    /// Removes the test fixture when its mounted app test exits.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Reloads a repaired on-disk example after its initial build failed.
+#[cfg(feature = "desktop")]
+#[test]
+fn mounted_app_reloads_repaired_example_after_initial_build_failure() {
+    let name = format!("__test_recovery_{}", std::process::id());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(format!("{name}.adm2"));
+    let _fixture = ExampleFileGuard(path.clone());
+    std::fs::write(&path, "sheet broken { out x: i64 := 1i64 / 0i64; }").unwrap();
+
+    let observer: AppLifecycleObserver = Rc::new(RefCell::new(None));
+    let mut dom = VirtualDom::new_with_props(
+        ReloadHost,
+        ReloadHostProps {
+            initial_name: name.clone(),
+        },
+    );
+    dom.provide_root_context(observer);
+    let edits = dom.rebuild_to_vec().edits;
+    let initial_html = dioxus_ssr::render(&dom);
+    assert!(initial_html.contains("adam-live-error"));
+    assert!(initial_html.contains(&name), "{initial_html}");
+    assert!(!initial_html.contains("<input>"), "{initial_html}");
+    assert!(!initial_html.contains("graph-container"));
+
+    std::fs::write(&path, "sheet repaired { cell x: i64 = 10i64; }").unwrap();
+    let click = edits
+        .into_iter()
+        .find_map(|edit| match edit {
+            Mutation::NewEventListener { name, id } if name == "click" => Some(id),
+            _ => None,
+        })
+        .expect("reload action is mounted");
+    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+    dom.runtime().handle_event(
+        "click",
+        Event::new(
+            Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                dioxus_html::SerializedMouseData::default(),
+            ))),
+            true,
+        )
+        .into_any(),
+        click,
+    );
+    dom.render_immediate_to_vec();
+
+    let recovered_html = dioxus_ssr::render(&dom);
+    assert!(!recovered_html.contains("adam-live-error"));
+    assert!(recovered_html.contains("graph-container"));
 }

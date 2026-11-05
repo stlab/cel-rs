@@ -25,23 +25,56 @@ use adam_web_ui::{Renderer, build_sheet};
 /// project's existing default before `cycle.adm2` was added.
 const DEFAULT_EXAMPLE_NAME: &str = "diamond";
 
-/// Installs a built sheet with its provenance, or retains both on parse/read failure.
+/// Holds the signals that represent one successfully initialized sheet.
+#[derive(Clone, Copy, PartialEq)]
+struct LiveSheet {
+    /// The live parsed sheet.
+    parsed: Signal<ParsedSheet>,
+    /// Display and write metadata for the live sheet.
+    labels: Signal<Labels>,
+}
+
+/// Lets mounted-app tests observe state transitions without changing app behavior.
+#[cfg(test)]
+type AppLifecycleObserver = std::rc::Rc<
+    std::cell::RefCell<
+        Option<(
+            Signal<Option<LiveSheet>>,
+            Signal<Option<String>>,
+            Signal<ActiveSource>,
+            Signal<ActiveSource>,
+            Option<futures_channel::mpsc::UnboundedSender<()>>,
+        )>,
+    >,
+>;
+
+/// Installs a successfully built sheet or retains the accepted sheet on failure.
 ///
 /// The recovery target always advances, including failed opens; diagnostics and graph
 /// identity continue to use the displayed source until a replacement sheet exists.
 ///
 /// - Complexity: O(d + t) destruction/clone cost for old sheet data and source text.
 fn install_loaded_source(
-    mut parsed: Signal<ParsedSheet>,
-    mut labels: Signal<Labels>,
+    mut model: Signal<Option<LiveSheet>>,
+    mut initial_error: Signal<Option<String>>,
     mut active_source: Signal<ActiveSource>,
     mut displayed_source: Signal<ActiveSource>,
     sheet_labels: Option<(ParsedSheet, Labels)>,
     candidate: ActiveSource,
 ) {
     if let Some((sheet, metadata)) = sheet_labels {
-        parsed.set(sheet);
-        labels.set(metadata);
+        if let Some(current) = model.peek().as_ref().copied() {
+            let mut parsed = current.parsed;
+            let mut labels = current.labels;
+            parsed.set(sheet);
+            labels.set(metadata);
+        } else {
+            model.set(Some(LiveSheet {
+                parsed: Signal::new(sheet),
+                labels: Signal::new(metadata),
+            }));
+        }
+        initial_error.set(None);
         displayed_source.set(candidate.clone());
     }
     active_source.set(candidate);
@@ -102,20 +135,28 @@ pub fn App() -> Element {
         responder.respond(response);
     });
 
-    let (sheet_signals, active_source, displayed_source, initial_error) = use_hook(|| {
-        let name = pick_default_example_name(&available_examples());
-        let (sheet, source, error) = load_example(&name);
+    let initial_name = use_hook(|| pick_default_example_name(&available_examples()));
+    rsx! { AppWithExample { initial_name } }
+}
+
+/// Loads and watches one selected example, including while its first build fails.
+///
+/// - Complexity: Loads, parses, and propagates the initial example once.
+#[component]
+fn AppWithExample(initial_name: String) -> Element {
+    let (model, active_source, displayed_source, initial_error) = use_hook(|| {
+        let (sheet, source, error) = load_example(&initial_name);
+        let model = sheet.map(|(parsed, labels)| LiveSheet {
+            parsed: Signal::new(parsed),
+            labels: Signal::new(labels),
+        });
         (
-            sheet.map(|(parsed, labels)| (Signal::new(parsed), Signal::new(labels))),
+            Signal::new(model),
             Signal::new(source.clone()),
             Signal::new(source),
-            error,
+            Signal::new(error),
         )
     });
-    let Some((parsed, labels)) = sheet_signals else {
-        let error = initial_error.unwrap_or_else(|| "No example sheet could be loaded.".into());
-        return rsx! { InitialBuildFailure { error } };
-    };
     let example_names = use_signal(available_examples);
 
     // Holds the `notify` watcher on `begin/examples/` established in the
@@ -142,7 +183,9 @@ pub fn App() -> Element {
     // `UnboundedSender` doesn't implement but `Signal<T>` does regardless of
     // `T` (it compares by the underlying slot's identity, not `T`'s value).
     #[cfg(feature = "desktop")]
-    let reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>> = {
+    let mut initial_error = initial_error;
+    #[cfg(feature = "desktop")]
+    let reload_tx: Option<Signal<futures_channel::mpsc::UnboundedSender<()>>> = Some({
         let mut example_names = example_names;
         let mut examples_watcher_slot = examples_watcher_slot;
         use_hook(move || {
@@ -182,9 +225,14 @@ pub fn App() -> Element {
                         Ok(built) => (Some((built.parsed, built.labels)), None),
                         Err(error) => (None, Some(error.render(&Renderer::styled()))),
                     };
+                    if let Some(message) = error.as_ref()
+                        && model.peek().is_none()
+                    {
+                        initial_error.set(Some(message.clone()));
+                    }
                     install_loaded_source(
-                        parsed,
-                        labels,
+                        model,
+                        initial_error,
                         active_source,
                         displayed_source,
                         sheet_labels,
@@ -200,7 +248,64 @@ pub fn App() -> Element {
             });
             Signal::new(tx)
         })
+    });
+
+    #[cfg(not(feature = "desktop"))]
+    let reload_tx: Option<Signal<futures_channel::mpsc::UnboundedSender<()>>> = None;
+
+    #[cfg(test)]
+    if let Some(observer) = try_consume_context::<AppLifecycleObserver>() {
+        *observer.borrow_mut() = Some((
+            model,
+            initial_error,
+            active_source,
+            displayed_source,
+            reload_tx.as_ref().map(|sender| sender.read().clone()),
+        ));
+    }
+
+    let Some(live_sheet) = model.read().as_ref().copied() else {
+        let error = initial_error
+            .read()
+            .clone()
+            .unwrap_or_else(|| "No example sheet could be loaded.".into());
+        return rsx! { InitialBuildFailure { error } };
     };
+
+    rsx! {
+        LiveApp {
+            model: live_sheet,
+            model_state: model,
+            active_source,
+            displayed_source,
+            initial_error,
+            example_names,
+            reload_tx,
+        }
+    }
+}
+
+/// Renders the model controls after a sheet has initialized successfully.
+///
+/// - Complexity: Each render includes graph projection and the child components'
+///   rendering costs.
+#[component]
+fn LiveApp(
+    model: LiveSheet,
+    model_state: Signal<Option<LiveSheet>>,
+    active_source: Signal<ActiveSource>,
+    displayed_source: Signal<ActiveSource>,
+    initial_error: Signal<Option<String>>,
+    example_names: Signal<Vec<String>>,
+    reload_tx: Option<Signal<futures_channel::mpsc::UnboundedSender<()>>>,
+) -> Element {
+    let parsed = model.parsed;
+    let labels = model.labels;
+
+    #[cfg(feature = "desktop")]
+    let reload_tx = reload_tx.expect("desktop AppWithExample creates a reload sender");
+    #[cfg(not(feature = "desktop"))]
+    let _ = reload_tx;
 
     // Holds the `notify` watcher installed on the most recently opened file, if
     // any. Replacing it drops the previous watcher, which stops its OS-level
@@ -299,21 +404,21 @@ pub fn App() -> Element {
     #[cfg(feature = "desktop")]
     let open_file_controls = rsx! {
         OpenFileControls {
-            parsed,
-            labels,
+            model: model_state,
             active_source,
             displayed_source,
             reload_tx,
+            initial_error,
             watcher_slot,
         }
     };
     #[cfg(not(feature = "desktop"))]
     let open_file_controls = rsx! {
         OpenFileControls {
-            parsed,
-            labels,
+            model: model_state,
             active_source,
             displayed_source,
+            initial_error,
             refresh_handle,
         }
     };
@@ -378,7 +483,7 @@ pub fn App() -> Element {
                 }
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
-                    ExamplesPicker { parsed, labels, active_source, displayed_source, example_names, on_select: on_example_selected }
+                    ExamplesPicker { model: model_state, initial_error, active_source, displayed_source, example_names, on_select: on_example_selected }
                     // Positioned wrapper so `GraphLegend` (position: absolute) overlays the
                     // graph. The legend lives here in `begin`, not inside the shared
                     // `GraphView`, so the book's live graphs render without it.
@@ -512,8 +617,8 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(ParsedSheet, Labels)>, Acti
 #[cfg(feature = "desktop")]
 #[component]
 fn OpenFileControls(
-    parsed: Signal<ParsedSheet>,
-    labels: Signal<Labels>,
+    model: Signal<Option<LiveSheet>>,
+    initial_error: Signal<Option<String>>,
     active_source: Signal<ActiveSource>,
     displayed_source: Signal<ActiveSource>,
     reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>>,
@@ -530,7 +635,7 @@ fn OpenFileControls(
                             return;
                         };
                         let (new_sheet_labels, new_active) = load_opened(path.clone());
-                        install_loaded_source(parsed, labels, active_source, displayed_source, new_sheet_labels, new_active);
+                        install_loaded_source(model, initial_error, active_source, displayed_source, new_sheet_labels, new_active);
                         match crate::open_file::spawn_watch(path, move || {
                             let _ = reload_tx.unbounded_send(());
                         }) {
@@ -617,8 +722,8 @@ fn file_reply_is_current(
 #[cfg(not(feature = "desktop"))]
 #[component]
 fn OpenFileControls(
-    parsed: Signal<ParsedSheet>,
-    labels: Signal<Labels>,
+    model: Signal<Option<LiveSheet>>,
+    initial_error: Signal<Option<String>>,
     active_source: Signal<ActiveSource>,
     displayed_source: Signal<ActiveSource>,
     mut refresh_handle: Signal<Option<u32>>,
@@ -669,7 +774,7 @@ fn OpenFileControls(
                         }
                         refresh_handle.set(payload.id);
                         let (new_sheet_labels, new_active) = load_from_payload(payload);
-                        install_loaded_source(parsed, labels, active_source, displayed_source, new_sheet_labels, new_active);
+                        install_loaded_source(model, initial_error, active_source, displayed_source, new_sheet_labels, new_active);
                     });
                 },
                 "Open…"
@@ -704,7 +809,7 @@ fn OpenFileControls(
                                 }
                             };
                             let (new_sheet_labels, new_active) = load_from_payload(payload);
-                            install_loaded_source(parsed, labels, active_source, displayed_source, new_sheet_labels, new_active);
+                            install_loaded_source(model, initial_error, active_source, displayed_source, new_sheet_labels, new_active);
                         });
                     },
                     "Refresh"
@@ -726,8 +831,8 @@ fn OpenFileControls(
 /// grow arbitrarily without crowding the rest of the window.
 #[component]
 fn ExamplesPicker(
-    parsed: Signal<ParsedSheet>,
-    labels: Signal<Labels>,
+    model: Signal<Option<LiveSheet>>,
+    initial_error: Signal<Option<String>>,
     active_source: Signal<ActiveSource>,
     displayed_source: Signal<ActiveSource>,
     example_names: Signal<Vec<String>>,
@@ -761,7 +866,7 @@ fn ExamplesPicker(
                             let name = name.clone();
                             move |_| {
                                 let (sheet_labels, new_active_source, _) = load_example(&name);
-                                install_loaded_source(parsed, labels, active_source, displayed_source, sheet_labels, new_active_source);
+                                install_loaded_source(model, initial_error, active_source, displayed_source, sheet_labels, new_active_source);
                                 on_select.call(());
                             }
                         },
@@ -803,8 +908,13 @@ mod tests {
         fn host() -> Element {
             let (initial_sheet, initial_source, _) = load_example("diamond");
             let (initial, initial_labels) = initial_sheet.expect("diamond builds successfully");
-            let parsed = use_signal(|| initial);
-            let labels = use_signal(|| initial_labels);
+            let model = use_signal(|| {
+                Some(LiveSheet {
+                    parsed: Signal::new(initial),
+                    labels: Signal::new(initial_labels),
+                })
+            });
+            let initial_error = use_signal(|| None);
             let active = use_signal(|| initial_source.clone());
             let displayed = use_signal(|| initial_source);
             let original = displayed.read().file_name();
@@ -813,7 +923,14 @@ mod tests {
                 text: "bad".to_string(),
                 origin: SourceOrigin::Example,
             };
-            install_loaded_source(parsed, labels, active, displayed, None, broken.clone());
+            install_loaded_source(
+                model,
+                initial_error,
+                active,
+                displayed,
+                None,
+                broken.clone(),
+            );
             assert_eq!(displayed.read().file_name(), original);
             assert_eq!(active.read().name, "broken");
             let repaired_sheet =
@@ -823,8 +940,8 @@ mod tests {
                 ..broken
             };
             install_loaded_source(
-                parsed,
-                labels,
+                model,
+                initial_error,
                 active,
                 displayed,
                 Some((repaired_sheet.parsed, repaired_sheet.labels)),
@@ -832,7 +949,13 @@ mod tests {
             );
             assert_eq!(displayed.read().name, "broken");
             assert_eq!(displayed.read().text, "sheet repaired { cell x: i64; }");
-            assert!(parsed.read().cell_names.contains_key("x"));
+            assert!(
+                model.read().as_ref().is_some_and(|model| model
+                    .parsed
+                    .read()
+                    .cell_names
+                    .contains_key("x"))
+            );
             rsx! {}
         }
         VirtualDom::new(host).rebuild_in_place();

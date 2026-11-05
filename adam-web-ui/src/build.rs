@@ -24,6 +24,8 @@ pub struct RuntimeFailure {
     pub error: Error,
     /// Source and provenance metadata captured before propagation.
     pub diagnostics: SheetDiagnostics,
+    /// Requested display name for the anonymous root source.
+    pub file_name: String,
 }
 
 /// A requirement that evaluated to false after successful propagation.
@@ -92,7 +94,14 @@ pub enum BuildError {
     /// A fatal initial runtime propagation error.
     Runtime(RuntimeFailure),
     /// Requirements that evaluated to false after propagation.
-    Validation(Vec<ValidationIssue>),
+    Validation {
+        /// False requirements with their owning source labels.
+        issues: Vec<ValidationIssue>,
+        /// Source owners used to restrict the root display-name override.
+        diagnostics: SheetDiagnostics,
+        /// Requested display name for the anonymous root source.
+        file_name: String,
+    },
 }
 
 impl BuildError {
@@ -119,13 +128,17 @@ impl BuildError {
                     &failure.error,
                     &failure.diagnostics,
                     source.map_or("", adam_lang::SourceId::text),
-                    source.map_or("", adam_lang::SourceId::file_name),
+                    &failure.file_name,
                     renderer,
                 )
             }
-            Self::Validation(issues) => issues
+            Self::Validation {
+                issues,
+                diagnostics,
+                file_name,
+            } => issues
                 .iter()
-                .map(|issue| format_validation_issue(issue, renderer))
+                .map(|issue| format_validation_issue(issue, diagnostics, file_name, renderer))
                 .collect::<Vec<_>>()
                 .join("\n"),
         }
@@ -206,7 +219,7 @@ pub fn build_sheet(source: &str, file_name: &str) -> Result<BuiltSheet, BuildErr
         }
     };
 
-    initialize_sheet(parsed)
+    initialize_sheet_with_file_name(parsed, Some(file_name))
 }
 
 /// Finds an owning module diagnostic in a parser error's source chain.
@@ -246,7 +259,18 @@ fn module_diagnostic(error: &cel_parser::ParseError) -> Option<&ModuleDiagnostic
 /// let built = adam_web_ui::initialize_sheet(parsed).unwrap();
 /// assert!(built.keys.contains_key("width"));
 /// ```
-pub fn initialize_sheet(mut parsed: ParsedSheet) -> Result<BuiltSheet, BuildError> {
+pub fn initialize_sheet(parsed: ParsedSheet) -> Result<BuiltSheet, BuildError> {
+    initialize_sheet_with_file_name(parsed, None)
+}
+
+/// Initializes a parsed sheet while retaining a caller-selected root display name.
+///
+/// - Complexity: O(m) metadata snapshot cost plus propagation and validation
+///   work, where m is the retained metadata size.
+fn initialize_sheet_with_file_name(
+    mut parsed: ParsedSheet,
+    requested_file_name: Option<&str>,
+) -> Result<BuiltSheet, BuildError> {
     let diagnostics = parsed.diagnostics();
     let labels = labels_from_cell_names(&parsed.sheet, &parsed.cell_names);
     let keys = parsed
@@ -258,7 +282,11 @@ pub fn initialize_sheet(mut parsed: ParsedSheet) -> Result<BuiltSheet, BuildErro
         Ok(()) => {
             let issues = validation_issues(&parsed);
             if !issues.is_empty() {
-                return Err(BuildError::Validation(issues));
+                return Err(BuildError::Validation {
+                    issues,
+                    file_name: display_file_name(&diagnostics, requested_file_name),
+                    diagnostics,
+                });
             }
             parsed.clear_changed();
             Ok(BuiltSheet {
@@ -268,8 +296,26 @@ pub fn initialize_sheet(mut parsed: ParsedSheet) -> Result<BuiltSheet, BuildErro
                 keys,
             })
         }
-        Err(error) => Err(BuildError::Runtime(RuntimeFailure { error, diagnostics })),
+        Err(error) => Err(BuildError::Runtime(RuntimeFailure {
+            error,
+            file_name: display_file_name(&diagnostics, requested_file_name),
+            diagnostics,
+        })),
     }
+}
+
+/// Selects an explicit root display name or the parser's retained source name.
+///
+/// - Complexity: O(n) in the selected file-name byte length.
+fn display_file_name(diagnostics: &SheetDiagnostics, requested_file_name: Option<&str>) -> String {
+    requested_file_name
+        .map(str::to_owned)
+        .or_else(|| {
+            diagnostics
+                .anonymous_source()
+                .map(|source| source.file_name().to_owned())
+        })
+        .unwrap_or_default()
 }
 
 /// Collects every false requirement from the successfully propagated candidate.
@@ -331,6 +377,20 @@ mod tests {
         ));
     }
 
+    /// Runtime diagnostics use the requested root display name.
+    #[test]
+    fn runtime_diagnostic_uses_requested_file_name() {
+        let error = build_sheet(
+            "sheet s { cell x: i32 = 0; cell y: i32; relationship { y := 10i32 / x; } }",
+            "s.adm2",
+        )
+        .err()
+        .expect("division by zero rejects construction");
+
+        let rendered = error.render(&Renderer::plain());
+        assert!(rendered.contains("s.adm2"), "{rendered}");
+    }
+
     /// Rejects a candidate when a requirement is false after propagation.
     #[test]
     fn construction_rejects_initial_requirement_violation() {
@@ -341,7 +401,7 @@ mod tests {
         let Err(error) = result else {
             panic!("false initial requirement must reject construction");
         };
-        let BuildError::Validation(issues) = &error else {
+        let BuildError::Validation { issues, .. } = &error else {
             panic!("false initial requirement must be Validation");
         };
         assert_eq!(issues.len(), 1);
@@ -361,6 +421,20 @@ mod tests {
                 .render(&Renderer::plain())
                 .contains("requirement `positive` evaluated to false")
         );
+    }
+
+    /// Validation diagnostics use the requested root display name.
+    #[test]
+    fn validation_diagnostic_uses_requested_file_name() {
+        let error = build_sheet(
+            "sheet s { cell x: i64 = -1i64 require { @positive x > 0i64; }; }",
+            "s.adm2",
+        )
+        .err()
+        .expect("false requirement rejects construction");
+
+        let rendered = error.render(&Renderer::plain());
+        assert!(rendered.contains("s.adm2"), "{rendered}");
     }
 
     /// The opted-in host builds registered fields, members, and typed closures.

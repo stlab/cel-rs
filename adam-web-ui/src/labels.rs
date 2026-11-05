@@ -408,12 +408,17 @@ pub fn format_adam_error(
 /// - Complexity: O(n + l) source and label bytes, excluding snippet rendering.
 pub(crate) fn format_validation_issue(
     issue: &crate::build::ValidationIssue,
+    diagnostics: &SheetDiagnostics,
+    file_name: &str,
     renderer: &Renderer,
 ) -> String {
+    let display_source = diagnostics
+        .anonymous_source()
+        .map(|source| (source, file_name));
     format_source_labels(
         &format!("{}: {}", issue.key, issue.message),
         &issue.labels,
-        None,
+        display_source,
         renderer,
     )
 }
@@ -602,6 +607,46 @@ mod tests {
             assert!(rendered.contains(expected), "{rendered}");
         }
         assert!(!rendered.contains('\u{1b}'));
+    }
+
+    /// Overrides only the anonymous root owner in a validation diagnostic.
+    #[test]
+    fn validation_display_name_preserves_imported_source_names() {
+        let parsed = parse("sheet root { cell x: i32 = 0; }");
+        let diagnostics = parsed.diagnostics();
+        let root = diagnostics
+            .anonymous_source()
+            .expect("parser retains its anonymous root")
+            .clone();
+        let mut sources = adam_lang::SourceMap::new();
+        let imported = sources.insert("component.adm2", "sheet component {}");
+        let issue = crate::build::ValidationIssue {
+            key: "x".to_string(),
+            requirement: None,
+            labels: vec![
+                adam_lang::SourceLabel {
+                    location: Some(adam_lang::SourceLocation {
+                        source: root,
+                        span: cel_parser::SourceSpan::new(1, 0, 1, 5),
+                    }),
+                    label: "root requirement".to_string(),
+                },
+                adam_lang::SourceLabel {
+                    location: Some(adam_lang::SourceLocation {
+                        source: imported,
+                        span: cel_parser::SourceSpan::new(1, 0, 1, 5),
+                    }),
+                    label: "component requirement".to_string(),
+                },
+            ],
+            message: "requirement evaluated to false".to_string(),
+        };
+
+        let rendered = format_validation_issue(&issue, &diagnostics, "s.adm2", &Renderer::plain());
+
+        assert!(rendered.contains("s.adm2"), "{rendered}");
+        assert!(rendered.contains("component.adm2"), "{rendered}");
+        assert!(!rendered.contains("<input>"), "{rendered}");
     }
 
     /// Preserves an anonymous root's display name, exact division subspan and original cause.
