@@ -158,7 +158,7 @@ Run: `RUSTDOCFLAGS="-D warnings" cargo doc -p adam-rs --lib --no-deps`
 
 Expected: documentation builds without warnings or broken links.
 
-- [ ] **Step 8: Commit the recovery contract**
+- [x] **Step 8: Commit the recovery contract**
 
 ```bash
 git add adam-rs/src/sheet.rs adam-rs/src/sheet/cached.rs \
