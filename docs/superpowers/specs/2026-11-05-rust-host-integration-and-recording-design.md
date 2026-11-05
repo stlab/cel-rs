@@ -1,6 +1,7 @@
 # Dioxus sheet bindings and recording
 
-**Status:** Draft for approval for issue #272.
+**Status:** Approved on 2026-11-05 for issue #272, including the Result-only
+construction contract.
 
 ## Intent
 
