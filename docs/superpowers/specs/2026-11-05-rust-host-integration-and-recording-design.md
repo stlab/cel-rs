@@ -27,15 +27,16 @@ This first pass supports the widgets these applications already use, not every
 Dioxus component type. Additional bindings, including date inputs, are tracked
 in [issue #279](https://github.com/stlab/cel-rs/issues/279).
 
-## Current behavior
+## Existing defects and migration dependencies
 
-`adam-web-ui::build_sheet` returns a `BuildOutcome` containing a formatted
-string and, when parsing succeeds, a `ParsedSheet`. If initial propagation
-fails, it formats the error through that sheet and returns the failed sheet
-alongside the message. The inspector's `write_and_propagate` reports write and
-propagation failures internally, then keeps the same parsed-sheet signal.
-`ViewConstraints` also owns a persistent `ParsedSheet`; its update methods
-return an error without invalidating the containing value.
+The existing `adam-web-ui::build_sheet` can return a failed `ParsedSheet`
+alongside an error through `BuildOutcome`. This is a defect to remove, not
+the construction interface to preserve. Replace `BuildOutcome` with a
+`Result` whose error variant contains no sheet. The inspector's
+`write_and_propagate` also reports write and propagation failures internally,
+then keeps the same parsed-sheet signal. `ViewConstraints` owns a persistent
+`ParsedSheet`; its update methods return an error without invalidating the
+containing value.
 
 `begin::load_example` reports build errors and installs any returned sheet,
 including one whose initial propagation failed. These paths conflict with the
@@ -201,6 +202,20 @@ merely because a slider's bounds changed.
 
 ### Host ownership and error boundary
 
+Model construction returns a `Result`. Only `Ok` contains the constructed
+sheet and its associated successful-build metadata, such as labels. Parsing,
+type checking, initial propagation, and initial requirement validation must
+succeed before construction returns `Ok`. An `Err` contains a structured error
+and any independently owned diagnostic metadata needed by the host; it never
+contains a sheet, whether as a partial result or an optional recovery payload.
+Initial propagation errors retain their fatal classification rather than
+becoming ordinary source-validation errors.
+
+On failure, the builder discards its candidate without reading it again.
+Diagnostics use the returned error and metadata retained before the failing
+mutation. Update all construction call sites to handle the `Result`; do not
+preserve a wrapper that can return a sheet and an error together.
+
 The host owns the authoritative inputs, the last accepted transaction, the
 active model, and any recording state. A UI component or adapter may apply an
 input to a `Sheet`, but it does not decide whether the application rolls back,
@@ -329,6 +344,8 @@ required host framework.
   propagation `Err` is surfaced as fatal without reading or reusing its sheet.
 - Test construction and input-conversion errors without replacing the last
   accepted model.
+- Test that construction returns `Ok` only for an initialized, validated model
+  and that every construction failure returns an error without a sheet.
 - Render-verify the standalone example and migrated `begin` widgets, including
   visible validation and runtime-error outcomes, keyboard/focus behavior, and
   live dependent updates.
