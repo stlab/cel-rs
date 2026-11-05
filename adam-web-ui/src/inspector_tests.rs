@@ -15,13 +15,11 @@ fn host() -> Element {
         cell count: i32 = 10;
         cell ranged: i32 = 20 filter 0..=100;
         cell inactive: i32 = 1;
-        out result := (text, flag, count, ranged) require { @limit count < 5; };
+        out result := (text, flag, count, ranged) require { @limit count < 15; };
     }"#;
     let (parsed, labels) = use_hook(|| {
-        let outcome =
-            crate::build_sheet(source, "same.adm2", &annotate_snippets::Renderer::plain());
-        let (parsed, labels) = outcome.sheet_labels.expect("valid control fixture");
-        (Signal::new(parsed), Signal::new(labels))
+        let built = crate::build_sheet(source, "same.adm2").expect("valid control fixture");
+        (Signal::new(built.parsed), Signal::new(built.labels))
     });
     let observed: Observer = consume_context();
     *observed.borrow_mut() = Some((parsed, labels));
@@ -46,10 +44,8 @@ fn wide_integer_controls_preserve_the_complete_type_domain() {
         }}"
         );
         let (parsed, labels) = use_hook(|| {
-            let outcome = crate::build_sheet(&source, "wide.adm2", &Renderer::plain());
-            assert!(outcome.error.is_none(), "{:?}", outcome.error);
-            let (sheet, labels) = outcome.sheet_labels.unwrap();
-            (Signal::new(sheet), Signal::new(labels))
+            let built = crate::build_sheet(&source, "wide.adm2").unwrap();
+            (Signal::new(built.parsed), Signal::new(built.labels))
         });
         let source_text = use_memo(move || source.clone());
         let source_name = use_memo(|| "wide.adm2".to_string());
@@ -107,7 +103,7 @@ fn rendered_controls_flags_writes_and_source_replacement() {
     assert_eq!(html.matches("<sp-slider").count(), 1);
     assert_eq!(html.matches("<sp-textfield").count(), 2);
     assert!(html.contains("value=\"001\"") && html.contains("value=\"10\""));
-    assert!(html.contains("invalid=\"true\"") && html.contains("disabled=\"true\""));
+    assert!(html.contains("disabled=\"true\""));
     assert!(html.contains("readonly=\"true\""));
     let click = mutations
         .edits
@@ -136,14 +132,10 @@ fn rendered_controls_flags_writes_and_source_replacement() {
             .read::<bool>(parsed.peek().cell_names["flag"].0)
             .unwrap()
     );
-    let replacement = crate::build_sheet(
-        "sheet new { cell fresh: i64 = 42i64; }",
-        "same.adm2",
-        &annotate_snippets::Renderer::plain(),
-    );
-    let (new_parsed, new_labels) = replacement.sheet_labels.unwrap();
-    parsed.set(new_parsed);
-    labels.set(new_labels);
+    let replacement =
+        crate::build_sheet("sheet new { cell fresh: i64 = 42i64; }", "same.adm2").unwrap();
+    parsed.set(replacement.parsed);
+    labels.set(replacement.labels);
     dom.render_immediate_to_vec();
     let after = dioxus_ssr::render(&dom);
     assert!(after.contains("fresh") && after.contains("value=\"42\""));

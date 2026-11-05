@@ -1,7 +1,6 @@
 //! Root [`App`] component.
 
-use adam_lang::{AdamParser, ParsedSheet, TypeRegistry};
-use cel_parser::OpLookup;
+use adam_lang::ParsedSheet;
 use dioxus::prelude::*;
 
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
@@ -15,15 +14,6 @@ use adam_web_ui::spectrum::{
 };
 use adam_web_ui::to_graph_data;
 use adam_web_ui::{Renderer, build_sheet};
-
-/// Returns an empty `ParsedSheet` (no cells, no relationships): the fallback used when
-/// loading a source fails outright (an unreadable file, an unknown example name) and there
-/// is no previously-built sheet to fall back to instead.
-fn empty_parsed_sheet() -> ParsedSheet {
-    AdamParser::new(TypeRegistry::new(), OpLookup::new())
-        .parse_str("sheet s {}")
-        .expect("the empty sheet source always parses")
-}
 
 /// The example [`App`] loads on launch, absent any other selection.
 ///
@@ -82,10 +72,9 @@ fn pick_default_example_name(names: &[String]) -> String {
 /// running app via `crate::example_source::spawn_examples_watch`, exactly as
 /// if the old Apply button had been pressed.
 ///
-/// A read or parse failure loading an example does not prevent the app from
-/// launching or switching: it prints the diagnostic to stderr and falls back
-/// to an empty sheet instead, so a syntax error can be fixed and
-/// hot-reloaded in without restarting.
+/// A failed initial build renders its diagnostic without installing a model.
+/// A rejected later source keeps the last accepted model and its displayed
+/// provenance while the active source remains available for reload.
 ///
 /// Opened-file failures retain the last good sheet and its displayed provenance,
 /// while the recovery source remains the newly selected file.
@@ -113,16 +102,20 @@ pub fn App() -> Element {
         responder.respond(response);
     });
 
-    let (parsed, labels, active_source, displayed_source) = use_hook(|| {
+    let (sheet_signals, active_source, displayed_source, initial_error) = use_hook(|| {
         let name = pick_default_example_name(&available_examples());
-        let (parsed, labels, source) = load_example(&name);
+        let (sheet, source, error) = load_example(&name);
         (
-            Signal::new(parsed),
-            Signal::new(labels),
+            sheet.map(|(parsed, labels)| (Signal::new(parsed), Signal::new(labels))),
             Signal::new(source.clone()),
             Signal::new(source),
+            error,
         )
     });
+    let Some((parsed, labels)) = sheet_signals else {
+        let error = initial_error.unwrap_or_else(|| "No example sheet could be loaded.".into());
+        return rsx! { InitialBuildFailure { error } };
+    };
     let example_names = use_signal(available_examples);
 
     // Holds the `notify` watcher on `begin/examples/` established in the
@@ -185,19 +178,22 @@ pub fn App() -> Element {
                             continue;
                         }
                     };
-                    let outcome = build_sheet(&source, &current.file_name(), &Renderer::styled());
+                    let (sheet_labels, error) = match build_sheet(&source, &current.file_name()) {
+                        Ok(built) => (Some((built.parsed, built.labels)), None),
+                        Err(error) => (None, Some(error.render(&Renderer::styled()))),
+                    };
                     install_loaded_source(
                         parsed,
                         labels,
                         active_source,
                         displayed_source,
-                        outcome.sheet_labels,
+                        sheet_labels,
                         ActiveSource {
                             text: source,
                             ..current
                         },
                     );
-                    if let Some(msg) = outcome.error {
+                    if let Some(msg) = error {
                         eprintln!("{msg}");
                     }
                 }
@@ -398,50 +394,54 @@ pub fn App() -> Element {
     }
 }
 
-/// Loads example `name`, builds its sheet, and returns it alongside the
-/// [`ActiveSource`] describing what just loaded.
+/// Renders an initial construction diagnostic without mounting model controls.
+#[component]
+fn InitialBuildFailure(error: String) -> Element {
+    rsx! {
+        SpTheme {
+            color: "light".to_string(),
+            scale: "medium".to_string(),
+            system: "spectrum-two".to_string(),
+            pre { class: "adam-live-error", "{error}" }
+        }
+    }
+}
+
+/// Loads an example and returns its sheet, source identity, and optional diagnostic.
 ///
-/// A read or parse failure prints the diagnostic to stderr and returns an
-/// empty sheet instead of failing — see [`App`]'s doc comment for why. The
-/// returned [`ActiveSource`] still carries `name` (and, if the read
-/// succeeded, the source text that failed to parse) even on failure, so the
-/// desktop hot-reload loop keeps reloading the right file and can recover
-/// once the on-disk error is fixed, instead of losing track of which
-/// example was selected.
+/// A failed load returns no sheet. The active source still identifies the
+/// selected example so later reloads can retry it.
 ///
 /// - Complexity: O(n) in the length of the example's source, plus the cost
 ///   of one `build_sheet` parse/propagate.
-fn load_example(name: &str) -> (ParsedSheet, Labels, ActiveSource) {
+fn load_example(name: &str) -> (Option<(ParsedSheet, Labels)>, ActiveSource, Option<String>) {
     match load_example_source(name) {
         Ok(source) => {
-            let outcome = build_sheet(
-                &source,
-                &format!("begin/examples/{name}.adm2"),
-                &Renderer::styled(),
-            );
-            if let Some(err) = &outcome.error {
-                adam_web_ui::diagnostics::report_error(err);
-            }
+            let result = build_sheet(&source, &format!("begin/examples/{name}.adm2"));
             let active_source = ActiveSource {
                 name: name.to_string(),
                 text: source,
                 origin: SourceOrigin::Example,
             };
-            match outcome.sheet_labels {
-                Some((parsed, labels)) => (parsed, labels, active_source),
-                None => (empty_parsed_sheet(), Labels::new(), active_source),
+            match result {
+                Ok(built) => (Some((built.parsed, built.labels)), active_source, None),
+                Err(error) => {
+                    let message = error.render(&Renderer::styled());
+                    adam_web_ui::diagnostics::report_error(&message);
+                    (None, active_source, Some(message))
+                }
             }
         }
         Err(err) => {
             adam_web_ui::diagnostics::report_error(&err);
             (
-                empty_parsed_sheet(),
-                Labels::new(),
+                None,
                 ActiveSource {
                     name: name.to_string(),
                     text: String::new(),
                     origin: SourceOrigin::Example,
                 },
+                Some(err),
             )
         }
     }
@@ -472,16 +472,19 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(ParsedSheet, Labels)>, Acti
         .unwrap_or_else(|| file_name.clone());
     match crate::open_file::read_opened_file(&path) {
         Ok(source) => {
-            let outcome = build_sheet(&source, &file_name, &Renderer::styled());
-            if let Some(err) = &outcome.error {
-                eprintln!("{err}");
-            }
+            let sheet_labels = match build_sheet(&source, &file_name) {
+                Ok(built) => Some((built.parsed, built.labels)),
+                Err(error) => {
+                    eprintln!("{}", error.render(&Renderer::styled()));
+                    None
+                }
+            };
             let active_source = ActiveSource {
                 name,
                 text: source,
                 origin: SourceOrigin::Opened(path.into_os_string()),
             };
-            (outcome.sheet_labels, active_source)
+            (sheet_labels, active_source)
         }
         Err(err) => {
             eprintln!("{err}");
@@ -567,16 +570,19 @@ fn OpenFileControls(
 fn load_from_payload(
     payload: crate::open_file::OpenedFilePayload,
 ) -> (Option<(ParsedSheet, Labels)>, ActiveSource) {
-    let outcome = build_sheet(&payload.text, &payload.name, &Renderer::styled());
-    if let Some(err) = &outcome.error {
-        adam_web_ui::diagnostics::report_error(err);
-    }
+    let sheet_labels = match build_sheet(&payload.text, &payload.name) {
+        Ok(built) => Some((built.parsed, built.labels)),
+        Err(error) => {
+            adam_web_ui::diagnostics::report_error(&error.render(&Renderer::styled()));
+            None
+        }
+    };
     let active_source = ActiveSource {
         name: payload.name.clone(),
         text: payload.text,
         origin: SourceOrigin::Opened(payload.name.into()),
     };
-    (outcome.sheet_labels, active_source)
+    (sheet_labels, active_source)
 }
 
 /// Retains the unique source allocation that owns a pending browser file response.
@@ -754,8 +760,8 @@ fn ExamplesPicker(
                         onclick: {
                             let name = name.clone();
                             move |_| {
-                                let (new_parsed, new_labels, new_active_source) = load_example(&name);
-                                install_loaded_source(parsed, labels, active_source, displayed_source, Some((new_parsed, new_labels)), new_active_source);
+                                let (sheet_labels, new_active_source, _) = load_example(&name);
+                                install_loaded_source(parsed, labels, active_source, displayed_source, sheet_labels, new_active_source);
                                 on_select.call(());
                             }
                         },
@@ -774,12 +780,29 @@ mod component_tests;
 mod tests {
     use super::*;
 
+    /// A failed initial example renders its diagnostic without mounting controls.
+    #[test]
+    fn failed_initial_example_renders_without_a_model() {
+        let (sheet, _, error) = load_example("cycle");
+        assert!(sheet.is_none());
+        let error = error.expect("the cycle example fails initial propagation");
+        let props = InitialBuildFailureProps { error };
+        let mut dom = VirtualDom::new_with_props(InitialBuildFailure, props);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("adam-live-error"));
+        assert!(!html.contains("<sp-textfield"));
+        assert!(!html.contains("graph-container"));
+        assert!(!html.contains("<sp-number-field"));
+    }
+
     /// Failed opens change the recovery target without relabelling the retained sheet.
     #[test]
     fn failed_open_retains_displayed_source_until_recovery() {
         /// Exercises the production load transition with real parsed sheets and labels.
         fn host() -> Element {
-            let (initial, initial_labels, initial_source) = load_example("diamond");
+            let (initial_sheet, initial_source, _) = load_example("diamond");
+            let (initial, initial_labels) = initial_sheet.expect("diamond builds successfully");
             let parsed = use_signal(|| initial);
             let labels = use_signal(|| initial_labels);
             let active = use_signal(|| initial_source.clone());
@@ -793,11 +816,8 @@ mod tests {
             install_loaded_source(parsed, labels, active, displayed, None, broken.clone());
             assert_eq!(displayed.read().file_name(), original);
             assert_eq!(active.read().name, "broken");
-            let outcome = build_sheet(
-                "sheet repaired { cell x: i64; }",
-                "broken.adm2",
-                &Renderer::plain(),
-            );
+            let repaired_sheet =
+                build_sheet("sheet repaired { cell x: i64; }", "broken.adm2").unwrap();
             let repaired = ActiveSource {
                 text: "sheet repaired { cell x: i64; }".to_string(),
                 ..broken
@@ -807,7 +827,7 @@ mod tests {
                 labels,
                 active,
                 displayed,
-                outcome.sheet_labels,
+                Some((repaired_sheet.parsed, repaired_sheet.labels)),
                 repaired,
             );
             assert_eq!(displayed.read().name, "broken");
@@ -832,12 +852,10 @@ mod tests {
     #[test]
     /// The zero-selector branch leaves the toy sheet's g cell editable.
     fn toy_example_g_not_forced_when_p_is_zero() {
-        let outcome = build_sheet(
-            toy_example_source(),
-            "toy_example.adm2",
-            &Renderer::styled(),
-        );
-        let (sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
+        let built = build_sheet(toy_example_source(), "toy_example.adm2")
+            .expect("toy_example.adm2 must build");
+        let sheet = built.parsed;
+        let labels = built.labels;
         let g_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("g"))
@@ -848,12 +866,10 @@ mod tests {
     #[test]
     /// Selecting the one branch forces the toy sheet's g cell.
     fn toy_example_g_forced_when_p_is_one() {
-        let outcome = build_sheet(
-            toy_example_source(),
-            "toy_example.adm2",
-            &Renderer::styled(),
-        );
-        let (mut sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
+        let built = build_sheet(toy_example_source(), "toy_example.adm2")
+            .expect("toy_example.adm2 must build");
+        let mut sheet = built.parsed;
+        let labels = built.labels;
         let p_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
@@ -872,12 +888,10 @@ mod tests {
     #[test]
     /// Returning to the zero branch restores g's editability.
     fn toy_example_g_unforced_again_after_p_returns_to_zero() {
-        let outcome = build_sheet(
-            toy_example_source(),
-            "toy_example.adm2",
-            &Renderer::styled(),
-        );
-        let (mut sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
+        let built = build_sheet(toy_example_source(), "toy_example.adm2")
+            .expect("toy_example.adm2 must build");
+        let mut sheet = built.parsed;
+        let labels = built.labels;
         let p_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
@@ -899,11 +913,11 @@ mod tests {
     }
 
     #[test]
-    /// Missing example names produce the documented empty-sheet fallback.
-    fn load_example_unknown_name_falls_back_to_empty_sheet() {
-        let (parsed, labels, active) = load_example("does_not_exist");
-        assert_eq!(parsed.cells().count(), 0);
-        assert_eq!(labels.cells.len(), 0);
+    /// Missing example names produce an error without a placeholder sheet.
+    fn load_example_unknown_name_returns_no_sheet() {
+        let (sheet, active, error) = load_example("does_not_exist");
+        assert!(sheet.is_none());
+        assert!(error.is_some());
         assert_eq!(
             active.name, "does_not_exist",
             "name must be preserved on failure so hot-reload keeps targeting the right file"

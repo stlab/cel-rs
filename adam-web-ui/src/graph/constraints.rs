@@ -17,7 +17,7 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
-use adam_lang::{AdamParser, ParsedSheet};
+use adam_lang::{AdamParser, ParsedSheet, SheetDiagnostics};
 use adam_rs::CellId;
 use anyhow::{Result, anyhow, ensure};
 use cel_euclid::{Rect, Size2D, Transform2D, Vector2D};
@@ -254,10 +254,10 @@ impl ViewConstraints {
     /// Formats a sheet error against the embedded source.
     ///
     /// - Complexity: O(n + e) in source length and error sites.
-    fn diagnostic(&self, error: adam_rs::Error) -> anyhow::Error {
+    fn diagnostic(diagnostics: &SheetDiagnostics, error: adam_rs::Error) -> anyhow::Error {
         anyhow!(format_adam_error(
             &error,
-            &self.parsed,
+            diagnostics,
             SOURCE,
             FILE_NAME,
             &Renderer::plain(),
@@ -266,17 +266,24 @@ impl ViewConstraints {
 
     /// Writes a typed source, returning a formatted sheet error on failure.
     fn write<T: 'static>(&mut self, id: CellId, value: T) -> Result<()> {
+        let diagnostics = self.parsed.diagnostics();
         self.parsed
             .write(id, value)
-            .map_err(|error| self.diagnostic(error))
+            .map_err(|error| Self::diagnostic(&diagnostics, error))
     }
 
-    /// Reads a complete typed value, returning a formatted sheet error on failure.
+    /// Reads a complete typed value, snapshotting diagnostics only when it fails.
+    ///
+    /// - Complexity: O(1) when the read succeeds; O(m + e) on error for metadata
+    ///   snapshot size m and rendered error sites e.
     fn read<T: Copy + 'static>(&self, id: CellId) -> Result<T> {
-        self.parsed
-            .read::<T>(id)
-            .copied()
-            .map_err(|error| self.diagnostic(error))
+        match self.parsed.read::<T>(id).copied() {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let diagnostics = self.parsed.diagnostics();
+                Err(Self::diagnostic(&diagnostics, error))
+            }
+        }
     }
 
     /// Propagates the cached sheet and clears its presentation change flags.
@@ -286,9 +293,10 @@ impl ViewConstraints {
     ///
     /// - Complexity: O(p) time and space in sheet propagation work.
     fn propagate(&mut self) -> Result<()> {
+        let diagnostics = self.parsed.diagnostics();
         self.parsed
             .propagate()
-            .map_err(|error| self.diagnostic(error))?;
+            .map_err(|error| Self::diagnostic(&diagnostics, error))?;
         self.parsed.clear_changed();
         Ok(())
     }

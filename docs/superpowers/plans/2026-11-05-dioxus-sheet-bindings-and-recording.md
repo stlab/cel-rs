@@ -17,8 +17,8 @@ and Dioxus VirtualDom tests, existing JavaScript test runners.
 
 **Spec:** [Approved Dioxus sheet bindings and recording design](../specs/2026-11-05-rust-host-integration-and-recording-design.md).
 
-**Status:** Pending plan review and execution-method selection; no product
-implementation has started.
+**Status:** Approved on 2026-11-05 for subagent-driven execution. Implementation
+is in progress in the issue-272 worktree.
 
 ## Global constraints
 
@@ -733,7 +733,6 @@ as an unset cell. Capture failures on unsupported/private sources remain
 explicit; a host must supply a stable key and exact codec before recording.
 These are implementation boundaries to document and test, not silent fallbacks.
 
-Recommend subagent-driven execution: the numeric-control and host-controller
-lanes can progress independently, and fresh task reviews protect the shared
-error and binding interfaces before the application migrations use them.
-Wait for the user's plan review and execution-method choice before product code.
+The user selected subagent-driven execution. Fresh task reviews protect the
+shared error and binding interfaces before the application migrations use them.
+Execute one implementation task at a time in this worktree.

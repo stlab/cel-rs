@@ -41,11 +41,11 @@ mod tests {
         assert!(!bad.contains('\u{1b}'));
     }
 
-    /// Propagation failure retains the inspector alongside its diagnostic.
+    /// Propagation failure renders only its diagnostic, without a failed model.
     #[test]
-    fn root_retains_controls_on_propagation_failure() {
+    fn root_renders_runtime_failure_without_controls() {
         let html = render("sheet s { cell x: i64 = 0i64; out result := 1i64 / x; }");
-        assert_eq!(html.matches("<sp-textfield").count(), 2);
+        assert!(!html.contains("<sp-textfield"));
         assert!(!html.contains("sp-number-field"));
         assert!(html.contains("adam-live-error"));
         assert!(html.contains("division"));
@@ -78,14 +78,12 @@ struct RootProps {
 ///   components for c cells and g graph hosts, excluding graph serialization.
 #[component]
 fn Root(props: RootProps) -> Element {
-    let (sheet_labels, error) = use_hook(|| {
-        let outcome = build_sheet(&props.source, &props.name, &Renderer::plain());
-        (
-            outcome
-                .sheet_labels
-                .map(|(parsed, labels)| (Signal::new(parsed), Signal::new(labels))),
-            outcome.error,
-        )
+    let (sheet_labels, error) = use_hook(|| match build_sheet(&props.source, &props.name) {
+        Ok(built) => (
+            Some((Signal::new(built.parsed), Signal::new(built.labels))),
+            None,
+        ),
+        Err(error) => (None, Some(error.render(&Renderer::plain()))),
     });
     let source_text = use_memo({
         let source = props.source.clone();

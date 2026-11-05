@@ -719,13 +719,11 @@ impl Sheet {
             .any(|rel| rel.methods.iter().any(|m| m.outputs.contains(&id)))
     }
 
-    /// Attaches a requirement to `cell` and returns its stable ID. `requirement.inputs` may be any cells in
-    /// the sheet, not only `cell` itself. For a `Cell`/`Source` kind `cell`, also
-    /// evaluates `requirement` immediately against current effective values — its
-    /// value is already authoritative. Skipped for an `Out`-kind `cell`: its value
-    /// isn't authoritative until its writer next executes, so attachment always
-    /// succeeds structurally there, deferring to the first post-`propagate()`
-    /// diagnostic to report an initial violation if there is one.
+    /// Attaches a requirement to `cell` and returns its stable ID.
+    ///
+    /// `requirement.inputs` may be any cells in the sheet, not only `cell` itself.
+    /// The predicate runs during propagation, so callers can report false results
+    /// separately from propagation failures.
     ///
     /// # Errors
     ///
@@ -733,16 +731,10 @@ impl Sheet {
     ///   live cell in this sheet.
     /// - `Error::TypeMismatch` — an input's declared type does not match its cell's
     ///   registered type.
-    /// - `Error::InvalidRequirement` — the input signature is invalid, or
-    ///   (`Cell`/`Source` kind only) evaluating
-    ///   `requirement` against the referenced cells' current effective values
-    ///   returns `Ok(false)`.
-    /// - `Error::MethodFailed` — (`Cell`/`Source` kind only) evaluating `requirement`
-    ///   against current values returns `Err`.
+    /// - `Error::InvalidRequirement` — the input signature is invalid.
     ///
-    /// - Complexity: O(k) where k is `requirement`'s input count, plus predicate evaluation
-    ///   for a `Cell`/`Source`, plus O(A) when invalidation releases the final owners of
-    ///   prepared artifacts of total size A.
+    /// - Complexity: O(k) where k is `requirement`'s input count, plus O(A) when
+    ///   invalidation releases the final owners of prepared artifacts of total size A.
     ///
     /// # Examples
     ///
@@ -775,21 +767,6 @@ impl Sheet {
                     found: declared,
                     sites: vec![],
                 });
-            }
-        }
-
-        if self.cells[cell].kind != CellKind::Out {
-            let inputs: Vec<&dyn Any> = requirement
-                .inputs
-                .iter()
-                .map(|&id| self.cells[id].effective())
-                .collect();
-            let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
-                error,
-                sites: vec![],
-            })?;
-            if !holds {
-                return Err(Error::InvalidRequirement);
             }
         }
 
@@ -4704,33 +4681,49 @@ mod tests {
     }
 
     #[test]
-    /// Checks rejection of a currently false requirement on an ordinary cell.
-    fn add_requirement_hard_fails_when_current_value_already_violates_it_on_a_plain_cell() {
+    /// Reports an ordinary cell's false requirement after propagation.
+    fn add_requirement_defers_false_cell_requirement_until_propagation() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(-5_i32);
-        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)));
-        assert!(matches!(result, Err(Error::InvalidRequirement)));
+        let requirement = sheet
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(!sheet.cell_requirements_valid(a));
+        assert_eq!(
+            sheet.violated_requirements(a).collect::<Vec<_>>(),
+            [requirement]
+        );
     }
 
     #[test]
-    /// Checks rejection of a currently false requirement on a source-only cell.
-    fn add_requirement_hard_fails_when_current_value_already_violates_it_on_a_source_cell() {
+    /// Reports a source cell's false requirement after propagation.
+    fn add_requirement_defers_false_source_requirement_until_propagation() {
         let mut sheet = Sheet::new();
         let a = sheet.add_source(-5_i32);
-        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)));
-        assert!(matches!(result, Err(Error::InvalidRequirement)));
+        let requirement = sheet
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(!sheet.cell_requirements_valid(a));
+        assert_eq!(
+            sheet.violated_requirements(a).collect::<Vec<_>>(),
+            [requirement]
+        );
     }
 
     #[test]
-    /// Checks propagation of requirement-evaluation failure during attachment.
-    fn add_requirement_propagates_method_failed_when_evaluation_errors() {
+    /// Propagates requirement-evaluation failure during propagation.
+    fn add_requirement_defers_evaluation_error_until_propagation() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
-        let result = sheet.add_requirement(
-            a,
-            Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("boom"))),
-        );
-        assert!(matches!(result, Err(Error::MethodFailed { .. })));
+        sheet
+            .add_requirement(
+                a,
+                Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("boom"))),
+            )
+            .unwrap();
+        assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
     }
 
     #[test]
@@ -4901,11 +4894,6 @@ mod tests {
     #[test]
     /// Checks violation contributors for a failed requirement on an ordinary cell.
     fn requirement_violation_cells_covers_a_plain_cells_violation_too() {
-        // `add_requirement` hard-fails immediately if a `Cell`/`Source` kind cell's
-        // *current* value already violates it (see
-        // `add_requirement_hard_fails_when_current_value_already_violates_it_on_a_plain_cell`),
-        // so the requirement is attached while it still holds (200 > 100), then a
-        // later `write` — not the initial value — is what drives it into violation.
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(200_i32);
         sheet

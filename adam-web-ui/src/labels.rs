@@ -5,6 +5,7 @@
 //! [`format_adam_error`] formats an [`adam_rs::Error`] as a rustc-style diagnostic when
 //! possible.
 
+use adam_lang::SheetDiagnostics;
 use adam_lang::type_registry::TypeShape;
 use adam_rs::{CellId, Error, Sheet};
 pub use annotate_snippets::Renderer;
@@ -361,7 +362,7 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
 
 /// Formats an [`Error`] as a rustc-style diagnostic when possible.
 ///
-/// Resolves native sites through `parsed`, groups labels by owning source identity
+/// Resolves native sites through `diagnostics`, groups labels by owning source identity
 /// and renders definition files followed by invocation context. Inner CEL spans use
 /// their definition text, never the caller's text. Source-free labels remain visible.
 /// `file_name` overrides only the anonymous `AdamParser` input's display name.
@@ -373,20 +374,20 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
 /// ```
 /// let parsed = adam_lang::ParsedSheet::new();
 /// let text = adam_web_ui::format_adam_error(&adam_rs::Error::InvalidId,
-///     &parsed, "", "input.adm2", &adam_web_ui::Renderer::plain());
+///     &parsed.diagnostics(), "", "input.adm2", &adam_web_ui::Renderer::plain());
 /// assert_eq!(text, "invalid cell or relationship id");
 /// ```
 pub fn format_adam_error(
     e: &Error,
-    parsed: &adam_lang::ParsedSheet,
+    diagnostics: &SheetDiagnostics,
     source: &str,
     file_name: &str,
     renderer: &Renderer,
 ) -> String {
-    let located = parsed.locate_error(e);
+    let located = diagnostics.locate_error(e);
     if located.is_empty()
         && e.sites().is_empty()
-        && parsed.anonymous_source().is_some()
+        && diagnostics.anonymous_source().is_some()
         && let Error::MethodFailed { error, .. } = e
         && error.downcast_ref::<SpanContext>().is_some()
     {
@@ -395,7 +396,24 @@ pub fn format_adam_error(
     format_source_labels(
         &runtime_message(e),
         &located,
-        parsed.anonymous_source().map(|source| (source, file_name)),
+        diagnostics
+            .anonymous_source()
+            .map(|source| (source, file_name)),
+        renderer,
+    )
+}
+
+/// Renders one false requirement with its owning source labels.
+///
+/// - Complexity: O(n + l) source and label bytes, excluding snippet rendering.
+pub(crate) fn format_validation_issue(
+    issue: &crate::build::ValidationIssue,
+    renderer: &Renderer,
+) -> String {
+    format_source_labels(
+        &format!("{}: {}", issue.key, issue.message),
+        &issue.labels,
+        None,
         renderer,
     )
 }
@@ -677,10 +695,11 @@ relationship divide(a: bad, b: second);
             .instantiate_root(&"app".parse().unwrap(), "app")
             .unwrap();
         drop(compiled);
+        let diagnostics = parsed.diagnostics();
         let error = parsed.propagate().unwrap_err();
         let rendered = format_adam_error(
             &error,
-            &parsed,
+            &diagnostics,
             "WRONG CALLER TEXT",
             "wrong.adm2",
             &Renderer::plain(),
@@ -733,11 +752,12 @@ relationship choose(divisor: second);
         drop(compiled);
         parsed.propagate().unwrap();
         let second = parsed.cell_names["second"].0;
+        let diagnostics = parsed.diagnostics();
         parsed.write(second, 0i32).unwrap();
         let error = parsed.propagate().unwrap_err();
         let rendered = format_adam_error(
             &error,
-            &parsed,
+            &diagnostics,
             "WRONG TEXT",
             "wrong.adm2",
             &Renderer::plain(),
@@ -772,9 +792,10 @@ relationship choose(divisor: second);
     /// Errors without source sites fall back to their display message.
     fn format_adam_error_invalid_id_falls_back_to_display() {
         let parsed = parse("sheet s { cell a: i32 = 0; }");
+        let diagnostics = parsed.diagnostics();
         let msg = format_adam_error(
             &Error::InvalidId,
-            &parsed,
+            &diagnostics,
             "sheet s { cell a: i32 = 0; }",
             "test.adm2",
             &Renderer::styled(),
@@ -795,8 +816,9 @@ relationship choose(divisor: second);
             error: inner,
             sites: vec![],
         };
+        let diagnostics = parsed.diagnostics();
 
-        let msg = format_adam_error(&err, &parsed, source, "test.adm2", &Renderer::styled());
+        let msg = format_adam_error(&err, &diagnostics, source, "test.adm2", &Renderer::styled());
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(msg.contains(source), "{msg}");
@@ -815,8 +837,9 @@ relationship choose(divisor: second);
             error: inner,
             sites: vec![],
         };
+        let diagnostics = parsed.diagnostics();
 
-        let msg = format_adam_error(&err, &parsed, source, "test.adm2", &Renderer::plain());
+        let msg = format_adam_error(&err, &diagnostics, source, "test.adm2", &Renderer::plain());
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(
@@ -840,8 +863,9 @@ relationship choose(divisor: second);
             error: anyhow::anyhow!("boom"),
             sites: vec![ErrorSite::Method(rel_id, idx)],
         };
+        let diagnostics = parsed.diagnostics();
 
-        let msg = format_adam_error(&err, &parsed, source, "test.adm2", &Renderer::plain());
+        let msg = format_adam_error(&err, &diagnostics, source, "test.adm2", &Renderer::plain());
 
         assert!(msg.contains("boom"), "{msg}");
         assert!(msg.contains("a := 1i32;"), "{msg}");
@@ -855,11 +879,30 @@ relationship choose(divisor: second);
         let src = "sheet s { cell x: i32 = 0; cell y: i32 = 0; relationship { x := y + 1i32; } relationship { y := x + 1i32; } }";
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let mut parsed = parser.parse_str(src).unwrap();
+        let diagnostics = parsed.diagnostics();
         let err = parsed.propagate().unwrap_err();
-        let msg = format_adam_error(&err, &parsed, src, "t.adm2", &Renderer::plain());
+        let msg = format_adam_error(&err, &diagnostics, src, "t.adm2", &Renderer::plain());
         assert!(msg.contains("cycle"), "{msg}");
         // both relationship bindings referenced
         assert!(msg.contains("x :=") && msg.contains("y :="), "{msg}");
+    }
+
+    /// Renders the same diagnostic after dropping its failed model.
+    #[test]
+    fn format_adam_error_survives_dropping_the_model() {
+        let source = "sheet s { cell x: i32 = 0; cell y: i32; relationship { y := 10i32 / x; } }";
+        let mut parsed = parse(source);
+        let diagnostics = parsed.diagnostics();
+        let error = parsed.propagate().unwrap_err();
+        let render_before_model_drop =
+            format_adam_error(&error, &diagnostics, source, "s.adm2", &Renderer::plain());
+
+        drop(parsed);
+
+        let render_after_model_drop =
+            format_adam_error(&error, &diagnostics, source, "s.adm2", &Renderer::plain());
+        assert_eq!(render_after_model_drop, render_before_model_drop);
+        assert!(render_after_model_drop.contains("division by zero"));
     }
 
     #[test]

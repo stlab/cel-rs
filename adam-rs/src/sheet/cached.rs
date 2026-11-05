@@ -1574,8 +1574,11 @@ mod tests {
         {
             let (mut sheet, a, _, _) = identity_sheet();
             assert!(matches!(
-                sheet.add_requirement(a, Requirement::from_fn_1(a, |_: &i32| Ok(false))),
-                Err(Error::InvalidRequirement)
+                sheet.add_requirement(
+                    a,
+                    Requirement::from_fn_1(CellId::default(), |_: &i32| Ok(false))
+                ),
+                Err(Error::InvalidId)
             ));
         }
     }

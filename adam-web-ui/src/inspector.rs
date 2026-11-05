@@ -345,14 +345,11 @@ fn clamped_away(typed: &str, actual: &str) -> bool {
     }
 }
 
-/// The source context needed to format an evaluation error into a rustc-style diagnostic:
-/// the current source text and name, plus the parsed sheet whose span tables resolve an
-/// `adam_rs::Error`'s sites back to their declaration locations.
+/// The source context needed to format a failure from pre-mutation diagnostics.
 #[derive(Clone, Copy)]
 struct ErrorContext {
     source_text: Memo<String>,
     source_name: Memo<String>,
-    parsed: Signal<ParsedSheet>,
 }
 
 /// Parses `val` for `id` via its `Labels` metadata, writes it to `parsed`, and propagates the
@@ -381,6 +378,7 @@ fn write_and_propagate(
         return;
     }
     let mut parsed_w = parsed.write();
+    let diagnostics = parsed_w.diagnostics();
     let write_result = (meta.write_str)(&mut parsed_w, val);
     drop(labels_r);
     let propagate_result = match write_result {
@@ -421,15 +419,11 @@ fn write_and_propagate(
             }
         }
         Err(e) => {
-            // Drop the write guard before reading `errors.parsed` (the same signal) again
-            // below — `format_adam_error` needs `&ParsedSheet` to locate `e`'s sites, and
-            // the write guard and a fresh read both borrowing the same signal at once would
-            // panic.
             drop(parsed_w);
             has_error.set(true);
             crate::diagnostics::report_error(&format_adam_error(
                 &e,
-                &errors.parsed.read(),
+                &diagnostics,
                 &errors.source_text.read(),
                 &errors.source_name.read(),
                 &Renderer::styled(),
@@ -573,7 +567,6 @@ fn CellRow(
     let errors = ErrorContext {
         source_text,
         source_name,
-        parsed,
     };
 
     let flags =
@@ -981,7 +974,6 @@ mod tests {
                     ErrorContext {
                         source_text,
                         source_name,
-                        parsed,
                     },
                 );
                 assert!(
@@ -1163,7 +1155,6 @@ mod tests {
                 ErrorContext {
                     source_text,
                     source_name,
-                    parsed,
                 },
             );
             assert!(*has_error.read());
@@ -1180,7 +1171,6 @@ mod tests {
                 ErrorContext {
                     source_text: fresh_text,
                     source_name: fresh_name,
-                    parsed,
                 },
             );
             assert!(*has_error.read());
@@ -1706,11 +1696,10 @@ mod tests {
         ///
         /// - Complexity: source building, draft parsing, propagation and value formatting.
         fn host((source, value, result): (String, String, Outcome)) -> Element {
-            let outcome = crate::build_sheet(&source, "test.adm2", &Renderer::plain());
-            let (sheet, labels) = outcome.sheet_labels.unwrap();
-            let id = sheet.cell_names["x"].0;
-            let parsed = use_signal(|| sheet);
-            let labels = use_signal(|| labels);
+            let built = crate::build_sheet(&source, "test.adm2").unwrap();
+            let id = built.parsed.cell_names["x"].0;
+            let parsed = use_signal(|| built.parsed);
+            let labels = use_signal(|| built.labels);
             let flag = use_signal(|| false);
             let source_text = use_memo(move || source.clone());
             let source_name = use_memo(|| "test.adm2".to_string());
@@ -1723,7 +1712,6 @@ mod tests {
                 ErrorContext {
                     source_text,
                     source_name,
-                    parsed,
                 },
             );
             let display = (labels.read().cells[&id].display)(&parsed.read());
@@ -1829,9 +1817,8 @@ mod tests {
     #[test]
     fn image_resize_relevance_survives_strength_changes() {
         let source = include_str!("../../begin/examples/image_resize.adm2");
-        let outcome = crate::build_sheet(source, "image_resize.adm2", &Renderer::plain());
-        assert!(outcome.error.is_none(), "{:?}", outcome.error);
-        let (mut parsed, _) = outcome.sheet_labels.unwrap();
+        let built = crate::build_sheet(source, "image_resize.adm2").unwrap();
+        let mut parsed = built.parsed;
         for width in [1600i32, 1920i32] {
             let id = parsed.cell_names["width_pixels"].0;
             parsed.write(id, width).unwrap();
@@ -1858,17 +1845,9 @@ mod tests {
     fn same_source_inspectors_have_distinct_control_ids() {
         /// Renders the public inspector with a constant diagnostic name.
         fn inspector_host() -> Element {
-            let mut pair = use_signal(|| {
-                crate::build_sheet("sheet s { cell x: i64; }", "same.adm2", &Renderer::plain())
-                    .sheet_labels
-            });
-            let parsed = use_signal(|| pair.write().take().unwrap().0);
-            let labels = use_signal(|| {
-                crate::build_sheet("sheet s { cell x: i64; }", "same.adm2", &Renderer::plain())
-                    .sheet_labels
-                    .unwrap()
-                    .1
-            });
+            let built = crate::build_sheet("sheet s { cell x: i64; }", "same.adm2").unwrap();
+            let parsed = use_signal(|| built.parsed);
+            let labels = use_signal(|| built.labels);
             let source_text = use_memo(|| "sheet s { cell x: i64; }".to_string());
             let source_name = use_memo(|| "same.adm2".to_string());
             rsx! { SheetInspector { parsed, labels, source_text, source_name } }

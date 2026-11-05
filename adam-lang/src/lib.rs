@@ -289,6 +289,7 @@ mod error_labels;
 mod fmt;
 pub mod module;
 mod parser;
+mod sheet_diagnostics;
 pub mod source_map;
 mod token_cursor;
 mod trivia;
@@ -308,6 +309,7 @@ pub use module::{
     CompiledModules, ModuleCompiler, ModulePath, ModuleSet, PreparedRoot, RootCell, check_module,
 };
 pub use parser::{AdamParser, ParsedSheet};
+pub use sheet_diagnostics::SheetDiagnostics;
 pub use source_map::{
     ModuleCause, ModuleDiagnostic, SourceId, SourceLabel, SourceLocation, SourceMap,
 };

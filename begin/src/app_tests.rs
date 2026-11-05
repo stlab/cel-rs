@@ -14,26 +14,23 @@ type Observer = Rc<RefCell<Option<(Signal<ActiveSource>, Signal<ActiveSource>)>>
 #[test]
 fn authored_examples_preserve_observable_contracts() {
     for (name, source) in crate::example_source::EXAMPLES_WITH_SOURCE {
-        let outcome = build_sheet(source, name, &Renderer::plain());
-        let (mut parsed, labels) = outcome
-            .sheet_labels
-            .unwrap_or_else(|| panic!("{name} did not parse"));
-        match *name {
-            "cycle" => {
-                assert!(outcome.error.is_some());
-                assert!(matches!(
-                    parsed.propagate(),
-                    Err(adam_rs::Error::Cycle { .. })
-                ));
+        let built = match build_sheet(source, name) {
+            Err(adam_web_ui::BuildError::Runtime(failure)) if *name == "cycle" => {
+                assert!(matches!(failure.error, adam_rs::Error::Cycle { .. }));
+                continue;
             }
+            Ok(built) => built,
+            Err(error) => panic!("{name} failed unexpectedly: {error:?}"),
+        };
+        let mut parsed = built.parsed;
+        let labels = built.labels;
+        match *name {
             "diamond" => {
-                assert!(outcome.error.is_none());
                 assert_eq!(*parsed.read::<f64>(parsed.cell_names["c"].0).unwrap(), 2.0);
                 assert_eq!(*parsed.read::<f64>(parsed.cell_names["d"].0).unwrap(), 3.0);
                 assert_eq!(*parsed.read::<f64>(parsed.cell_names["b"].0).unwrap(), 1.5);
             }
             "diamond-wing" => {
-                assert!(outcome.error.is_none());
                 assert_eq!(*parsed.read::<f64>(parsed.cell_names["b"].0).unwrap(), 3.0);
                 assert_eq!(
                     *parsed.read::<f64>(parsed.cell_names["c"].0).unwrap(),
@@ -41,21 +38,18 @@ fn authored_examples_preserve_observable_contracts() {
                 );
             }
             "inequality" => {
-                assert!(outcome.error.is_none());
                 let a = *parsed.read::<i32>(parsed.cell_names["a"].0).unwrap();
                 let b = *parsed.read::<i32>(parsed.cell_names["b"].0).unwrap();
                 let c = *parsed.read::<i32>(parsed.cell_names["c"].0).unwrap();
                 assert!(a <= b && b <= c && c <= 100);
             }
             "out-cell" => {
-                assert!(outcome.error.is_none());
                 assert_eq!(
                     (labels.cells[&parsed.output_names["result"]].display)(&parsed),
                     "(0.0, 0.0)"
                 );
             }
             "image_resize" => {
-                assert!(outcome.error.is_none());
                 assert_eq!(
                     *parsed
                         .read::<i64>(parsed.output_names["byte_count"])
@@ -79,7 +73,6 @@ fn authored_examples_preserve_observable_contracts() {
                 );
             }
             "toy_example" => {
-                assert!(outcome.error.is_none());
                 let value = |name: &str| *parsed.read::<f64>(parsed.cell_names[name].0).unwrap();
                 assert_eq!(value("c"), value("a") * value("b"));
                 assert_eq!(value("f"), value("d") * value("e"));
@@ -110,7 +103,8 @@ fn file_replies_require_current_source_and_request() {
 /// Mounts a picker or platform-specific open controls over a real parsed sheet.
 fn host(picker: bool) -> Element {
     let (parsed, labels, active_source, displayed_source) = use_hook(|| {
-        let (parsed, labels, mut source) = load_example("diamond");
+        let (sheet, mut source, _) = load_example("diamond");
+        let (parsed, labels) = sheet.expect("diamond builds successfully");
         source.origin = SourceOrigin::Opened("diamond".into());
         (
             Signal::new(parsed),

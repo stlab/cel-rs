@@ -253,18 +253,23 @@ pub fn spawn_examples_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adam_web_ui::{Renderer, build_sheet};
+    use adam_web_ui::{BuildError, build_sheet};
 
     #[test]
     /// Every shipped example satisfies the current language parser.
     fn every_bundled_example_parses_successfully() {
         for &(name, source) in EXAMPLES_WITH_SOURCE {
-            let outcome = build_sheet(source, &format!("{name}.adm2"), &Renderer::styled());
-            assert!(
-                outcome.sheet_labels.is_some(),
-                "{name} failed to build: {:?}",
-                outcome.error
-            );
+            match build_sheet(source, &format!("{name}.adm2")) {
+                Ok(_) => assert_ne!(name, "cycle", "the cycle example must fail propagation"),
+                Err(BuildError::Runtime(failure)) if name == "cycle" => {
+                    assert!(
+                        matches!(failure.error, adam_rs::Error::Cycle { .. }),
+                        "{name} returned the wrong runtime error: {:?}",
+                        failure.error
+                    );
+                }
+                Err(error) => panic!("{name} failed unexpectedly: {error:?}"),
+            }
         }
     }
 

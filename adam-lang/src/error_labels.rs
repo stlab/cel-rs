@@ -5,7 +5,8 @@
 use adam_rs::{CellId, Error, ErrorSite};
 use std::collections::HashMap;
 
-use crate::{AuthoredRole, ParsedSheet, SourceLabel, composition::OccurrenceOrigin};
+use crate::sheet_diagnostics::ErrorMetadata;
+use crate::{AuthoredRole, SourceLabel, composition::OccurrenceOrigin};
 
 /// Resolves native error identities to owning definition and actual invocation labels.
 ///
@@ -13,15 +14,15 @@ use crate::{AuthoredRole, ParsedSheet, SourceLabel, composition::OccurrenceOrigi
 /// - Complexity: O(o + m + c + k + q × a + l²) time and O(o + m + c + k + l) space
 ///   for occurrences o, methods m, public cells c, conditionals k, visited occurrence/ancestor
 ///   records q, local authored items a and returned labels l.
-pub(crate) fn locate_error(parsed: &ParsedSheet, error: &Error) -> Vec<SourceLabel> {
-    let occurrences: HashMap<_, _> = parsed
-        .instance_origins
+pub(crate) fn locate_error(metadata: &impl ErrorMetadata, error: &Error) -> Vec<SourceLabel> {
+    let occurrences: HashMap<_, _> = metadata
+        .instance_origins()
         .iter()
         .flat_map(|instance| &instance.occurrences)
         .map(|occurrence| (&occurrence.id, occurrence))
         .collect();
-    let relationships: HashMap<_, _> = parsed
-        .method_origins
+    let relationships: HashMap<_, _> = metadata
+        .method_origins()
         .iter()
         .map(|((relationship, _), origin)| (*relationship, origin))
         .collect();
@@ -35,8 +36,8 @@ pub(crate) fn locate_error(parsed: &ParsedSheet, error: &Error) -> Vec<SourceLab
                 .map(move |(index, id)| (*id, (*occurrence, index)))
         })
         .collect();
-    let names: HashMap<_, _> = parsed
-        .cell_names
+    let names: HashMap<_, _> = metadata
+        .cell_names()
         .iter()
         .map(|(name, (id, _))| (*id, name))
         .collect();
@@ -76,7 +77,7 @@ pub(crate) fn locate_error(parsed: &ParsedSheet, error: &Error) -> Vec<SourceLab
                 }
             }
             ErrorSite::Method(relationship, method) => {
-                if let Some(origin) = parsed.method_origins.get(&(*relationship, *method))
+                if let Some(origin) = metadata.method_origins().get(&(*relationship, *method))
                     && let Some(occurrence) = occurrences.get(&origin.occurrence)
                 {
                     let item = occurrence.authored_items().iter().find(|item| {
@@ -124,7 +125,7 @@ pub(crate) fn locate_error(parsed: &ParsedSheet, error: &Error) -> Vec<SourceLab
                 }
             }
             ErrorSite::Cell(cell) => {
-                if let Some(origins) = parsed.cell_origins.get(cell) {
+                if let Some(origins) = metadata.cell_origins().get(cell) {
                     for origin in origins {
                         let mut label = origin.label.clone();
                         label.label = text.clone();
