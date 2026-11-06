@@ -106,7 +106,8 @@ pub(super) fn capture<'a>(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut keys = HashMap::with_capacity(built.keys.len());
-    // Choose the first stable name when a host supplies aliases for one cell.
+    // Iterate the authoritative IndexMap in registration order; the reverse
+    // HashMap serves only lookups and never determines which alias wins.
     for (key, &id) in &built.keys {
         keys.entry(id).or_insert(key.as_str());
     }

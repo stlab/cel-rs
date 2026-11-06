@@ -122,6 +122,29 @@ fn recording_self_reference_and_exact_float() {
     );
 }
 
+/// Selects the first registered alias independently of lexical order.
+#[test]
+fn recording_alias_uses_first_registered_key() {
+    for aliases in [["z-first", "a-second"], ["a-second", "z-first"]] {
+        let factory: ModelFactory = Rc::new(move || {
+            let mut built = build_sheet("sheet s {}", "alias.adm2")?;
+            let id = built.parsed.add_source(7_i32);
+            built.labels.add_cell::<i32>(id, "value");
+            for alias in aliases {
+                built.keys.insert(alias.into(), id);
+            }
+            built.parsed.propagate().unwrap();
+            Ok(built)
+        });
+        let owner = SheetOwner::new(factory, "alias/v1".into()).unwrap();
+        assert_eq!(owner.capture(&[]).unwrap().values, [edit(aliases[0], "7")]);
+        assert_eq!(
+            owner.capture(&[aliases[1]]).unwrap().values,
+            [edit(aliases[0], "7")]
+        );
+    }
+}
+
 /// Preserves wide integers, custom scalar codecs, private host keys, and aliases.
 #[test]
 fn recording_private_custom_and_wide_values_round_trip() {
