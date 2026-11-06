@@ -348,6 +348,136 @@ fn omitted_labels_use_binding_keys() {
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains(">text</label>"), "{html}");
     assert!(html.contains("aria-label=\"flag\""), "{html}");
+    assert!(html.contains(">a</label>"), "{html}");
+    assert!(html.contains(">ranged</label>"), "{html}");
+}
+
+/// Inspector publication retains invalid contributors, forced values and output relevance.
+#[tokio::test]
+async fn inspector_preserves_output_and_invalid_contributor_contracts() {
+    use crate::components::tests::{NodeDocument, settle};
+    use dioxus::document::Document;
+
+    /// Mounts a forced filter violation feeding an output without requirements.
+    fn app() -> Element {
+        let observed: Rc<RefCell<Observed>> = consume_context();
+        let sheet = use_sheet(
+            Rc::new(|| {
+                crate::build_sheet(
+                    "sheet flags {
+                        cell driver: i32 = -3;
+                        cell bounded: i32 = 0 filter 0..=10;
+                        cell unused: i32 = 1;
+                        relationship { bounded := driver; }
+                        out result := bounded;
+                    }",
+                    "flags.adm2",
+                )
+            }),
+            "flags/v1".into(),
+            EventHandler::new(|_| {}),
+        )
+        .unwrap();
+        observed.borrow_mut().sheet = Some(sheet);
+        rsx! { SheetInspector { sheet } }
+    }
+
+    /// Returns an actual rendered input identified by its accessible label.
+    ///
+    /// - Complexity: O(rendered HTML + label bytes) time and O(label + ID bytes) space.
+    fn input_for<'a>(html: &'a str, label: &str) -> &'a str {
+        let marker = format!(">{label}</label>");
+        let before = html.split_once(&marker).unwrap().0;
+        let id = before
+            .rsplit_once("for=\"")
+            .unwrap()
+            .1
+            .split('"')
+            .next()
+            .unwrap();
+        let attribute = format!("id=\"{id}\"");
+        html.split("<input")
+            .skip(1)
+            .map(|part| part.split('>').next().unwrap())
+            .find(|tag| tag.contains(&attribute))
+            .unwrap()
+    }
+
+    let observed = Rc::new(RefCell::new(Observed::default()));
+    let mut dom = VirtualDom::new(app);
+    dom.provide_root_context(observed.clone());
+    dom.provide_root_context(Rc::new(NodeDocument::default()) as Rc<dyn Document>);
+    dom.rebuild_in_place();
+    settle(&mut dom).await;
+    let sheet = observed.borrow().sheet.unwrap();
+    let driver = sheet.cell("driver").view().unwrap();
+    assert!(driver.flags.relevant && driver.flags.invalid);
+    assert!(!driver.flags.disabled && !driver.flags.forced);
+    let bounded = sheet.cell("bounded").view().unwrap();
+    assert!(bounded.flags.forced && bounded.flags.disabled && bounded.flags.invalid);
+    assert!(!bounded.flags.readonly);
+    let result = sheet.cell("result").view().unwrap();
+    assert!(result.flags.readonly && result.flags.forced);
+    assert!(!sheet.cell("unused").view().unwrap().flags.relevant);
+    let html = dioxus_ssr::render(&dom);
+    assert!(input_for(&html, "driver").contains("aria-invalid=\"true\""));
+    assert!(!input_for(&html, "driver").contains("disabled"));
+    assert!(input_for(&html, "bounded").contains("disabled"));
+    assert!(input_for(&html, "bounded").contains("aria-invalid=\"true\""));
+    assert!(input_for(&html, "result").contains("readonly"));
+    assert!(!input_for(&html, "result").contains("disabled"));
+    assert!(input_for(&html, "unused").contains("disabled"));
+    sheet.cell("driver").submit("5".into());
+    settle(&mut dom).await;
+    assert!(!sheet.cell("driver").view().unwrap().flags.invalid);
+    assert!(!sheet.cell("bounded").view().unwrap().flags.invalid);
+    let html = dioxus_ssr::render(&dom);
+    assert!(input_for(&html, "driver").contains("aria-invalid=\"false\""));
+    assert!(input_for(&html, "bounded").contains("aria-invalid=\"false\""));
+}
+
+/// Real conditional inputs remain relevant after strength-changing accepted edits.
+#[test]
+fn conditional_relevance_survives_binding_edits() {
+    /// Mounts the complete image-resize fixture through the reactive owner.
+    fn app() -> Element {
+        let observed: Rc<RefCell<Observed>> = consume_context();
+        let sheet = use_sheet(
+            Rc::new(|| {
+                crate::build_sheet(
+                    include_str!("../../begin/examples/image_resize.adm2"),
+                    "image_resize.adm2",
+                )
+            }),
+            "image/v1".into(),
+            EventHandler::new(|_| {}),
+        )
+        .unwrap();
+        observed.borrow_mut().sheet = Some(sheet);
+        rsx! { SheetInspector { sheet } }
+    }
+    let observed = Rc::new(RefCell::new(Observed::default()));
+    let mut dom = VirtualDom::new(app);
+    dom.provide_root_context(observed.clone());
+    dom.rebuild_in_place();
+    let sheet = observed.borrow().sheet.unwrap();
+    for width in ["1600", "1920"] {
+        sheet.cell("width_pixels").submit(width.into());
+        dom.render_immediate_to_vec();
+        for key in [
+            "width_pixels",
+            "width_pixels_percent",
+            "width_inches",
+            "resolution",
+            "original_width_pixels",
+            "resample",
+            "constrain",
+            "auto_quality",
+            "screen_lpi",
+        ] {
+            assert!(sheet.cell(key).view().unwrap().flags.relevant, "{key}");
+        }
+    }
 }
 
 /// Replacing a model remounts standalone numeric controls, not just Inspector rows.

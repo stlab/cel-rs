@@ -9,6 +9,9 @@ type Slot = Rc<RefCell<Option<SheetHandle>>>;
 /// Observes typed borrow failures at the host's public event boundary.
 type Errors = Rc<RefCell<Vec<BindingError>>>;
 
+/// Records each host outcome together with callback-time model availability.
+type Outcomes = Rc<RefCell<Vec<(HostOutcome, Result<(), BindingError>)>>>;
+
 /// Builds an editable value and a validation boundary.
 fn factory() -> ModelFactory {
     Rc::new(|| {
@@ -157,23 +160,34 @@ fn retired_binding_cannot_write_replacement() {
 /// Rejected and fatal candidates leave accepted history available without failed-model reads.
 #[test]
 fn history_survives_rejection_and_fatal_retirement() {
-    /// Mounts an arithmetic failure boundary with counted factory invocations.
+    /// Mounts an arithmetic failure boundary and records host-visible classifications.
     fn app() -> Element {
         let slot: Slot = consume_context();
+        let outcomes: Outcomes = consume_context();
         let factory: ModelFactory = Rc::new(|| {
             crate::build_sheet(
                 "sheet s { cell x: i32 = 1; out r := 10 / x; }",
                 "fatal.adm2",
             )
         });
-        let sheet = use_sheet(factory, "fatal/v1".into(), EventHandler::new(|_| {})).unwrap();
+        let sheet = use_sheet(
+            factory,
+            "fatal/v1".into(),
+            EventHandler::new(move |event: SheetEvent| {
+                let available = event.sheet.inspect(|_, _| ());
+                outcomes.borrow_mut().push((event.outcome, available));
+            }),
+        )
+        .unwrap();
         *slot.borrow_mut() = Some(sheet);
         rsx! {}
     }
 
     let slot: Slot = Rc::new(RefCell::new(None));
+    let outcomes: Outcomes = Rc::new(RefCell::new(Vec::new()));
     let mut dom = VirtualDom::new(app);
     dom.provide_root_context(slot.clone());
+    dom.provide_root_context(outcomes.clone());
     dom.rebuild_in_place();
     let sheet = slot.borrow().unwrap();
     sheet.cell("x").submit("2".into());
@@ -205,6 +219,84 @@ fn history_survives_rejection_and_fatal_retirement() {
             .is_err()
     );
     assert!(!called.get(), "a fatal owner must not rebuild");
+    let outcomes = outcomes.borrow();
+    assert!(matches!(outcomes[0], (HostOutcome::Accepted, Ok(()))));
+    assert!(matches!(
+        outcomes[1],
+        (
+            HostOutcome::Rejected(HostRejection::Input(_)),
+            Err(BindingError::Unavailable)
+        )
+    ));
+    assert!(matches!(
+        outcomes[2],
+        (HostOutcome::Fatal(_), Err(BindingError::RetiredInstance))
+    ));
+}
+
+/// Recording failure preserves accepted callback reads and reactive publication.
+#[test]
+fn recording_failure_callback_observes_accepted_publication() {
+    /// Mounts an exact capture codec whose recording-only invocation fails.
+    fn app() -> Element {
+        let slot: Slot = consume_context();
+        let outcomes: Outcomes = consume_context();
+        let captures = Rc::new(std::cell::Cell::new(0));
+        let factory: ModelFactory = Rc::new(move || {
+            let mut built = factory()()?;
+            let id = built.keys["x"];
+            let captures = captures.clone();
+            built.labels.cells.get_mut(&id).unwrap().capture = Box::new(move |sheet| {
+                captures.set(captures.get() + 1);
+                if captures.get() == 4 {
+                    Err(crate::input::InputError::UnsupportedEditor(
+                        "capture failed".into(),
+                    ))
+                } else {
+                    Ok(sheet.read::<i32>(id).unwrap().to_string())
+                }
+            });
+            Ok(built)
+        });
+        let sheet = use_sheet(
+            factory,
+            "s/v1".into(),
+            EventHandler::new(move |event: SheetEvent| {
+                let available = event.sheet.inspect(|_, _| ());
+                outcomes.borrow_mut().push((event.outcome, available));
+            }),
+        )
+        .unwrap();
+        *slot.borrow_mut() = Some(sheet);
+        let view = use_memo(move || sheet.cell("x").view().unwrap().text.clone());
+        rsx! { p { "{view}" } }
+    }
+
+    let slot: Slot = Rc::new(RefCell::new(None));
+    let outcomes: Outcomes = Rc::new(RefCell::new(Vec::new()));
+    let mut dom = VirtualDom::new(app);
+    dom.provide_root_context(slot.clone());
+    dom.provide_root_context(outcomes.clone());
+    dom.rebuild_in_place();
+    let sheet = slot.borrow().unwrap();
+    sheet.start_recording(&["result"]).unwrap();
+    sheet.cell("x").submit("5".into());
+    dom.render_immediate_to_vec();
+    assert!(matches!(
+        outcomes.borrow()[0],
+        (HostOutcome::RecordingFailed(_), Ok(()))
+    ));
+    assert_eq!(sheet.cell("x").view().unwrap().text, "5");
+    assert_eq!(
+        sheet.with_accepted_state(|s| s.transactions.len()).unwrap(),
+        1
+    );
+    assert!(dioxus_ssr::render(&dom).contains(">5</p>"));
+    sheet.cell("x").submit("6".into());
+    assert!(matches!(
+        outcomes.borrow()[1],
+        (HostOutcome::Accepted, Ok(()))
+    ));
 }
 
 /// Recorder controls share immutable results, preserve aspirations, and replay fresh owners.
