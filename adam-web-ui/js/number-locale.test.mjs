@@ -15,12 +15,22 @@ test("resolves symbols and formats en-US/de-DE/fr-FR/ar-EG", () => {
         const symbols = numberLocale(locale);
         assert.equal(symbols.decimal, decimal);
         assert.equal(symbols.group, group);
+        assert.equal(symbols.minus, "-");
+        assert.equal(symbols.plus, "+");
         assert.equal(symbols.digits.length, 10);
         assert.equal(formatNumber("1234.5", false, locale), formatted);
     }
     assert.equal(numberLocale("ar-EG").digits[9], "٩");
     assert.ok(numberLocale("ar-EG").ignorable.includes("\u061c"));
     assert.equal(numberLocale("hi-IN").secondary_group, 2);
+});
+
+test("resolves non-ASCII Swedish minus and formats both signed values", () => {
+    const symbols = numberLocale("sv-SE");
+    assert.equal(symbols.minus, "−");
+    assert.equal(symbols.plus, "+");
+    assert.equal(formatNumber("-12.5", false, "sv-SE"), "−12,5");
+    assert.equal(formatNumber("12.5", false, "sv-SE", { signDisplay: "always" }), "+12,5");
 });
 
 test("formats full-width integers without Number coercion", () => {

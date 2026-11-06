@@ -78,6 +78,7 @@ fn eval_scripts_encode_untrusted_strings_and_preserve_rust_event_stamps() {
 fn locale(name: &str) -> NumberLocale {
     let (decimal, group, digits) = match name {
         "de-DE" => (",", ".", "0123456789"),
+        "sv-SE" => (",", "\u{a0}", "0123456789"),
         "fr-FR" => (",", "\u{202f}", "0123456789"),
         "ar-EG" => ("\u{66b}", "\u{66c}", "٠١٢٣٤٥٦٧٨٩"),
         _ => (".", ",", "0123456789"),
@@ -87,12 +88,34 @@ fn locale(name: &str) -> NumberLocale {
         digits: std::array::from_fn(|i| digits.chars().nth(i).unwrap().to_string()),
         decimal: decimal.into(),
         group: group.into(),
-        minus: "-".into(),
+        minus: if name == "sv-SE" { "−" } else { "-" }.into(),
         plus: "+".into(),
         ignorable: vec!["\u{61c}".into(), "\u{200e}".into(), "\u{200f}".into()],
         primary_group: 3,
         secondary_group: 3,
     }
+}
+
+/// Catches localized signs being rejected or losing their numeric direction.
+#[test]
+fn localized_signs_preserve_positive_and_negative_values() {
+    let mut swedish = locale("sv-SE");
+    for (raw, expected) in [("−12,5", "-12.5"), ("+12,5", "+12.5")] {
+        assert_eq!(
+            normalize_draft(raw, &swedish, NumberKind::F64),
+            Ok(NormalizedDraft::Complete(expected.into()))
+        );
+    }
+    // A caller-supplied non-ASCII plus token exercises the same locale contract.
+    swedish.plus = "＋".into();
+    assert_eq!(
+        normalize_draft("＋42", &swedish, NumberKind::Signed(32)),
+        Ok(NormalizedDraft::Complete("+42".into()))
+    );
+    assert_eq!(
+        normalize_draft("−42", &swedish, NumberKind::Signed(32)),
+        Ok(NormalizedDraft::Complete("-42".into()))
+    );
 }
 
 /// Rejects normalization that drops precision, malformed grouping, or incomplete prefixes.
