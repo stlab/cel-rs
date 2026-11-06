@@ -104,6 +104,8 @@ pub struct NumberDraft {
     composed_input: bool,
     /// Retains the submitted value so acknowledgments preserve equivalent spelling.
     submitted: Option<String>,
+    /// Allows localization of authoritative model text, never of an entered draft.
+    format_visible: bool,
 }
 
 impl NumberDraft {
@@ -180,6 +182,7 @@ impl NumberDraft {
                 if !keep {
                     self.text.clone_from(&self.display);
                     self.submitted = None;
+                    self.format_visible = true;
                 }
             }
             DraftEvent::Focus => {
@@ -199,6 +202,7 @@ impl NumberDraft {
                 self.composed_input = false;
                 self.submitted = None;
                 self.text.clone_from(&self.display);
+                self.format_visible = true;
             }
             DraftEvent::CompositionStart => {
                 if !self.blocked {
@@ -207,6 +211,7 @@ impl NumberDraft {
                     }
                     self.composing = true;
                     self.composed_input = false;
+                    self.format_visible = false;
                 }
             }
             DraftEvent::CompositionEnd(text) => {
@@ -239,9 +244,10 @@ impl NumberDraft {
                     )
                 {
                     self.display = text;
-                    if !self.focused {
+                    if !self.focused || self.format_visible {
                         self.text.clone_from(&self.display);
                     }
+                    self.format_visible = false;
                 }
             }
         }
@@ -320,6 +326,23 @@ impl NumberDraft {
         &self.canonical
     }
 
+    /// Returns the focus session's parsing locale, or the current unfocused locale.
+    ///
+    /// Hosts use this same locale when formatting authoritative model updates so
+    /// the displayed number remains valid input without reinterpreting a draft.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_web_ui::components::number::{NumberDraft, NumberLocale};
+    /// fn unfocused(current: &NumberLocale) {
+    ///     let draft = NumberDraft::default();
+    ///     assert_eq!(draft.display_locale(current), current);
+    /// }
+    /// ```
+    pub fn display_locale<'a>(&'a self, current: &'a NumberLocale) -> &'a NumberLocale {
+        self.origin.as_ref().unwrap_or(current)
+    }
+
     /// Discards the local draft and permanently retires this instance.
     ///
     /// - Postcondition: No later event submits a value.
@@ -339,6 +362,7 @@ impl NumberDraft {
         self.origin = None;
         self.composed_input = false;
         self.submitted = None;
+        self.format_visible = false;
         self.text.clone_from(&self.display);
     }
 
@@ -366,6 +390,7 @@ impl NumberDraft {
             return DraftEffect::None;
         }
         self.text = text;
+        self.format_visible = false;
         self.local = true;
         self.submitted = None;
         if self.composing {
