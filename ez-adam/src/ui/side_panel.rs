@@ -14,94 +14,10 @@ use crate::ops::relationships::{
 };
 use crate::ui::canvas::NodeId;
 use crate::validation::validate_cel_expression;
-use adam_web_ui::spectrum::{SpCheckbox, SpDivider, SpFieldLabel, SpNumberfield, SpTextfield};
+use adam_web_ui::components::{Checkbox, CheckboxState, Input, Label, NumericEditor, Separator};
+use adam_web_ui::input::{InputError, NumberKind};
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
-use std::collections::HashMap;
-
-/// Builds the JS snippet that reads the DOM element with id `id`'s live
-/// `.value` and sends it back via `dioxus.send`, for use with
-/// `document::eval`.
-///
-/// Needed because Dioxus's event serializer only populates
-/// `event.target.value` for a native `HTMLInputElement` — a Spectrum Web
-/// Components custom element (e.g. `SpTextfield`) always reports an empty
-/// string on its synthetic `input` event, so the live value has to be read
-/// directly off the DOM instead (see `SpTextfield`'s own doc comment, and
-/// `adam_web_ui::inspector`'s identical pattern).
-///
-/// - Complexity: O(id.len()) time and space.
-fn read_value_js(id: &str) -> String {
-    format!(r#"dioxus.send(document.getElementById("{id}").value)"#)
-}
-
-/// Renders exact integer clamp text or a floating numeric field and forwards its input.
-///
-/// - Complexity: O(id.len() + value.len()) attribute construction.
-#[component]
-fn ClampField(
-    id: String,
-    value: String,
-    is_integer: bool,
-    oninput: EventHandler<FormEvent>,
-) -> Element {
-    if is_integer {
-        rsx! { SpTextfield {
-            id, value, invalid: false, disabled: false, oninput,
-            onfocus: |_| {}, onblur: |_| {},
-        } }
-    } else {
-        rsx! { SpNumberfield {
-            id, value, min: None, max: None, step: None,
-            invalid: false, disabled: false, readonly: false, oninput,
-            onfocus: |_| {}, onblur: |_| {},
-        } }
-    }
-}
-
-/// Decodes the shared numeric bridge without coercing drafts to JavaScript numbers.
-///
-/// # Errors
-///
-/// Returns an error when the focus-prefixed wire payload is malformed.
-///
-/// - Complexity: O(payload.len()) worst-case validation with borrowed output and no allocation.
-fn numeric_draft(payload: &str) -> Result<&str, &'static str> {
-    match payload.split_once('|') {
-        Some(("0" | "1", draft)) => Ok(draft),
-        _ => Err("invalid numeric field response"),
-    }
-}
-
-/// Records and returns the next input revision for `field_id`.
-///
-/// Every browser DOM-value read captures this revision before awaiting. A
-/// response applies only while [`is_current_input_revision`] still accepts
-/// it, preventing an older asynchronous response from replacing newer text.
-///
-/// - Complexity: expected O(field_id.len()) time and space.
-fn next_input_revision(revisions: &mut HashMap<String, u64>, field_id: &str) -> u64 {
-    let revision = revisions
-        .get(field_id)
-        .copied()
-        .unwrap_or(0)
-        .checked_add(1)
-        .expect("input revision must not overflow");
-    revisions.insert(field_id.to_owned(), revision);
-    revision
-}
-
-/// Returns whether `response_revision` is the latest dispatched revision for
-/// `field_id`.
-///
-/// - Complexity: expected O(field_id.len()) time and O(1) space.
-fn is_current_input_revision(
-    revisions: &HashMap<String, u64>,
-    field_id: &str,
-    response_revision: u64,
-) -> bool {
-    revisions.get(field_id) == Some(&response_revision)
-}
 
 /// Returns `(min_text, max_text)` for `ty`'s clamp bounds if it's numeric,
 /// or `None` if `ty` is `Bool`/`Text` (no clamp fields to show). Each
@@ -134,6 +50,150 @@ fn parse_restrict_input(text: String) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
+/// Identifies the numeric bound edited by a clamp control.
+#[derive(Clone, Copy)]
+enum ClampBound {
+    /// Selects the inclusive lower bound.
+    Min,
+    /// Selects the inclusive upper bound.
+    Max,
+}
+
+/// Describes a value event or blur from an optional numeric editor.
+enum NumericBoundEvent<'a> {
+    /// Carries the editor's canonical value, or `None` when the field is cleared.
+    Value(Option<&'a str>),
+    /// Synchronizes the draft after focus leaves without changing the model.
+    Blur,
+}
+
+/// Applies a numeric editor event to the selected document bound.
+///
+/// - Postcondition: a value event updates or clears the selected bound; blur leaves the
+///   document unchanged.
+fn apply_numeric_bound_event(
+    panel_epoch: u64,
+    document_epoch: Signal<u64>,
+    document: Signal<Document>,
+    cell: crate::model::cell::CellId,
+    bound: ClampBound,
+    event: NumericBoundEvent<'_>,
+) -> bool {
+    match event {
+        NumericBoundEvent::Value(value) => {
+            apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+                let text = value.unwrap_or("");
+                match bound {
+                    ClampBound::Min => set_clamp_min(document, cell, text),
+                    ClampBound::Max => set_clamp_max(document, cell, text),
+                }
+            })
+        }
+        NumericBoundEvent::Blur => false,
+    }
+}
+
+/// Returns a user-facing message for a numeric editor error.
+///
+/// # Examples
+///
+/// `numeric_error_message(&InputError::Lexical("bad input".into()))`
+/// returns `"Enter a complete number."`.
+pub(super) fn numeric_error_message(error: &InputError) -> &str {
+    match error {
+        InputError::Lexical(_) => "Enter a complete number.",
+        InputError::TypeRange { .. } => "The number is outside the supported range.",
+        InputError::UnsupportedEditor(message)
+        | InputError::Locale(message)
+        | InputError::EventSource(message) => message,
+    }
+}
+
+/// Returns whether a panel callback belongs to the active document generation.
+fn is_current_panel_epoch(expected_epoch: u64, document_epoch: Signal<u64>) -> bool {
+    *document_epoch.peek() == expected_epoch
+}
+
+/// Converts a document boolean to the shared checkbox's initial state.
+///
+/// # Examples
+///
+/// `checkbox_state(true)` returns `CheckboxState::Checked`.
+fn checkbox_state(checked: bool) -> CheckboxState {
+    if checked {
+        CheckboxState::Checked
+    } else {
+        CheckboxState::Unchecked
+    }
+}
+
+/// Updates the controlled checkbox state when its model value changes.
+///
+/// - Postcondition: returns `true` if and only if `state` now matches `checked`.
+fn sync_checkbox_state(mut state: Signal<Option<CheckboxState>>, checked: bool) -> bool {
+    let next = Some(checkbox_state(checked));
+    if *state.peek() == next {
+        return false;
+    }
+    state.set(next);
+    true
+}
+
+/// Renders a controlled checkbox and reports its next state to the owner.
+///
+/// - Complexity: O(1) time and space per state transition.
+#[component]
+fn PanelCheckbox(
+    checked: bool,
+    aria_label: String,
+    on_checked_change: EventHandler<CheckboxState>,
+) -> Element {
+    let mut state = use_signal(|| Some(checkbox_state(checked)));
+    use_effect(use_reactive!(|checked| {
+        sync_checkbox_state(state, checked);
+    }));
+
+    rsx! {
+        Checkbox {
+            checked: state,
+            aria_label,
+            on_checked_change: move |next| {
+                state.set(Some(next));
+                on_checked_change.call(next);
+            },
+        }
+    }
+}
+
+/// Applies a panel edit only while its originating document epoch remains active.
+///
+/// - Postcondition: `edit` runs exactly once if `expected_epoch` matches the current epoch.
+/// - Complexity: O(1) time and space in addition to `edit`.
+fn apply_panel_edit(
+    expected_epoch: u64,
+    document_epoch: Signal<u64>,
+    mut document: Signal<Document>,
+    edit: impl FnOnce(&mut Document),
+) -> bool {
+    if !is_current_panel_epoch(expected_epoch, document_epoch) {
+        return false;
+    }
+    edit(&mut document.write());
+    true
+}
+
+/// Replaces a numeric editor value only when its canonical model value changes.
+///
+/// - Postcondition: returns `true` if and only if `value` now equals `model`.
+/// - Complexity: O(n) time and O(1) auxiliary space for n canonical text bytes.
+fn sync_numeric_value(mut value: Signal<Option<String>>, model: Option<String>) -> bool {
+    if *value.peek() == model {
+        return false;
+    }
+    value.set(model);
+    true
+}
+
 /// Renders `cell`'s editable properties: name, type (read-only — changing
 /// a cell's type is out of scope for this plan), output checkbox, clamp
 /// min/max (numeric types only, via [`clamp_bounds_text`]), and restrict
@@ -144,14 +204,14 @@ fn parse_restrict_input(text: String) -> Option<String> {
 ///
 /// # Examples
 ///
-/// `SidePanel { document, selection }` mounts this panel when `selection`
-/// contains exactly one live `NodeId::CellNode`.
+/// `SidePanel { document, selection, document_epoch }` mounts this panel when
+/// `selection` contains exactly one live `NodeId::CellNode`.
 pub fn CellPanel(
     mut document: Signal<Document>,
     cell: CellId,
-    mut input_revisions: Signal<HashMap<String, u64>>,
+    document_epoch: Signal<u64>,
+    panel_epoch: u64,
 ) -> Element {
-    let mut bridge_error = use_signal(|| None::<String>);
     let (name, ty, output, restrict) = {
         let doc = document.read();
         let c = &doc.cells[cell];
@@ -164,6 +224,27 @@ pub fn CellPanel(
     };
     let bounds = clamp_bounds_text(&ty);
     let is_integer = matches!(ty, CellType::I64 { .. });
+    let number_kind = if is_integer {
+        NumberKind::Signed(64)
+    } else {
+        NumberKind::F64
+    };
+    let step = if is_integer { "1" } else { "0.01" };
+    let has_clamp_bounds = bounds.is_some();
+    let (min, max) = bounds.unwrap_or_default();
+    let model_min = (!min.is_empty()).then_some(min);
+    let model_max = (!max.is_empty()).then_some(max);
+    let mut min_value = use_signal(|| model_min.clone());
+    let mut max_value = use_signal(|| model_max.clone());
+    use_effect(use_reactive!(|model_min, model_max| {
+        sync_numeric_value(min_value, model_min);
+        sync_numeric_value(max_value, model_max);
+    }));
+    let range = use_signal(|| None);
+    let mut min_invalid = use_signal(|| false);
+    let mut max_invalid = use_signal(|| false);
+    let mut min_error = use_signal(|| None::<String>);
+    let mut max_error = use_signal(|| None::<String>);
     let name_id = format!("name-{cell:?}");
     let restrict_id = format!("restrict-{cell:?}");
     let clamp_min_id = format!("clamp-min-{cell:?}");
@@ -172,133 +253,155 @@ pub fn CellPanel(
     rsx! {
         div {
             class: "cell-panel",
-            if let Some(error) = bridge_error.read().as_deref() {
-                div { role: "alert", "{error}" }
-            }
-            SpFieldLabel { for_: "{name_id}", "Name" }
-            SpTextfield {
-                id: name_id.clone(),
+            Label { html_for: name_id.clone(), "Name" }
+            Input {
+                id: name_id,
+                r#type: "text",
+                style: "width: 100%; box-sizing: border-box;",
+                aria_label: "Name",
                 value: name,
-                invalid: false,
-                disabled: false,
-                oninput: move |_| {
-                    let id = name_id.clone();
-                    let revision = next_input_revision(&mut input_revisions.write(), &id);
-                    let input_revisions = input_revisions;
-                    spawn(async move {
-                        let mut eval = document::eval(&read_value_js(&id));
-                        if let Ok(text) = eval.recv::<String>().await
-                            && is_current_input_revision(&input_revisions.read(), &id, revision) {
-                                set_name(&mut document.write(), cell, text);
-                            }
+                oninput: move |event: FormEvent| {
+                    let text = event.value();
+                    apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+                        set_name(document, cell, text);
                     });
                 },
-                onfocus: move |_| {},
-                onblur: move |_| {},
             }
-            SpCheckbox {
-                id: format!("output-{cell:?}"),
-                checked: output,
-                invalid: false,
-                disabled: false,
-                onclick: move |_| set_output(&mut document.write(), cell, !output),
-                "Output"
+            div {
+                class: "cell-output",
+                PanelCheckbox {
+                    checked: output,
+                    aria_label: "Output",
+                    on_checked_change: move |state| {
+                        apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+                            set_output(document, cell, state == CheckboxState::Checked);
+                        });
+                    },
+                }
+                span { "Output" }
             }
-            if let Some((min, max)) = bounds {
-                // Each field gets its own wrapping `div` (matching
-                // `RelationshipPanel`/`ConditionalPanel`'s label+field
-                // pairs) rather than sharing one, so the pair stacks
-                // vertically instead of running the label and a
-                // now-full-width field together on one cramped line.
-                //
-                // `set_clamp_min`/`set_clamp_max` silently ignore text that
-                // doesn't parse (e.g. a lone "-" mid-typed) rather than
-                // clearing the bound, so this deliberately doesn't reset
-                // the field to the committed value on a rejected keystroke
-                // — doing so from `document.read()` on every render would
-                // otherwise fight the user's typing.
+            if has_clamp_bounds {
                 div {
-                    SpFieldLabel { for_: "{clamp_min_id}", "Clamp min" }
-                    ClampField {
-                        id: clamp_min_id.clone(),
-                        value: min,
-                        is_integer,
-                        oninput: move |_| {
-                            let id = clamp_min_id.clone();
-                            let revision = next_input_revision(&mut input_revisions.write(), &id);
-                            let input_revisions = input_revisions;
-                            spawn(async move {
-                                let mut eval = document::eval(&adam_web_ui::numeric_input_script(&id, false));
-                                let result = eval.recv::<String>().await;
-                                if !is_current_input_revision(&input_revisions.read(), &id, revision) { return; }
-                                match result {
-                                    Ok(payload) => match numeric_draft(&payload) {
-                                        Ok(text) => {
-                                            set_clamp_min(&mut document.write(), cell, text);
-                                            bridge_error.set(None);
-                                        }
-                                        Err(error) => bridge_error.set(Some(error.to_string())),
-                                    },
-                                    Err(error) => bridge_error.set(Some(format!("numeric field read failed: {error}"))),
-                                }
-                            });
+                    class: "clamp-bound",
+                    onfocusout: move |_| {
+                        apply_numeric_bound_event(
+                            panel_epoch,
+                            document_epoch,
+                            document,
+                            cell,
+                            ClampBound::Min,
+                            NumericBoundEvent::Blur,
+                        );
+                        if is_current_panel_epoch(panel_epoch, document_epoch) {
+                            min_invalid.set(false);
+                            min_error.set(None);
+                        }
+                    },
+                    NumericEditor {
+                        id: clamp_min_id,
+                        label: "Clamp min",
+                        value: min_value,
+                        range,
+                        kind: number_kind,
+                        step,
+                        disabled: false,
+                        readonly: false,
+                        invalid: min_invalid,
+                        locale: None,
+                        optional: true,
+                        on_value: move |value: Option<String>| {
+                            if apply_numeric_bound_event(
+                                panel_epoch,
+                                document_epoch,
+                                document,
+                                cell,
+                                ClampBound::Min,
+                                NumericBoundEvent::Value(value.as_deref()),
+                            ) {
+                                min_value.set(value);
+                                min_invalid.set(false);
+                                min_error.set(None);
+                            }
                         },
+                        on_error: move |error: InputError| {
+                            if is_current_panel_epoch(panel_epoch, document_epoch) {
+                                min_invalid.set(true);
+                                min_error.set(Some(numeric_error_message(&error).to_owned()));
+                            }
+                        },
+                    }
+                    if let Some(error) = min_error.read().as_deref() {
+                        div { role: "alert", class: "diagnostic", "{error}" }
                     }
                 }
                 div {
-                    SpFieldLabel { for_: "{clamp_max_id}", "Clamp max" }
-                    ClampField {
-                        id: clamp_max_id.clone(),
-                        value: max,
-                        is_integer,
-                        oninput: move |_| {
-                            let id = clamp_max_id.clone();
-                            let revision = next_input_revision(&mut input_revisions.write(), &id);
-                            let input_revisions = input_revisions;
-                            spawn(async move {
-                                let mut eval = document::eval(&adam_web_ui::numeric_input_script(&id, false));
-                                let result = eval.recv::<String>().await;
-                                if !is_current_input_revision(&input_revisions.read(), &id, revision) { return; }
-                                match result {
-                                    Ok(payload) => match numeric_draft(&payload) {
-                                        Ok(text) => {
-                                            set_clamp_max(&mut document.write(), cell, text);
-                                            bridge_error.set(None);
-                                        }
-                                        Err(error) => bridge_error.set(Some(error.to_string())),
-                                    },
-                                    Err(error) => bridge_error.set(Some(format!("numeric field read failed: {error}"))),
-                                }
-                            });
+                    class: "clamp-bound",
+                    onfocusout: move |_| {
+                        apply_numeric_bound_event(
+                            panel_epoch,
+                            document_epoch,
+                            document,
+                            cell,
+                            ClampBound::Max,
+                            NumericBoundEvent::Blur,
+                        );
+                        if is_current_panel_epoch(panel_epoch, document_epoch) {
+                            max_invalid.set(false);
+                            max_error.set(None);
+                        }
+                    },
+                    NumericEditor {
+                        id: clamp_max_id,
+                        label: "Clamp max",
+                        value: max_value,
+                        range,
+                        kind: number_kind,
+                        step,
+                        disabled: false,
+                        readonly: false,
+                        invalid: max_invalid,
+                        locale: None,
+                        optional: true,
+                        on_value: move |value: Option<String>| {
+                            if apply_numeric_bound_event(
+                                panel_epoch,
+                                document_epoch,
+                                document,
+                                cell,
+                                ClampBound::Max,
+                                NumericBoundEvent::Value(value.as_deref()),
+                            ) {
+                                max_value.set(value);
+                                max_invalid.set(false);
+                                max_error.set(None);
+                            }
                         },
+                        on_error: move |error: InputError| {
+                            if is_current_panel_epoch(panel_epoch, document_epoch) {
+                                max_invalid.set(true);
+                                max_error.set(Some(numeric_error_message(&error).to_owned()));
+                            }
+                        },
+                    }
+                    if let Some(error) = max_error.read().as_deref() {
+                        div { role: "alert", class: "diagnostic", "{error}" }
                     }
                 }
             }
-            SpDivider {}
-            SpFieldLabel { for_: "{restrict_id}", "Restrict" }
-            SpTextfield {
-                id: restrict_id.clone(),
+            Separator {}
+            Label { html_for: restrict_id.clone(), "Restrict" }
+            Input {
+                id: restrict_id,
+                r#type: "text",
+                style: "width: 100%; box-sizing: border-box;",
+                aria_label: "Restrict",
                 value: restrict,
-                invalid: false,
-                disabled: false,
-                oninput: move |_| {
-                    let id = restrict_id.clone();
-                    let revision = next_input_revision(&mut input_revisions.write(), &id);
-                    let input_revisions = input_revisions;
-                    spawn(async move {
-                        let mut eval = document::eval(&read_value_js(&id));
-                        if let Ok(text) = eval.recv::<String>().await
-                            && is_current_input_revision(&input_revisions.read(), &id, revision) {
-                                set_restrict(
-                                    &mut document.write(),
-                                    cell,
-                                    parse_restrict_input(text),
-                                );
-                            }
+                oninput: move |event: FormEvent| {
+                    let text = parse_restrict_input(event.value());
+                    apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+                        set_restrict(document, cell, text);
                     });
                 },
-                onfocus: move |_| {},
-                onblur: move |_| {},
             }
         }
     }
@@ -434,12 +537,13 @@ fn live_columns(
 ///
 /// # Examples
 ///
-/// `SidePanel { document, selection }` mounts this panel for a single live
+/// `SidePanel` mounts this panel for a single live
 /// `NodeId::RelationshipGroup`, exposing each member's editable formula.
 pub fn RelationshipPanel(
     mut document: Signal<Document>,
     group: RelationshipGroupId,
-    mut input_revisions: Signal<HashMap<String, u64>>,
+    document_epoch: Signal<u64>,
+    panel_epoch: u64,
 ) -> Element {
     let (display_name, members) = {
         let doc = document.read();
@@ -459,67 +563,51 @@ pub fn RelationshipPanel(
     rsx! {
         div {
             class: "relationship-panel",
-            SpFieldLabel { for_: "{name_id}", "Name" }
-            SpTextfield {
-                id: name_id.clone(),
+            Label { html_for: name_id.clone(), "Name" }
+            Input {
+                id: name_id,
+                r#type: "text",
+                style: "width: 100%; box-sizing: border-box;",
+                aria_label: "Name",
                 value: display_name,
-                invalid: false,
-                disabled: false,
-                oninput: move |_| {
-                    let id = name_id.clone();
-                    let revision = next_input_revision(&mut input_revisions.write(), &id);
-                    let input_revisions = input_revisions;
-                    spawn(async move {
-                        let mut eval = document::eval(&read_value_js(&id));
-                        if let Ok(text) = eval.recv::<String>().await
-                            && is_current_input_revision(&input_revisions.read(), &id, revision) {
-                                set_relationship_display_name(&mut document.write(), group, text);
-                            }
+                oninput: move |event: FormEvent| {
+                    let text = event.value();
+                    apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+                        set_relationship_display_name(document, group, text);
                     });
                 },
-                onfocus: move |_| {},
-                onblur: move |_| {},
             }
-            SpDivider {}
+            Separator {}
             for (node, cell_name, formula) in members {
                 {
                     let field_id = format!("member-formula-{node:?}");
+                    let error_id = format!("{field_id}-error");
                     let diagnostic = formula_diagnostic(&formula);
                     rsx! {
                         div {
                             key: "{node:?}",
-                            SpFieldLabel { for_: "{field_id}", "{cell_name} :=" }
-                            SpTextfield {
-                                id: field_id.clone(),
-                                value: formula.clone(),
-                                invalid: diagnostic.is_some(),
-                                disabled: false,
-                                oninput: move |_| {
-                                    let id = field_id.clone();
-                                    let revision = next_input_revision(&mut input_revisions.write(), &id);
-                                    let input_revisions = input_revisions;
-                                    spawn(async move {
-                                        let mut eval = document::eval(&read_value_js(&id));
-                                        if let Ok(text) = eval.recv::<String>().await
-                                            && is_current_input_revision(
-                                                &input_revisions.read(),
-                                                &id,
-                                                revision,
-                                            ) {
-                                                set_member_formula(
-                                                    &mut document.write(),
-                                                    group,
-                                                    node,
-                                                    text,
-                                                );
-                                            }
+                            Label { html_for: field_id.clone(), "{cell_name} :=" }
+                            Input {
+                                id: field_id,
+                                r#type: "text",
+                                style: "width: 100%; box-sizing: border-box;",
+                                aria_label: format!("Formula for {cell_name}"),
+                                aria_invalid: diagnostic.is_some(),
+                                value: formula,
+                                oninput: move |event: FormEvent| {
+                                    let text = event.value();
+                                    apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+                                        set_member_formula(document, group, node, text);
                                     });
                                 },
-                                onfocus: move |_| {},
-                                onblur: move |_| {},
                             }
                             if let Some(diagnostic) = diagnostic {
-                                div { class: "diagnostic", "{diagnostic}" }
+                                div {
+                                    id: error_id,
+                                    role: "alert",
+                                    class: "diagnostic",
+                                    "{diagnostic}"
+                                }
                             }
                         }
                     }
@@ -557,12 +645,13 @@ fn formula_expr_for_display(condition: &ConditionExpr) -> Option<&str> {
 ///
 /// # Examples
 ///
-/// Select one `NodeId::ConditionalGroup` in `SidePanel { document, selection }`
-/// to edit its selector draft and enabled-relationship table.
+/// Select one `NodeId::ConditionalGroup` in `SidePanel` to edit its selector
+/// draft and enabled-relationship table.
 pub fn ConditionalPanel(
     mut document: Signal<Document>,
     conditional: ConditionalGroupId,
-    mut input_revisions: Signal<HashMap<String, u64>>,
+    document_epoch: Signal<u64>,
+    panel_epoch: u64,
 ) -> Element {
     let mut known_groups = use_signal(move || {
         let doc = document.peek();
@@ -604,93 +693,96 @@ pub fn ConditionalPanel(
     let formula_id = format!("conditional-formula-{conditional:?}");
 
     rsx! {
-        SpFieldLabel { for_: "{name_id}", "Name" }
-        SpTextfield {
-            id: name_id.clone(),
-            value: display_name,
-            invalid: false,
-            disabled: false,
-            oninput: move |_| {
-                let id = name_id.clone();
-                let revision = next_input_revision(&mut input_revisions.write(), &id);
-                let input_revisions = input_revisions;
-                spawn(async move {
-                    let mut eval = document::eval(&read_value_js(&id));
-                    if let Ok(text) = eval.recv::<String>().await
-                        && is_current_input_revision(&input_revisions.read(), &id, revision) {
-                            set_conditional_display_name(&mut document.write(), conditional, text);
-                        }
-                });
-            },
-            onfocus: move |_| {},
-            onblur: move |_| {},
-        }
-        SpDivider {}
-        if let Some(expr) = formula_expr {
-            div {
-                class: "conditional-formula",
-                SpFieldLabel { for_: "{formula_id}", "Condition" }
-                SpTextfield {
-                    id: formula_id.clone(),
-                    value: expr.clone(),
-                    invalid: diagnostic.is_some(),
-                    disabled: false,
-                    oninput: move |_| {
-                        let id = formula_id.clone();
-                        let revision = next_input_revision(&mut input_revisions.write(), &id);
-                        let input_revisions = input_revisions;
-                        spawn(async move {
-                            let mut eval = document::eval(&read_value_js(&id));
-                            if let Ok(text) = eval.recv::<String>().await
-                                && is_current_input_revision(
-                                    &input_revisions.read(),
-                                    &id,
-                                    revision,
-                                ) {
-                                    set_condition_formula(&mut document.write(), conditional, text);
-                                }
-                        });
-                    },
-                    onfocus: move |_| {},
-                    onblur: move |_| {},
-                }
-                if let Some(diagnostic) = diagnostic {
-                    div { class: "diagnostic", "{diagnostic}" }
-                }
+        div {
+            class: "conditional-panel",
+            Label { html_for: name_id.clone(), "Name" }
+            Input {
+                id: name_id,
+                r#type: "text",
+                style: "width: 100%; box-sizing: border-box;",
+                aria_label: "Name",
+                value: display_name,
+                oninput: move |event: FormEvent| {
+                    let text = event.value();
+                    apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+                        set_conditional_display_name(document, conditional, text);
+                    });
+                },
             }
-            SpDivider {}
-        }
-        table {
-            class: "enable-table",
-            thead {
-                tr {
-                    th { "" }
-                    for group in &all_groups {
-                        th {
-                            key: "{group:?}",
-                            "{document.read().relationship_groups[*group].display_name}"
+            Separator {}
+            if let Some(expr) = formula_expr {
+                div {
+                    class: "conditional-formula",
+                    Label { html_for: formula_id.clone(), "Condition" }
+                    Input {
+                        id: formula_id,
+                        r#type: "text",
+                        style: "width: 100%; box-sizing: border-box;",
+                        aria_label: "Condition",
+                        aria_invalid: diagnostic.is_some(),
+                        value: expr,
+                        oninput: move |event: FormEvent| {
+                            let text = event.value();
+                            apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+                                set_condition_formula(document, conditional, text);
+                            });
+                        },
+                    }
+                    if let Some(diagnostic) = diagnostic {
+                        div { role: "alert", class: "diagnostic", "{diagnostic}" }
+                    }
+                }
+                Separator {}
+            }
+            table {
+                class: "enable-table",
+                thead {
+                    tr {
+                        th { "" }
+                        for group in &all_groups {
+                            th {
+                                key: "{group:?}",
+                                "{document.read().relationship_groups[*group].display_name}"
+                            }
                         }
                     }
                 }
-            }
-            tbody {
-                for (branch_index, branch) in branches.iter().enumerate() {
-                    tr {
-                        key: "{branch_index}",
-                        td { "{branch_index}" }
-                        for group in &all_groups {
-                            {
-                                let group = *group;
-                                let checked = branch.enabled_groups.contains(&group);
-                                rsx! {
-                                    td {
-                                        key: "{group:?}",
-                                        SpCheckbox {
-                                            id: format!("enable-{conditional:?}-{branch_index}-{group:?}"),
-                                            checked,
-                                            invalid: false,
-                                            disabled: false,
-                                            onclick: move |_| toggle_enabled_group(&mut document.write(), conditional, branch_index, group),
+                tbody {
+                    for (branch_index, branch) in branches.iter().enumerate() {
+                        tr {
+                            key: "{branch_index}",
+                            td { "{branch_index}" }
+                            for group in &all_groups {
+                                {
+                                    let group = *group;
+                                    let checked = branch.enabled_groups.contains(&group);
+                                    let group_name =
+                                        document.read().relationship_groups[group].display_name.clone();
+                                    rsx! {
+                                        td {
+                                            key: "{group:?}",
+                                            PanelCheckbox {
+                                                checked,
+                                                aria_label: format!(
+                                                    "Enable {group_name} for branch {}",
+                                                    branch_index + 1,
+                                                ),
+                                                on_checked_change: move |_| {
+                                                    apply_panel_edit(
+                                                        panel_epoch,
+                                                        document_epoch,
+                                                        document,
+                                                        |document| {
+                                                            toggle_enabled_group(
+                                                                document,
+                                                                conditional,
+                                                                branch_index,
+                                                                group,
+                                                            );
+                                                        },
+                                                    );
+                                                },
+                                            }
                                         }
                                     }
                                 }
@@ -712,13 +804,14 @@ pub fn ConditionalPanel(
 ///
 /// # Examples
 ///
-/// Inside a Dioxus scope, `rsx! { SidePanel { document, selection } }` follows
-/// the editor's document and selected-node signals.
+/// Inside a Dioxus scope, `SidePanel { document, selection, document_epoch }`
+/// follows the document, selection, and replacement generation.
 pub fn SidePanel(
     document: Signal<Document>,
     selection: Signal<std::collections::HashSet<NodeId>>,
+    document_epoch: Signal<u64>,
 ) -> Element {
-    let input_revisions = use_signal(HashMap::new);
+    let panel_epoch = *document_epoch.read();
     let target = panel_target(&selection.read());
     rsx! {
         div {
@@ -726,22 +819,282 @@ pub fn SidePanel(
             match target {
                 Some(NodeId::CellNode(node)) => {
                     let cell = document.read().cell_nodes.get(node).map(|node| node.cell);
-                    rsx! { if let Some(cell) = cell { CellPanel { key: "{cell:?}", document, cell, input_revisions } } }
+                    rsx! { if let Some(cell) = cell { CellPanel {
+                        key: "{cell:?}",
+                        document,
+                        cell,
+                        document_epoch,
+                        panel_epoch,
+                    } } }
                 }
                 Some(NodeId::RelationshipGroup(group)) => {
-                    rsx! { if document.read().relationship_groups.contains_key(group) { RelationshipPanel { key: "{group:?}", document, group, input_revisions } } }
+                    rsx! { if document.read().relationship_groups.contains_key(group) { RelationshipPanel {
+                        key: "{group:?}",
+                        document,
+                        group,
+                        document_epoch,
+                        panel_epoch,
+                    } } }
                 }
                 Some(NodeId::ConditionalGroup(conditional)) => rsx! {
                     if document.read().conditional_groups.contains_key(conditional) { ConditionalPanel {
                         key: "{conditional:?}",
                         document,
                         conditional,
-                        input_revisions,
+                        document_epoch,
+                        panel_epoch,
                     } }
                 },
                 None => rsx! { div { "No selection" } },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod component_migration_tests {
+    use super::*;
+    use crate::model::cell::CellType;
+    use crate::ops::cells::add_cell;
+    use crate::persistence::to_json;
+
+    #[test]
+    /// Stores canonical numeric text in the cell's clamp range.
+    fn canonical_editor_value_updates_the_numeric_bound() {
+        /// Applies and observes the editor's canonical value.
+        fn host() -> Element {
+            let mut initial = Document::new("demo");
+            let cell = add_cell(&mut initial, "amount", CellType::f64());
+            let document = use_signal(|| initial);
+            let epoch = use_signal(|| 1);
+
+            assert!(apply_numeric_bound_event(
+                1,
+                epoch,
+                document,
+                cell,
+                ClampBound::Min,
+                NumericBoundEvent::Value(Some("1234.5")),
+            ));
+
+            let CellType::F64 { clamp } = &document.read().cells[cell].ty else {
+                panic!("expected F64");
+            };
+            assert_eq!(clamp.min, Some(1234.5));
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// Preserves every digit when a wide integer bound reaches the document operation.
+    fn wide_integer_numeric_bounds_preserve_exact_digits() {
+        /// Applies and observes the exact canonical integer text.
+        fn host() -> Element {
+            let mut initial = Document::new("demo");
+            let cell = add_cell(&mut initial, "amount", CellType::i64());
+            let document = use_signal(|| initial);
+            let epoch = use_signal(|| 1);
+
+            assert!(apply_numeric_bound_event(
+                1,
+                epoch,
+                document,
+                cell,
+                ClampBound::Min,
+                NumericBoundEvent::Value(Some("9007199254740993")),
+            ));
+
+            let CellType::I64 { clamp } = &document.read().cells[cell].ty else {
+                panic!("expected I64");
+            };
+            assert_eq!(clamp.min, Some(9_007_199_254_740_993));
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// Stores canonical numeric text in the upper-bound operation.
+    fn canonical_editor_value_updates_the_upper_bound() {
+        /// Applies and observes a canonical upper-bound value.
+        fn host() -> Element {
+            let mut initial = Document::new("demo");
+            let cell = add_cell(&mut initial, "amount", CellType::f64());
+            let document = use_signal(|| initial);
+            let epoch = use_signal(|| 1);
+
+            assert!(apply_numeric_bound_event(
+                1,
+                epoch,
+                document,
+                cell,
+                ClampBound::Max,
+                NumericBoundEvent::Value(Some("9876.5")),
+            ));
+
+            let CellType::F64 { clamp } = &document.read().cells[cell].ty else {
+                panic!("expected F64");
+            };
+            assert_eq!(clamp.max, Some(9876.5));
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// Clearing an optional numeric bound removes it from the document.
+    fn clearing_a_numeric_bound_sets_it_to_none() {
+        /// Clears and observes the minimum bound inside its document owner.
+        fn host() -> Element {
+            let mut initial = Document::new("demo");
+            let cell = add_cell(&mut initial, "amount", CellType::i64());
+            let mut document = use_signal(|| initial);
+            let epoch = use_signal(|| 1);
+            set_clamp_min(&mut document.write(), cell, "10");
+
+            assert!(apply_numeric_bound_event(
+                1,
+                epoch,
+                document,
+                cell,
+                ClampBound::Min,
+                NumericBoundEvent::Value(None),
+            ));
+
+            let CellType::I64 { clamp } = &document.read().cells[cell].ty else {
+                panic!("expected I64");
+            };
+            assert_eq!(clamp.min, None);
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// Blurring a numeric editor leaves the serialized document unchanged.
+    fn numeric_editor_blur_does_not_change_the_document() {
+        /// Blurs without submitting an editor value.
+        fn host() -> Element {
+            let mut initial = Document::new("demo");
+            let cell = add_cell(&mut initial, "amount", CellType::i64());
+            let mut document = use_signal(|| initial);
+            let epoch = use_signal(|| 1);
+            set_clamp_min(&mut document.write(), cell, "10");
+            let serialized_document_before_blur = to_json(&document.read()).unwrap();
+
+            assert!(!apply_numeric_bound_event(
+                1,
+                epoch,
+                document,
+                cell,
+                ClampBound::Min,
+                NumericBoundEvent::Blur,
+            ));
+
+            let serialized_document_after_blur = to_json(&document.read()).unwrap();
+            assert_eq!(
+                serialized_document_after_blur,
+                serialized_document_before_blur
+            );
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// Synchronizes controlled checkbox state only when the model changes.
+    fn checkbox_state_tracks_document_changes() {
+        /// Observes checked and unchecked model updates inside a Dioxus owner.
+        fn host() -> Element {
+            let state = use_signal(|| None);
+            assert!(sync_checkbox_state(state, true));
+            assert_eq!(*state.read(), Some(CheckboxState::Checked));
+            assert!(!sync_checkbox_state(state, true));
+            assert!(sync_checkbox_state(state, false));
+            assert_eq!(*state.read(), Some(CheckboxState::Unchecked));
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// Changes the editor value only when the model value changes.
+    fn numeric_value_sync_tracks_only_model_changes() {
+        /// Observes changed, unchanged, and cleared values inside a Dioxus owner.
+        fn host() -> Element {
+            let value = use_signal(|| None::<String>);
+            assert!(sync_numeric_value(
+                value,
+                Some("9007199254740993".to_string())
+            ));
+            assert_eq!(value.read().as_deref(), Some("9007199254740993"));
+            assert!(!sync_numeric_value(
+                value,
+                Some("9007199254740993".to_string())
+            ));
+            assert!(sync_numeric_value(value, None));
+            assert_eq!(*value.read(), None);
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// Applies a property edit only when its originating document epoch is current.
+    fn current_panel_property_edits_update_the_document() {
+        /// Applies and observes a property edit inside its signal owner.
+        fn host() -> Element {
+            let mut initial = Document::new("demo");
+            let cell = add_cell(&mut initial, "before", CellType::i64());
+            let document = use_signal(|| initial);
+            let epoch = use_signal(|| 7);
+
+            assert!(apply_panel_edit(7, epoch, document, |document| {
+                set_name(document, cell, "after");
+            }));
+            assert_eq!(document.read().cells[cell].name, "after");
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
+    }
+
+    #[test]
+    /// An event from an old panel cannot alter a replacement document.
+    fn stale_panel_property_event_preserves_the_replacement_document() {
+        /// Delivers an old panel event after installing a replacement document.
+        fn host() -> Element {
+            let mut old = Document::new("old");
+            let cell = add_cell(&mut old, "value", CellType::i64());
+            let mut document = use_signal(|| old);
+            let mut epoch = use_signal(|| 3);
+
+            let replacement = Document::new("replacement");
+            document.set(replacement);
+            epoch.set(4);
+            let serialized_replacement_document = to_json(&document.read()).unwrap();
+
+            assert!(!apply_panel_edit(3, epoch, document, |document| {
+                set_name(document, cell, "stale");
+            }));
+
+            let serialized_document_after_old_event = to_json(&document.read()).unwrap();
+            assert_eq!(
+                serialized_document_after_old_event,
+                serialized_replacement_document
+            );
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
     }
 }
 
@@ -768,37 +1121,6 @@ mod formula_tests {
         doc.relationship_groups.remove(dead);
         assert_eq!(live_columns(&doc, &[live, dead], &[]), vec![live]);
         assert_eq!(referenced_groups(&[live, live], &[]), vec![live]);
-    }
-
-    /// Numeric bridge payloads preserve drafts and drive exact bound changes without number coercion.
-    #[test]
-    fn numeric_bridge_payloads_are_decoded_without_number_coercion() {
-        for draft in ["", "-", "-12", "1.25", "9007199254740993"] {
-            assert_eq!(numeric_draft(&format!("1|{draft}")).unwrap(), draft);
-        }
-        assert!(numeric_draft("42").is_err());
-        assert!(numeric_draft("bad|1").is_err());
-        let mut doc = Document::new("bounds");
-        let integer = crate::ops::cells::add_cell(&mut doc, "integer", CellType::i64());
-        let float = crate::ops::cells::add_cell(&mut doc, "float", CellType::f64());
-        set_clamp_min(
-            &mut doc,
-            integer,
-            numeric_draft("1|9007199254740993").unwrap(),
-        );
-        set_clamp_max(&mut doc, float, numeric_draft("0|-1.25").unwrap());
-        assert_eq!(
-            clamp_bounds_text(&doc.cells[integer].ty).unwrap().0,
-            "9007199254740993"
-        );
-        assert_eq!(clamp_bounds_text(&doc.cells[float].ty).unwrap().1, "-1.25");
-        set_clamp_min(&mut doc, integer, numeric_draft("1|-").unwrap());
-        assert_eq!(
-            clamp_bounds_text(&doc.cells[integer].ty).unwrap().0,
-            "9007199254740993"
-        );
-        set_clamp_min(&mut doc, integer, numeric_draft("1|").unwrap());
-        assert_eq!(clamp_bounds_text(&doc.cells[integer].ty).unwrap().0, "");
     }
 
     #[test]
@@ -836,42 +1158,6 @@ mod formula_tests {
 mod tests {
     use super::*;
     use crate::model::cell::ClampRange;
-
-    #[test]
-    /// Value-read scripts address the specified control.
-    fn read_value_js_embeds_the_given_id_in_a_getelementbyid_lookup() {
-        let js = read_value_js("restrict-abc");
-        assert_eq!(
-            js,
-            r#"dioxus.send(document.getElementById("restrict-abc").value)"#
-        );
-    }
-
-    #[test]
-    /// Delayed field responses cannot supersede a newer revision.
-    fn input_response_is_current_only_for_the_latest_revision() {
-        let mut revisions = HashMap::new();
-        let first = next_input_revision(&mut revisions, "name-abc");
-        let second = next_input_revision(&mut revisions, "name-abc");
-
-        assert!(!is_current_input_revision(&revisions, "name-abc", first));
-        assert!(is_current_input_revision(&revisions, "name-abc", second));
-    }
-
-    #[test]
-    /// Editing one field does not retire another field's response.
-    fn input_response_revisions_are_independent_per_field() {
-        let mut revisions = HashMap::new();
-        let name = next_input_revision(&mut revisions, "name-abc");
-        let restrict = next_input_revision(&mut revisions, "restrict-abc");
-
-        assert!(is_current_input_revision(&revisions, "name-abc", name));
-        assert!(is_current_input_revision(
-            &revisions,
-            "restrict-abc",
-            restrict
-        ));
-    }
 
     #[test]
     /// Nonnumeric cells do not show numeric bound fields.

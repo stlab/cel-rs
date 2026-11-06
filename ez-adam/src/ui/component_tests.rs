@@ -8,7 +8,9 @@ use dioxus::prelude::*;
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
+    future::Future,
     rc::Rc,
+    task::{Context, Waker},
 };
 
 /// Exposes the mounted component's actual document, selection, and mode.
@@ -56,6 +58,7 @@ fn host(mode: u8) -> Element {
         }
     });
     let active_tool = use_signal(|| Tool::AddRelationship);
+    let document_epoch = use_signal(|| 0u64);
     let transform = use_signal(|| ViewTransform {
         x: 10.0,
         y: 20.0,
@@ -68,7 +71,7 @@ fn host(mode: u8) -> Element {
     match mode {
         3 => rsx! { Toolbar { active_tool, document, selection } },
         4 => rsx! { Canvas { document, selection, active_tool, view_transform: transform } },
-        _ => rsx! { SidePanel { document, selection } },
+        _ => rsx! { SidePanel { document, selection, document_epoch } },
     }
 }
 
@@ -88,6 +91,18 @@ fn mount(mode: u8) -> Mounted {
         })
         .collect();
     (dom, events, observed, renders)
+}
+
+/// Runs queued Dioxus effects before inspecting controlled component state.
+///
+/// - Complexity: queued effect work plus one immediate render.
+fn settle_effects(dom: &mut VirtualDom) {
+    dom.render_immediate_to_vec();
+    {
+        let mut work = std::pin::pin!(dom.wait_for_work());
+        let _ = work.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+    }
+    dom.render_immediate_to_vec();
 }
 
 /// Dispatches a real click through Dioxus's standard serialized event converter.
@@ -138,14 +153,38 @@ fn cell_panel_dispatches_output_toggle() {
     let (mut dom, events, observed, _) = mount(0);
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("cell-panel") && html.contains("amount"));
-    assert_eq!(html.matches("<sp-number-field").count(), 0);
-    assert_eq!(html.matches("<sp-textfield").count(), 4);
-    let (_, id) = events.iter().find(|(name, _)| name == "click").unwrap();
+    assert_eq!(html.matches("class=\"dx-input-").count(), 4);
+    assert!(!html.contains("<sp-"));
+    let (_, id) = events.iter().rfind(|(name, _)| name == "click").unwrap();
     click(&dom, *id);
     dom.render_immediate_to_vec();
     let (document, _, _) = observed.borrow().unwrap();
     let doc = document.peek();
     assert!(doc.cells[doc.cell_order[0]].output);
+}
+
+/// A bound Document update refreshes the checkbox's controlled visual state.
+#[test]
+fn cell_panel_checkbox_tracks_external_document_updates() {
+    let (mut dom, _, observed, _) = mount(0);
+    let (mut document, _, _) = observed.borrow().unwrap();
+    let cell = document.peek().cell_order[0];
+    set_output(&mut document.write(), cell, true);
+
+    settle_effects(&mut dom);
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("aria-checked=\"true\""), "{html}");
+}
+
+/// Gives every numeric bound one label and preserves full-width text fields.
+#[test]
+fn cell_panel_uses_single_numeric_labels_and_full_width_text_inputs() {
+    let (dom, _, _, _) = mount(0);
+    let html = dioxus_ssr::render(&dom);
+
+    assert_eq!(html.matches("Clamp min</label>").count(), 1);
+    assert_eq!(html.matches("Clamp max</label>").count(), 1);
+    assert_eq!(html.matches("width: 100%").count(), 2);
 }
 
 /// A relationship selection renders member names, exact drafts, and an actual parse diagnostic.
@@ -154,7 +193,10 @@ fn relationship_panel_renders_member_error() {
     let (dom, _, _, _) = mount(1);
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("relationship-panel") && html.contains("amount +"));
-    assert!(html.contains("diagnostic") && html.contains("invalid=\"true\""));
+    assert!(
+        html.contains("diagnostic") && html.contains("aria-invalid=true"),
+        "{html}"
+    );
     assert!(html.contains("enabled"));
 }
 
@@ -162,8 +204,9 @@ fn relationship_panel_renders_member_error() {
 #[test]
 fn conditional_panel_renders_and_retains_unchecked_live_group() {
     let (mut dom, events, observed, _) = mount(2);
-    assert!(dioxus_ssr::render(&dom).contains("enable-table"));
-    assert_eq!(dioxus_ssr::render(&dom).matches("<sp-checkbox").count(), 2);
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("enable-table"));
+    assert_eq!(html.matches("role=\"checkbox\"").count(), 2);
     let id = events.iter().rfind(|(name, _)| name == "click").unwrap().1;
     click(&dom, id);
     dom.render_immediate_to_vec();
@@ -174,7 +217,12 @@ fn conditional_panel_renders_and_retains_unchecked_live_group() {
             .enabled_groups
             .is_empty()
     );
-    assert_eq!(dioxus_ssr::render(&dom).matches("<sp-checkbox").count(), 2);
+    assert_eq!(
+        dioxus_ssr::render(&dom)
+            .matches("role=\"checkbox\"")
+            .count(),
+        2
+    );
 }
 
 /// Toolbar clicks preserve same-mode gestures and dispatch one-shot duplication without changing mode.
@@ -293,6 +341,7 @@ fn workspace_replacement_retires_pending_drag_and_connection() {
             selection,
             active_tool,
             *epoch.read(),
+            epoch,
             rsx! {},
         )
     }
@@ -364,9 +413,6 @@ fn workspace_replacement_retires_pending_drag_and_connection() {
     }
 }
 
-#[path = "numeric_event_tests.rs"]
-mod numeric_events;
-
 /// An empty editor composes its toolbar and canvas without an input-blocking side panel.
 #[cfg(not(feature = "desktop"))]
 #[test]
@@ -374,7 +420,8 @@ fn app_renders_editor_adapters() {
     let mut dom = VirtualDom::new(super::App);
     dom.rebuild_in_place();
     let html = dioxus_ssr::render(&dom);
-    assert!(html.contains("<sp-theme") && html.contains("<svg"));
+    assert!(html.contains("adam-theme") && html.contains("<svg"));
+    assert!(!html.contains("<sp-"));
     assert!(html.contains("Add Relationship"));
     assert!(!html.contains("side-panel"));
 }

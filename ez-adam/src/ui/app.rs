@@ -1,7 +1,7 @@
 //! The top-level component: owns all UI state, composes the toolbar,
 //! canvas, and side panel.
 
-use adam_web_ui::spectrum::SpTheme;
+use adam_web_ui::components::Theme;
 #[cfg(feature = "desktop")]
 use dioxus::desktop::use_muda_event_handler;
 use dioxus::prelude::*;
@@ -66,6 +66,7 @@ pub(super) fn editor_workspace(
     selection: Signal<HashSet<NodeId>>,
     active_tool: Signal<Tool>,
     epoch: u64,
+    document_epoch: Signal<u64>,
     unsaved_open_dialog: Element,
 ) -> Element {
     rsx! {
@@ -79,7 +80,7 @@ pub(super) fn editor_workspace(
                 if panel_target(&selection.read()).is_some() {
                     div {
                         style: "position: absolute; top: 0; right: 0; bottom: 0; z-index: 10; background: white; border-left: 1px solid #ccc; width: 420px; max-width: 40vw; overflow: auto; padding: 12px; box-sizing: border-box;",
-                        SidePanel { document, selection }
+                        SidePanel { document, selection, document_epoch }
                     }
                 }
                 {dialog}
@@ -432,35 +433,16 @@ pub fn App() -> Element {
 
     let epoch = *replacement_epoch.read();
     rsx! {
-        // Bundled via `cargo xtask build-js` (ez-adam/package.json +
-        // ez-adam/js/spectrum-entry.js) into one esbuild module, mirroring
-        // `begin`'s own Spectrum Web Components integration — see
-        // docs/superpowers/specs/2026-07-11-begin-spectrum2-theme-tokens-design.md
-        // for why this must be a single compiled bundle rather than
-        // separate vendored/live files.
-        document::Script { r#type: "module", src: asset!("/assets/swc.js") }
         // This neutralizes the browser's default `<body>` margin, which
         // would otherwise offset the canvas's `<svg>` a few pixels from
         // the viewport's true top-left and reintroduce the coordinate
         // mismatch `Canvas`'s `<svg>` doc comment describes fixing.
-        //
-        // `sp-textfield`/`sp-number-field` are plain custom elements with
-        // their own intrinsic (narrow, fixed) width by default -- Shadow
-        // DOM style encapsulation only isolates an element's *internal*
-        // markup, not host-level box-model properties like `width`, so a
-        // page-level rule targeting the element tag directly is enough to
-        // stretch every text/number field in the side panel to fill its
-        // container instead of clipping the formula text it holds.
         style {
             "
             html, body {{ margin: 0; padding: 0; overflow: hidden; }}
-            sp-textfield, sp-number-field {{ width: 100%; box-sizing: border-box; }}
             "
         }
-        SpTheme {
-            color: "light".to_string(),
-            scale: "medium".to_string(),
-            system: "spectrum-two".to_string(),
+        Theme {
             div {
                 class: "app",
                 // Fills the viewport and clips anything that would otherwise
@@ -482,9 +464,16 @@ pub fn App() -> Element {
                     style: "position: absolute; top: 12px; left: 12px; z-index: 10; background: white; border-radius: 8px; padding: 4px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);",
                     Toolbar { active_tool, document, selection }
                 }
-                {editor_workspace(document, view_transform, selection, active_tool, epoch, unsaved_open_dialog)}
+                {editor_workspace(
+                    document,
+                    view_transform,
+                    selection,
+                    active_tool,
+                    epoch,
+                    replacement_epoch,
+                    unsaved_open_dialog,
+                )}
             }
-
         }
     }
 }

@@ -15,6 +15,15 @@ mod theme;
 
 pub use button::{Button, ButtonProps, ButtonSize, ButtonVariant};
 pub use checkbox::Checkbox;
+/// Provides the checked state accepted by [`Checkbox`].
+///
+/// # Examples
+///
+/// ```
+/// use adam_web_ui::components::CheckboxState;
+/// let checked = CheckboxState::Checked;
+/// ```
+pub use dioxus_primitives::checkbox::CheckboxState;
 pub use input::{Input, InputProps};
 pub use label::Label;
 pub use numeric_editor::{NumericEditor, NumericEditorProps, NumericSlider};
