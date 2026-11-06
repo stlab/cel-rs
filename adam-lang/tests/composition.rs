@@ -511,9 +511,9 @@ relationship copy(a: a, b: third);
     );
 }
 
-/// Resolves eager requirement evaluation spans against the actual policy definition.
+/// Resolves a propagation-time requirement error to its policy definition.
 #[test]
-fn composition_diagnostic_requirement_construction_keeps_definition_span() {
+fn composition_diagnostic_requirement_propagation_keeps_definition_span() {
     let mut modules = adam_lang::ModuleSet::new();
     modules
         .insert_source(
@@ -542,17 +542,44 @@ cell value: i32 = 1 require {
         .find(|source| source.file_name() == "policy.adm2")
         .unwrap()
         .clone();
-    let error = compiled
+    let invocation_source = compiled
+        .sources()
+        .iter()
+        .find(|source| source.file_name() == "app.adm2")
+        .unwrap()
+        .clone();
+    let mut parsed = compiled
         .instantiate_root(&"app".parse().unwrap(), "app")
-        .unwrap_err();
+        .unwrap();
+    let diagnostics = parsed.diagnostics();
+    let result = parsed.propagate();
+    let error = match result {
+        Err(error) => {
+            drop(parsed);
+            error
+        }
+        Ok(()) => panic!("the requirement expression must fail during propagation"),
+    };
     drop(compiled);
     assert!(
-        error.labels.iter().any(|label| label
+        matches!(error, adam_rs::Error::MethodFailed { .. }),
+        "{error:?}"
+    );
+    let labels = diagnostics.locate_error(&error);
+    assert!(
+        labels.iter().any(|label| label
             .location
             .as_ref()
             .is_some_and(|location| location.source == owner
                 && location.span == cel_parser::SourceSpan::new(3, 4, 3, 13))),
         "{error:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label
+            .location
+            .as_ref()
+            .is_some_and(|location| location.source == invocation_source)),
+        "{labels:?}"
     );
 }
 

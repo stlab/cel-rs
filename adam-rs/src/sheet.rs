@@ -2105,7 +2105,7 @@ impl Sheet {
     /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
     /// - `Error::MethodFailed` — a method's function returned an error, a method
     ///   produced the wrong number of outputs, or a requirement's function returned
-    ///   an error.
+    ///   an error. A requirement error includes its governed cell as an error site.
     /// - `Error::TypeMismatch` — a method output's runtime type does not match the
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
@@ -4723,7 +4723,10 @@ mod tests {
                 Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("boom"))),
             )
             .unwrap();
-        assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
+        assert!(matches!(
+            sheet.propagate(),
+            Err(Error::MethodFailed { sites, .. }) if sites == [ErrorSite::Cell(a)]
+        ));
     }
 
     #[test]

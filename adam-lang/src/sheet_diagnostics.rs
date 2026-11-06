@@ -93,9 +93,10 @@ impl SheetDiagnostics {
 
     /// Resolves an error to owning definition and invocation labels.
     ///
-    /// - Complexity: O(o + m + c + k + q × a + l²) time and O(o + m + c + k + l)
-    ///   space for occurrences o, methods m, public cells c, conditionals k, visited
-    ///   occurrence/ancestor records q, local authored items a, and returned labels l.
+    /// - Complexity: O(o + m + c + k + p × a + q × a + l²) time and
+    ///   O(o + m + c + k + l) space for occurrences o, methods m, public cells c,
+    ///   conditionals k, candidate cell origins p, visited occurrence/ancestor records q,
+    ///   local authored items a, and returned labels l.
     ///
     /// # Examples
     ///

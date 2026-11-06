@@ -10,10 +10,11 @@ use crate::{AuthoredRole, SourceLabel, composition::OccurrenceOrigin};
 
 /// Resolves native error identities to owning definition and actual invocation labels.
 ///
-/// Inner CEL coordinates belong only to the executing method or conditional's owner.
-/// - Complexity: O(o + m + c + k + q × a + l²) time and O(o + m + c + k + l) space
-///   for occurrences o, methods m, public cells c, conditionals k, visited occurrence/ancestor
-///   records q, local authored items a and returned labels l.
+/// Inner CEL coordinates belong to the owning method, conditional, or requirement expression.
+/// - Complexity: O(o + m + c + k + p × a + q × a + l²) time and
+///   O(o + m + c + k + l) space for occurrences o, methods m, public cells c, conditionals k,
+///   candidate cell origins p, visited occurrence/ancestor records q, local authored items a,
+///   and returned labels l.
 pub(crate) fn locate_error(metadata: &impl ErrorMetadata, error: &Error) -> Vec<SourceLabel> {
     let occurrences: HashMap<_, _> = metadata
         .instance_origins()
@@ -127,6 +128,15 @@ pub(crate) fn locate_error(metadata: &impl ErrorMetadata, error: &Error) -> Vec<
             ErrorSite::Cell(cell) => {
                 if let Some(origins) = metadata.cell_origins().get(cell) {
                     for origin in origins {
+                        if let Some(occurrence) = occurrences.get(&origin.occurrence)
+                            && let Some(mut label) =
+                                requirement_error_label(occurrence, &origin.slot, error)
+                        {
+                            label.label = text.clone();
+                            labels.push(label);
+                            labels.extend(invocations(occurrence, &occurrences));
+                            continue;
+                        }
                         let mut label = origin.label.clone();
                         label.label = text.clone();
                         labels.push(label);
@@ -147,6 +157,46 @@ pub(crate) fn locate_error(metadata: &impl ErrorMetadata, error: &Error) -> Vec<
         }
     }
     distinct
+}
+
+/// Resolves a failed requirement expression from its owner cell and retained span.
+///
+/// - Complexity: O(a) time for `a` authored items in the occurrence.
+fn requirement_error_label(
+    occurrence: &OccurrenceOrigin,
+    slot: &adam_rs::CellSlot,
+    error: &Error,
+) -> Option<SourceLabel> {
+    let Error::MethodFailed {
+        error: source_error,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    let span = source_error
+        .downcast_ref::<cel_parser::SpanContext>()?
+        .span();
+    let item = occurrence.authored_items().iter().find(|item| {
+        item.role == AuthoredRole::Requirement
+            && item.cell.as_ref() == Some(slot)
+            && item
+                .expression
+                .as_ref()
+                .and_then(|label| label.location.as_ref())
+                .is_some_and(|location| span_contains(location.span, span))
+    })?;
+    let mut label = item.expression.as_ref()?.clone();
+    label.location.as_mut()?.span = span;
+    Some(label)
+}
+
+/// Checks whether `outer` contains the complete `inner` source span.
+///
+/// - Complexity: O(1) time and space.
+fn span_contains(outer: cel_parser::SourceSpan, inner: cel_parser::SourceSpan) -> bool {
+    (outer.start.line, outer.start.column) <= (inner.start.line, inner.start.column)
+        && (outer.end.line, outer.end.column) >= (inner.end.line, inner.end.column)
 }
 
 /// Returns only this occurrence's active inclusion labels, ordered root to child.
@@ -270,6 +320,14 @@ pub(crate) fn site_label(
             _ => generic_site_label(site, cell_name),
         },
 
+        Error::MethodFailed { .. } => match site {
+            ErrorSite::Cell(cell) => match cell_name(*cell) {
+                Some(name) => format!("a requirement on cell `{name}` failed"),
+                None => "a requirement on this cell failed".to_string(),
+            },
+            _ => generic_site_label(site, cell_name),
+        },
+
         _ => generic_site_label(site, cell_name),
     }
 }
@@ -293,6 +351,19 @@ fn generic_site_label(site: &ErrorSite, cell_name: &impl Fn(CellId) -> Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Names the governed cell for a failing requirement expression.
+    #[test]
+    fn requirement_failure_site_names_governed_cell() {
+        let error = adam_rs::Error::MethodFailed {
+            error: anyhow::anyhow!("requirement failed"),
+            sites: vec![ErrorSite::Cell(CellId::default())],
+        };
+        assert_eq!(
+            site_label(&error, 0, &|_| Some("value".to_string())),
+            "a requirement on cell `value` failed"
+        );
+    }
 
     /// Describes relationship sites as participants in a cycle.
     #[test]

@@ -497,12 +497,13 @@ impl ParsedSheet {
     /// Resolves native error sites to owning labels and actual invocation context.
     ///
     /// Definition labels precede root-to-child invocation context. Inner CEL spans
-    /// resolve only against the failed method's definition owner. Native definitions
-    /// retain labels without locations; unknown sites are skipped.
+    /// resolve against the failed method, conditional, or requirement definition.
+    /// Native definitions retain labels without locations; unknown sites are skipped.
     ///
-    /// - Complexity: O(o + m + c + q × a + l²) time and O(o + m + c + l)
-    ///   space for occurrences o, methods m, public cells c, visited occurrence/ancestor
-    ///   records q, local authored items a and returned labels l.
+    /// - Complexity: O(o + m + c + k + p × a + q × a + l²) time and
+    ///   O(o + m + c + k + l) space for occurrences o, methods m, public cells c,
+    ///   conditionals k, candidate cell origins p, visited occurrence/ancestor records q,
+    ///   local authored items a and returned labels l.
     ///
     /// # Examples
     ///

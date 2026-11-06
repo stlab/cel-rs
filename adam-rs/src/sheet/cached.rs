@@ -13,7 +13,7 @@ use crate::planner::{
     Plan, PlanStep, SeedEvaluationCache, SeedRecipes, SeedSignatures, SourceCertificate,
     evaluate_seeds,
 };
-use crate::{CellId, Error, FilterViolation, RelationshipId, RequirementId};
+use crate::{CellId, Error, ErrorSite, FilterViolation, RelationshipId, RequirementId};
 
 use super::{PlanProvenance, PropagationStage, Sheet};
 
@@ -307,7 +307,7 @@ impl Sheet {
                 .collect();
             let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
                 error,
-                sites: vec![],
+                sites: vec![ErrorSite::Cell(requirement.cell)],
             })?;
             if !holds {
                 last_requirement_violations
