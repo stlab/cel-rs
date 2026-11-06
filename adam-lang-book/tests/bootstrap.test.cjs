@@ -8,12 +8,14 @@ const vm = require("node:vm");
 // Loads the real classic script with a caller-owned page and blocked external module loading.
 // Records fetches, script insertions, and VM imports; requires --experimental-vm-modules.
 // Time and space follow script evaluation and the supplied page's mount counts.
-function bootstrap(inspectors = [], graphs = [], {runtime=false, scriptError=false} = {}) {
+function bootstrap(inspectors = [], graphs = [], {runtime=false, scriptError=false, pageUrl, currentScript, pathToRoot} = {}) {
   const loading = { fetches: [], scripts: [], imports: [], mounts: [] };
   const context = vm.createContext({
     URL,
+    path_to_root: pathToRoot,
     document: {
-      baseURI: "https://example.test/book/chapter.html",
+      baseURI: pageUrl || "https://example.test/book/chapter.html",
+      currentScript,
       querySelectorAll: (selector) => selector.startsWith(".adam-live:") ? inspectors : graphs,
       createElement: () => ({}),
       head: {
@@ -98,6 +100,32 @@ test("mount plans allow duplicate diagnostic names without matching graphs", () 
   const { createMountPlan } = bootstrap();
   const plan = createMountPlan(["a", "a"], [], { a: "sheet a {}" });
   assert.notEqual(plan[0].id, plan[1].id);
+});
+
+test("ordinary nested mdBook pages resolve assets from their published root", async () => {
+  const {ready, loading} = bootstrap([createMount()], [createMount()], {
+    pageUrl:"https://example.test/project/book/nested/chapter.html",
+    currentScript:{src:"https://example.test/project/book/book-src/theme/adam-live-bootstrap-hash.js",dataset:{}},
+    pathToRoot:"../",
+  });
+
+  await ready;
+  assert.deepEqual(loading.fetches, ["https://example.test/project/book/theme/adam-live-examples.json"]);
+  assert.deepEqual(loading.imports, ["https://example.test/project/book/theme/adam_lang_book_live.js"]);
+  assert.deepEqual(loading.scripts, [
+    "https://example.test/project/book/theme/d3.v7.min.js",
+    "https://example.test/project/book/theme/graph.js",
+  ]);
+});
+
+test("an explicit embed asset base stays page-relative inside mdBook output", async () => {
+  const {ready, loading} = bootstrap([createMount()], [], {
+    pageUrl:"https://example.test/project/book/nested/chapter.html",
+    currentScript:{dataset:{assetBase:"local-assets/"}},
+    pathToRoot:"../",
+  });
+  await ready;
+  assert.deepEqual(loading.fetches, ["https://example.test/project/book/nested/local-assets/adam-live-examples.json"]);
 });
 
 test("a failed graph dependency leaves a graph-free peer independently mounted", async () => {

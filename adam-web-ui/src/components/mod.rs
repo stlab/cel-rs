@@ -1,6 +1,9 @@
 //! Model-independent control behavior.
 //!
 //! Use [`number`] to normalize localized input before submitting an edit.
+//! Styled controls install their embedded CSS through the renderer's Dioxus
+//! `Document` context. Missing context reports a delivery failure on the platform
+//! diagnostic channel; the library does not assume an alternate stylesheet.
 pub mod button;
 pub mod checkbox;
 pub mod input;

@@ -10,6 +10,8 @@ include!(concat!(env!("OUT_DIR"), "/theme-styles.rs"));
 /// The immutable stylesheet is embedded, not a consumer-relative URL.
 /// The document-owned installer deduplicates styles across independent roots;
 /// unmounting one wrapper does not remove another root's styles.
+/// The renderer supplies Dioxus's `Document` context; missing context reports
+/// a stylesheet-delivery failure on the platform diagnostic channel.
 ///
 /// # Examples
 /// ```

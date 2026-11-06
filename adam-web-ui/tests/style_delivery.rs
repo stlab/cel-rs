@@ -1,6 +1,38 @@
 //! Verifies self-contained shared styles independently of asset bundlers.
 use adam_web_ui::components::{CONTROL_CSS, style_delivery_script};
 
+/// A renderer without a document provider reports missing stylesheet delivery.
+#[test]
+fn absent_document_reports_style_delivery_failure() {
+    const CHILD: &str = "ADAM_STYLE_CONTEXT_TEST";
+    if std::env::var_os(CHILD).is_some() {
+        use dioxus::prelude::*;
+        /// Renders the real shared Theme without adding a document provider.
+        fn root() -> Element {
+            rsx! { adam_web_ui::components::Theme { "unstyled context check" } }
+        }
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "absent_document_reports_style_delivery_failure",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Control stylesheet delivery failed: Document context unavailable"),
+        "missing context was silent: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 /// Shared styles retain scoped tokens and contain no deployment-relative resources.
 #[test]
 fn shared_styles_are_self_contained_and_scoped() {

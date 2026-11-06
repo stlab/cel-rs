@@ -30,6 +30,9 @@ pub fn style_delivery_script() -> String {
 
 /// Installs document-owned styles once per component scope and reports delivery failure.
 ///
+/// Renderers supply Dioxus's `Document` context. Missing context reports a
+/// delivery failure on the platform diagnostic channel rather than silently
+/// rendering without styles; no alternate stylesheet is assumed.
 /// - Complexity: O(stylesheet bytes) delivery on initialization; O(1) thereafter.
 pub(crate) fn use_control_styles() {
     use_hook(|| {
@@ -43,6 +46,10 @@ pub(crate) fn use_control_styles() {
                     ));
                 }
             });
+        } else {
+            crate::diagnostics::report_error(
+                "Control stylesheet delivery failed: Document context unavailable",
+            );
         }
     });
 }

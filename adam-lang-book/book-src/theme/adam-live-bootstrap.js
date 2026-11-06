@@ -7,8 +7,14 @@ const scope = script?.dataset.liveScope
 const sequence = globalThis.adamLiveSequence || 0;
 globalThis.adamLiveSequence = sequence + 1;
 const prefix = sequence ? `${sequence}-` : "";
-// Resolve assets against the page, not this classic script's additional-js copy.
-const themeBase = new URL(script?.dataset.assetBase || "theme/", document.baseURI);
+// mdBook's public path_to_root identifies its publication root for nested chapters.
+// Explicit embed bases remain page-relative; script copies may live under book-src/theme.
+const publicationBase = typeof path_to_root === "string"
+  ? new URL(path_to_root, document.baseURI)
+  : document.baseURI;
+const themeBase = script?.dataset.assetBase
+  ? new URL(script.dataset.assetBase, document.baseURI)
+  : new URL("theme/", publicationBase);
 const moduleUrl = new URL("adam_lang_book_live.js", themeBase).href;
 const manifestUrl = new URL("adam-live-examples.json", themeBase).href;
 const d3Url = new URL("d3.v7.min.js", themeBase).href;
