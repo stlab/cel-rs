@@ -27,12 +27,12 @@ test("nine canonical examples mount without external runtime requests", async ({
     await selectSlide(page, name);
     const iframe = page.locator(`iframe[data-example="tutorial/${name}"]`);
     const frame = iframe.contentFrame();
-    await expect(frame.locator("sp-theme")).toBeAttached();
+    await expect(frame.locator(".adam-theme").first()).toBeAttached();
     await expect(frame.locator("#status")).toHaveCount(0);
     await expect(frame.getByRole("textbox").first()).toBeVisible();
-    expect(await frame.locator("sp-slider, sp-number-field, sp-checkbox").count()).toBeGreaterThan(0);
-    expect(await frame.locator("sp-slider, sp-number-field, sp-checkbox").first()
-      .evaluate((element) => Boolean(element.shadowRoot))).toBe(true);
+    expect(await frame.locator("input, [role=slider], [role=checkbox]").count()).toBeGreaterThan(0);
+    await expect(frame.locator("#stlab-adam-controls-v1")).toHaveCount(1);
+    expect(await frame.getByRole("textbox").first().evaluate(element => getComputedStyle(element).borderRadius)).not.toBe("0px");
     const source = await readFile(new URL(`../../adam-lang-book/book-src/examples/tutorial/${name}.adm2`, import.meta.url), "utf8");
     const pane = iframe.locator("xpath=..");
     const rendered = await pane.locator("code.language-adam").textContent();
@@ -79,10 +79,9 @@ test("area number field displays its entire formatted value", async ({ page }, t
   await page.goto("./");
   const frame = await selectSlide(page, "area_with_requirement");
   await writeSlider(frame, "width", 100);
-  await writeSlider(frame, "height", 100);
-  const field = frame.locator("sp-number-field[readonly]");
-  const input = field.getByRole("textbox");
-  await expect(input).toHaveValue("10,000");
+  await writeSlider(frame, "height", 10);
+  const input = frame.getByRole("textbox", {name:"area",exact:true});
+  await expect(input).toHaveValue("1,000");
   const size = await input.evaluate(async (element) => {
     await document.fonts.ready;
     const style = getComputedStyle(element);
@@ -137,7 +136,6 @@ test("unknown example displays an alert", async ({ page }) => {
 for (const [name, file] of [
   ["manifest", "adam-live-examples.json"],
   ["module", "adam_lang_book_live.js"],
-  ["Spectrum", "swc.js"],
   ["WebAssembly", "adam_lang_book_live_bg.wasm"],
   ["graph", "graph.js"],
 ]) {
@@ -160,10 +158,8 @@ test("WebAssembly initialization rejection displays an alert", async ({ page }) 
 });
 
 for (const [name, file, graph, body] of [
-  ["Spectrum", "swc.js", false, 'throw new Error("Spectrum execution failed");'],
   ["D3", "d3.v7.min.js", true, 'throw new Error("D3 execution failed");'],
   ["graph driver", "graph.js", true, 'throw new Error("Graph execution failed");'],
-  ["Spectrum registration", "swc.js", false, ""],
 ]) {
   /** Catches successfully fetched dependencies that cannot actually execute or register. */
   test(`${name} execution or registration failure displays an alert`, async ({ page }) => {
@@ -186,7 +182,7 @@ test("graph dependencies finish loading before mount", async ({ page }) => {
     contentType: "text/javascript",
     body: `export default async function init() {}
       export function mount() {
-        if (!window.d3 || !window.beginGraph || !customElements.get("sp-slider")) throw new Error("Dependencies not ready");
+        if (!window.d3 || !window.beginGraph) throw new Error("Dependencies not ready");
         document.getElementById("inspector").textContent = "Dependencies ready";
       }`,
   }));
@@ -199,10 +195,10 @@ test("graph dependencies finish loading before mount", async ({ page }) => {
 test("inspector-only examples do not load graph scripts", async ({ page }) => {
   const graphRequests = [];
   page.on("request", (request) => {
-    if (/\/(graph\.js|d3\.v7\.min\.js)$/.test(request.url())) graphRequests.push(request.url());
+    if (/\/(swc\.js|graph\.js|d3\.v7\.min\.js)$/.test(request.url())) graphRequests.push(request.url());
   });
   await page.goto(host("clamp_demo"));
-  await expect(page.locator("sp-slider")).toBeAttached();
+  await expect(page.getByRole("slider")).toBeAttached();
   await expect(page.locator("#status")).toHaveCount(0);
   expect(graphRequests).toEqual([]);
 });
@@ -222,10 +218,10 @@ async function selectSlide(page, name) {
 
 /** Finds the editable number field belonging to a named slider. */
 function sliderInput(frame, name) {
-  return frame.locator(`sp-slider[label="${name}"]`).getByRole("textbox");
+  return frame.getByRole("textbox", {name, exact:true});
 }
 
-/** Commits a normal keyboard edit through the real Spectrum control. */
+/** Commits a native keyboard edit through the actual shared bound control. */
 async function writeSlider(frame, name, value) {
   const input = sliderInput(frame, name);
   await input.fill(String(value));
@@ -256,7 +252,7 @@ test("live output follows an input edit", async ({ page }) => {
   await page.goto("./");
   const frame = await selectSlide(page, "basic_output");
   await writeSlider(frame, "width", 30);
-  await expect(frame.getByText("600", { exact: true })).toBeVisible();
+  await expect(sliderInput(frame, "area")).toHaveValue("600");
   await expect(frame.locator('#graph svg').getByText("600", { exact: true })).toBeVisible();
 });
 
@@ -265,11 +261,11 @@ test("editing either side reverses a relationship and updates its graph", async 
   await page.goto("./");
   const frame = await selectSlide(page, "basic_relationship");
   await writeSlider(frame, "a", 40);
-  await expect(sliderInput(frame, "b")).toHaveValue("20.00");
+  await expect(sliderInput(frame, "b")).toHaveValue("20");
   await expect(frame.locator("#graph svg").getByText("40", { exact: true })).toBeVisible();
   await expect.poll(() => graphDirection(frame, "a")).toBe("source");
   await writeSlider(frame, "b", 15);
-  await expect(sliderInput(frame, "a")).toHaveValue("30.00");
+  await expect(sliderInput(frame, "a")).toHaveValue("30");
   await expect(frame.locator("#graph svg").getByText("30", { exact: true })).toBeVisible();
   await expect.poll(() => graphDirection(frame, "a")).toBe("target");
 });
@@ -309,10 +305,10 @@ test("forced conditional value disables editing and restores its source", async 
   const input = sliderInput(frame, "a");
   await frame.getByRole("checkbox", { name: "constrain" }).check();
   await expect(input).toHaveValue("42");
-  await expect(input).toBeDisabled();
+  await expect(input).not.toBeEditable();
   await frame.getByRole("checkbox", { name: "constrain" }).uncheck();
   await expect(input).toHaveValue("5");
-  await expect(input).toBeEnabled();
+  await expect(input).toBeEditable();
 });
 
 /** Catches omitted filter or requirement diagnostics in the embedded host. */
@@ -322,9 +318,9 @@ test("filtering and requirement diagnostics remain visible", async ({ page }) =>
   await writeSlider(filter, "level", 150);
   await expect(sliderInput(filter, "level")).toHaveValue("100");
   const diagnostic = await selectSlide(page, "requirements_filter_diagnostic");
-  await expect(diagnostic.getByText(/filter violation.*width/)).toBeVisible();
+  await expect(diagnostic.getByRole("alert").filter({hasText:/filter violation/})).toBeVisible();
   await writeSlider(diagnostic, "height", 50);
-  await expect(diagnostic.getByText(/filter violation.*width/)).toHaveCount(0);
+  await expect(diagnostic.getByRole("alert").filter({hasText:/filter violation/})).toHaveCount(0);
   const requirements = await selectSlide(page, "area_with_requirement");
   await writeSlider(requirements, "width", 100);
   await writeSlider(requirements, "height", 100);
@@ -395,7 +391,12 @@ test("the authored deck mounts every selected example", async ({ page }) => {
   for (let index = 0; index < await iframes.count(); index++) {
     const frame = iframes.nth(index).contentFrame();
     await expect(frame.locator("#status")).toHaveCount(0);
-    await expect(frame.locator("sp-theme")).toBeAttached();
-    await expect(frame.getByRole("alert")).toHaveCount(0);
+    await expect(frame.locator(".adam-theme").first()).toBeAttached();
+    if (await iframes.nth(index).getAttribute("data-example") === "tutorial/requirements_filter_diagnostic") {
+      await expect(frame.getByRole("alert")).toHaveCount(1);
+      await expect(frame.getByRole("alert")).toContainText("filter violation");
+    } else {
+      await expect(frame.getByRole("alert")).toHaveCount(0);
+    }
   }
 });

@@ -34,6 +34,9 @@ generational-box = "0.7.10"
 keyboard-types = "0.7"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 
+[build-dependencies]
+lightningcss = { version = "1.0.0-alpha.71", default-features = false }
+
 [lints]
 workspace = true
 

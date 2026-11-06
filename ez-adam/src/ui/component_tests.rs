@@ -164,7 +164,7 @@ fn cell_panel_dispatches_output_toggle() {
     let (mut dom, events, observed, _) = mount(0);
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("cell-panel") && html.contains("amount"));
-    assert_eq!(html.matches("class=\"dx-input-").count(), 4);
+    assert_eq!(html.matches("type=\"text\"").count(), 4);
     assert!(!html.contains("<sp-"));
     let (_, id) = events.iter().rfind(|(name, _)| name == "click").unwrap();
     click(&dom, *id);

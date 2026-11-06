@@ -52,6 +52,9 @@ impl DocumentProvider for NativeDocument {
     ///
     /// - Complexity: O(script bytes) plus the Node process and Intl execution.
     fn eval(&self, script: String) -> Eval {
+        if script.starts_with("/* adam-control-styles */") {
+            return Eval::new(self.owner.insert(Box::new(Reply(Some(Value::Null)))));
+        }
         if let Some((_, tail)) = script.rsplit_once("return await runNumericEvents(window, \"") {
             let source = Rc::new(RefCell::new(Source {
                 token: tail.split('"').next().unwrap().into(),

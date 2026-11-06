@@ -10,6 +10,7 @@ mod numeric_editor;
 mod numeric_events;
 pub mod separator;
 pub mod slider;
+mod styles;
 pub mod switch;
 mod theme;
 
@@ -29,6 +30,7 @@ pub use label::Label;
 pub use numeric_editor::{NumericEditor, NumericEditorProps, NumericSlider};
 pub use separator::Separator;
 pub use slider::{RangeSlider, Slider};
+pub use styles::{CONTROL_CSS, style_delivery_script};
 pub use switch::Switch;
 pub use theme::Theme;
 

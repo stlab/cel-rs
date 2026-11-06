@@ -31,14 +31,13 @@ export function parseExampleOptions(url) {
 /**
  * Resolves runtime assets beside the host beneath any static-site prefix.
  * @param {URL} base Host page URL.
- * @returns {{ module: URL, manifest: URL, spectrum: URL, d3: URL, graph: URL }}
+ * @returns {{ module: URL, manifest: URL, d3: URL, graph: URL }}
  */
 export function exampleAssetUrls(base) {
   const theme = new URL("theme/", base);
   return {
     module: new URL("adam_lang_book_live.js", theme),
     manifest: new URL("adam-live-examples.json", theme),
-    spectrum: new URL("swc.js", theme),
     d3: new URL("d3.v7.min.js", theme),
     graph: new URL("graph.js", theme),
   };
@@ -60,7 +59,6 @@ export async function loadExample(options, urls) {
       if (!response.ok) throw new Error(`Failed to fetch examples: HTTP ${response.status}`);
       return response.json();
     }),
-    import(urls.spectrum.href),
   ];
   if (options.graph) {
     document.getElementById("graph").hidden = false;
@@ -68,9 +66,6 @@ export async function loadExample(options, urls) {
     loaders.push(import(urls.d3.href), import(urls.graph.href));
   }
   const [runtime, manifest] = await Promise.all(loaders);
-  for (const name of ["sp-theme", "sp-number-field", "sp-slider", "sp-checkbox"]) {
-    if (!customElements.get(name)) throw new Error(`Required Spectrum element is not registered: ${name}`);
-  }
   if (options.graph && (
     typeof window.d3?.select !== "function"
     || typeof window.d3?.forceSimulation !== "function"

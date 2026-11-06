@@ -3,9 +3,7 @@ use dioxus::prelude::*;
 use dioxus_icons::lucide::Check;
 use dioxus_primitives::checkbox::{self, CheckboxProps};
 
-#[css_module("/src/components/checkbox/style.css")]
-/// Contains the generated stylesheet and class identifiers.
-struct Styles;
+include!(concat!(env!("OUT_DIR"), "/checkbox-styles.rs"));
 
 /// Renders the official checkbox with controlled state and accessible interaction.
 ///
@@ -19,6 +17,7 @@ struct Styles;
 /// ```
 #[component]
 pub fn Checkbox(props: CheckboxProps) -> Element {
+    crate::components::styles::use_control_styles();
     rsx! {
         checkbox::Checkbox {
             class: Styles::dx_checkbox,

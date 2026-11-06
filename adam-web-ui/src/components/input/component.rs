@@ -1,8 +1,6 @@
 //! Styled upstream input implementation; see `../UPSTREAM.md`.
 use dioxus::prelude::*;
-#[css_module("/src/components/input/style.css")]
-/// Contains the generated stylesheet and class identifiers.
-struct Styles;
+include!(concat!(env!("OUT_DIR"), "/input-styles.rs"));
 
 /// Renders a styled native input with synchronous native event values.
 ///
@@ -40,6 +38,7 @@ pub fn Input(
     attributes: Vec<Attribute>,
     children: Element,
 ) -> Element {
+    crate::components::styles::use_control_styles();
     rsx! {
         input {
             class: Styles::dx_input,

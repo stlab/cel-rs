@@ -24,5 +24,10 @@ dx components add button input checkbox switch slider label separator \
 ```
 
 Local adaptations add adjacent contracts and module tutorials. Theme tokens
-are scoped to `.adam-theme`; `Theme` installs the library-owned asset.
+are scoped to the theme module; `Theme` installs the library-owned embedded
+stylesheet. Lightning CSS transforms the original modules and supplies their
+class exports using the public `adam_<component>_[local]` naming pattern.
+The installer deduplicates one immutable style element per document, independent
+of Dioxus root lifetimes and publication paths. Every standalone styled control
+also installs it; consumers do not need a Dioxus asset bundler.
 Numeric editor and slider composition are local code, not upstream components.

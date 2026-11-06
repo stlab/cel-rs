@@ -137,6 +137,13 @@ impl Gate {
 impl Document for NodeDocument {
     /// Runs locale code with a single JSON message transport.
     fn eval(&self, script: String) -> Eval {
+        if script.starts_with("/* adam-control-styles */") {
+            return Eval::new(self.owner.insert(Box::new(Reply(
+                None,
+                None,
+                Some(serde_json::Value::Null),
+            ))));
+        }
         if script.contains("setTimeout(() => resolve(null), 5000)") {
             return Eval::new(self.owner.insert(Box::new(Reply(
                 None,

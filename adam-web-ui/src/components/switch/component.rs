@@ -2,9 +2,7 @@
 use dioxus::prelude::*;
 use dioxus_primitives::switch::{self, SwitchProps};
 
-#[css_module("/src/components/switch/style.css")]
-/// Contains the generated stylesheet and class identifiers.
-struct Styles;
+include!(concat!(env!("OUT_DIR"), "/switch-styles.rs"));
 
 /// Renders the official switch with controlled state and accessible interaction.
 ///
@@ -18,6 +16,7 @@ struct Styles;
 /// ```
 #[component]
 pub fn Switch(props: SwitchProps) -> Element {
+    crate::components::styles::use_control_styles();
     rsx! {
         switch::Switch {
             class: Styles::dx_switch,

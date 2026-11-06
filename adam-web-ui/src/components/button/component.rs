@@ -3,9 +3,7 @@ use dioxus::prelude::*;
 use dioxus_primitives::dioxus_attributes::attributes;
 use dioxus_primitives::merge_attributes;
 
-#[css_module("/src/components/button/style.css")]
-/// Contains the generated stylesheet and class identifiers.
-struct Styles;
+include!(concat!(env!("OUT_DIR"), "/button-styles.rs"));
 
 /// Selects the button's visual intent without changing native button semantics.
 ///
@@ -126,6 +124,7 @@ pub fn Button(
     onkeydown: Option<EventHandler<KeyboardEvent>>,
     children: Element,
 ) -> Element {
+    crate::components::styles::use_control_styles();
     let base = attributes!(button {
         class: Styles::dx_button,
         "data-style": variant.class(),

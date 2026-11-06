@@ -3,9 +3,7 @@ use dioxus::prelude::*;
 use dioxus_primitives::separator::{self, SeparatorProps};
 use dioxus_primitives::{dioxus_attributes::attributes, merge_attributes};
 
-#[css_module("/src/components/separator/style.css")]
-/// Contains the generated stylesheet and class identifiers.
-struct Styles;
+include!(concat!(env!("OUT_DIR"), "/separator-styles.rs"));
 
 /// Renders the official semantic or decorative separator.
 ///
@@ -19,6 +17,7 @@ struct Styles;
 /// ```
 #[component]
 pub fn Separator(props: SeparatorProps) -> Element {
+    crate::components::styles::use_control_styles();
     let base = attributes!(div {
         class: Styles::dx_separator,
     });

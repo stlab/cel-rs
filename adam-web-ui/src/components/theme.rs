@@ -3,14 +3,12 @@
 //! Wrap each independent Dioxus root in [`Theme`].
 use dioxus::prelude::*;
 
-#[css_module("/assets/dx-components-theme.css")]
-/// Contains document-deduplicated theme assets and the scoped root class.
-struct Styles;
+include!(concat!(env!("OUT_DIR"), "/theme-styles.rs"));
 
 /// Installs reusable component tokens and wraps children in a theme scope.
 ///
-/// The immutable stylesheet is a library asset, not a consumer-relative URL.
-/// Dioxus's CSS module loader deduplicates the asset across independent roots;
+/// The immutable stylesheet is embedded, not a consumer-relative URL.
+/// The document-owned installer deduplicates styles across independent roots;
 /// unmounting one wrapper does not remove another root's styles.
 ///
 /// # Examples
@@ -21,6 +19,7 @@ struct Styles;
 /// ```
 #[component]
 pub fn Theme(children: Element) -> Element {
+    super::styles::use_control_styles();
     rsx! {
         div { class: "{Styles::adam_theme} adam-theme", {children} }
     }

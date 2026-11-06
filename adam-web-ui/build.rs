@@ -1,0 +1,73 @@
+//! Embeds official control styles with supported CSS-module exports.
+use lightningcss::{
+    css_modules::{Config, Pattern},
+    stylesheet::{ParserOptions, PrinterOptions, StyleSheet},
+};
+use std::{env, fmt::Write, fs, path::PathBuf};
+
+/// Transforms each official module and writes its class exports and combined stylesheet.
+///
+/// - Complexity: O(b + k log k) time and O(b + k) storage for stylesheet/output
+///   bytes b and exported names k, including deterministic export ordering.
+fn main() {
+    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR"));
+    let mut combined = String::new();
+    for name in [
+        "theme",
+        "button",
+        "input",
+        "checkbox",
+        "switch",
+        "slider",
+        "label",
+        "separator",
+    ] {
+        let path = if name == "theme" {
+            PathBuf::from("assets/dx-components-theme.css")
+        } else {
+            PathBuf::from(format!("src/components/{name}/style.css"))
+        };
+        println!("cargo:rerun-if-changed={}", path.display());
+        let source = fs::read_to_string(&path).expect("official stylesheet is readable");
+        let pattern = format!("adam_{name}_[local]");
+        let sheet = StyleSheet::parse(
+            &source,
+            ParserOptions {
+                filename: path.to_string_lossy().into_owned(),
+                css_modules: Some(Config {
+                    pattern: Pattern::parse(&pattern).expect("valid module naming pattern"),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("official stylesheet parses");
+        let result = sheet
+            .to_css(PrinterOptions::default())
+            .expect("official stylesheet transforms");
+        combined.push_str(&result.code);
+        combined.push('\n');
+        let mut generated = String::from(
+            "/// Contains supported CSS-module class exports.\n#[allow(non_upper_case_globals)]\nstruct Styles;\n#[allow(non_upper_case_globals, dead_code)]\nimpl Styles {\n",
+        );
+        let mut exports: Vec<_> = result
+            .exports
+            .expect("module exports")
+            .into_iter()
+            .collect();
+        exports.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        for (class, export) in exports {
+            writeln!(
+                generated,
+                "/// Names the scoped `{class}` selector.\nconst {}: &'static str = {:?};",
+                class.replace('-', "_"),
+                export.name
+            )
+            .unwrap();
+        }
+        generated.push_str("}\n");
+        fs::write(output.join(format!("{name}-styles.rs")), generated)
+            .expect("write module exports");
+    }
+    fs::write(output.join("adam-controls.css"), combined).expect("write embedded styles");
+}

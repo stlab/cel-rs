@@ -2,9 +2,7 @@
 use dioxus::prelude::*;
 use dioxus_primitives::slider::{self, RangeSliderProps, SliderProps};
 
-#[css_module("/src/components/slider/style.css")]
-/// Contains the generated stylesheet and class identifiers.
-struct Styles;
+include!(concat!(env!("OUT_DIR"), "/slider-styles.rs"));
 
 /// Renders the official finite-domain slider with controlled state.
 ///
@@ -18,6 +16,7 @@ struct Styles;
 /// ```
 #[component]
 pub fn Slider(props: SliderProps) -> Element {
+    crate::components::styles::use_control_styles();
     rsx! {
         slider::Slider {
             class: Styles::dx_slider,
@@ -52,6 +51,7 @@ pub fn Slider(props: SliderProps) -> Element {
 /// ```
 #[component]
 pub fn RangeSlider(props: RangeSliderProps) -> Element {
+    crate::components::styles::use_control_styles();
     rsx! {
         slider::RangeSlider {
             class: Styles::dx_slider,
