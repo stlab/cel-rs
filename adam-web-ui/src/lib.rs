@@ -4,6 +4,7 @@
 //! tied to any one Dioxus renderer feature, so it's usable from a desktop app (`begin`), a
 //! `dioxus/web` app, or a plain `wasm-bindgen` embed with no full app shell around it.
 
+pub mod binding;
 pub mod build;
 pub mod components;
 pub mod diagnostics;
@@ -22,6 +23,7 @@ pub use graph::{
 };
 pub use inspector::{SheetInspector, numeric_input_script};
 pub use labels::{
-    CellMeta, Labels, Renderer, WriteStrFn, format_adam_error, format_module_diagnostic,
-    format_parse_error, format_rounded, labels_from_cell_names,
+    CaptureFn, CellMeta, ExactRangeFn, Labels, PrepareFn, PreparedWrite, Renderer, ScalarCodec,
+    format_adam_error, format_module_diagnostic, format_parse_error, format_rounded,
+    labels_from_cell_names,
 };

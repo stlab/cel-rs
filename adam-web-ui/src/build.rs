@@ -2,7 +2,7 @@
 
 use crate::labels::{
     Labels, Renderer, format_adam_error, format_module_diagnostic, format_parse_error,
-    format_validation_issue, labels_from_cell_names,
+    format_source_labels, format_validation_issue, labels_from_cell_names,
 };
 use adam_lang::{
     AdamParser, ModuleDiagnostic, ParsedSheet, SheetDiagnostics, SourceLabel, TypeRegistry,
@@ -11,7 +11,7 @@ use adam_rs::{CellId, Error};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
-/// A runtime propagation error with independently owned source diagnostics.
+/// A runtime mutation error with independently owned source diagnostics.
 ///
 /// The failed candidate is discarded and is never part of this value.
 ///
@@ -20,10 +20,10 @@ use std::collections::HashMap;
 /// See [`BuildError::render`] for formatting a runtime failure.
 #[derive(Debug)]
 pub struct RuntimeFailure {
-    /// The typed error returned by `Sheet::propagate`.
+    /// The typed error returned by a mutating sheet operation.
     pub error: Error,
-    /// Source and provenance metadata captured before propagation.
-    pub diagnostics: SheetDiagnostics,
+    /// Source and provenance metadata captured before mutation.
+    pub diagnostics: Box<SheetDiagnostics>,
     /// Requested display name for the anonymous root source.
     pub file_name: String,
 }
@@ -37,7 +37,7 @@ pub struct RuntimeFailure {
 /// # Examples
 ///
 /// See [`BuildError::Validation`] for the construction result that contains issues.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidationIssue {
     /// Stable public name or authored label of the affected cell.
     pub key: String,
@@ -66,9 +66,11 @@ pub struct BuiltSheet {
     pub diagnostics: SheetDiagnostics,
     /// Stable public root names mapped to their cell IDs.
     pub keys: IndexMap<String, CellId>,
+    /// Root diagnostic display name retained for later host mutations.
+    pub file_name: String,
 }
 
-/// A source-construction failure that never owns a candidate sheet.
+/// A construction or restoration failure that never owns a candidate sheet.
 ///
 /// # Examples
 ///
@@ -80,6 +82,8 @@ pub struct BuiltSheet {
 /// ```
 #[derive(Debug)]
 pub enum BuildError {
+    /// A typed host replay or publication failure, without a candidate model.
+    Recovery(Box<crate::binding::HostRejection>),
     /// A lexical or syntactic error with its source text and display name.
     Parse {
         /// The parser's typed error.
@@ -107,6 +111,9 @@ pub enum BuildError {
 impl BuildError {
     /// Renders the failure without requiring access to a candidate sheet.
     ///
+    /// - Complexity: O(rendered source and diagnostic bytes), excluding snippet
+    ///   rendering and the underlying error formatter's costs.
+    ///
     /// # Examples
     ///
     /// ```
@@ -116,6 +123,32 @@ impl BuildError {
     /// ```
     pub fn render(&self, renderer: &Renderer) -> String {
         match self {
+            Self::Recovery(rejection) => match rejection.as_ref() {
+                crate::binding::HostRejection::Input(error) => error.to_string(),
+                crate::binding::HostRejection::Binding(error) => error.to_string(),
+                crate::binding::HostRejection::Validation(issues) => issues
+                    .iter()
+                    .map(|issue| {
+                        format_source_labels(
+                            &format!("{}: {}", issue.key, issue.message),
+                            &issue.labels,
+                            None,
+                            renderer,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                crate::binding::HostRejection::Mutation(failure) => {
+                    let source = failure.diagnostics.anonymous_source();
+                    format_adam_error(
+                        &failure.error,
+                        &failure.diagnostics,
+                        source.map_or("", adam_lang::SourceId::text),
+                        &failure.file_name,
+                        renderer,
+                    )
+                }
+            },
             Self::Parse {
                 error,
                 source,
@@ -290,6 +323,7 @@ fn initialize_sheet_with_file_name(
             }
             parsed.clear_changed();
             Ok(BuiltSheet {
+                file_name: display_file_name(&diagnostics, requested_file_name),
                 parsed,
                 labels,
                 diagnostics,
@@ -299,7 +333,7 @@ fn initialize_sheet_with_file_name(
         Err(error) => Err(BuildError::Runtime(Box::new(RuntimeFailure {
             error,
             file_name: display_file_name(&diagnostics, requested_file_name),
-            diagnostics,
+            diagnostics: Box::new(diagnostics),
         }))),
     }
 }
@@ -322,7 +356,7 @@ fn display_file_name(diagnostics: &SheetDiagnostics, requested_file_name: Option
 ///
 /// - Complexity: O(c + r) time and O(v) output space for cells c, requirements r,
 ///   and violations v.
-fn validation_issues(parsed: &ParsedSheet) -> Vec<ValidationIssue> {
+pub(crate) fn validation_issues(parsed: &ParsedSheet) -> Vec<ValidationIssue> {
     let names: HashMap<_, _> = parsed
         .cell_names
         .iter()

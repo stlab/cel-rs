@@ -330,7 +330,7 @@ pub fn numeric_input_script(field_id: &str, slider: bool) -> String {
 /// Returns `true` if `typed`, read as a number, differs from `actual` (a cell's post-write
 /// display string) after applying [`format_rounded`]'s own rounding to both — i.e. a range
 /// filter silently clamped the written value to something other than what was typed. A range
-/// filter's `write_str`/`Sheet::propagate` both return `Ok` in that case (clamping always
+/// filter's prepared write/`Sheet::propagate` both return `Ok` in that case (clamping always
 /// produces some valid value), so this is the only place that distinguishes it from an
 /// unmodified write.
 ///
@@ -361,6 +361,8 @@ struct ErrorContext {
 ///
 /// - Postcondition: `has_error` is `true` on parse or propagation failure, or when a range
 ///   filter clamped `val` away from what was typed (see [`clamped_away`]); `false` otherwise.
+/// - Complexity: Input parsing plus propagation, violated-filter iteration, and
+///   diagnostic formatting.
 fn write_and_propagate(
     mut parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
@@ -377,9 +379,17 @@ fn write_and_propagate(
         has_error.set(false);
         return;
     }
+    let prepared = match (meta.prepare)(val) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            has_error.set(true);
+            crate::diagnostics::report_error(&error.to_string());
+            return;
+        }
+    };
     let mut parsed_w = parsed.write();
     let diagnostics = parsed_w.diagnostics();
-    let write_result = (meta.write_str)(&mut parsed_w, val);
+    let write_result = prepared.apply(&mut parsed_w, id);
     drop(labels_r);
     let propagate_result = match write_result {
         Ok(()) => parsed_w.propagate(),

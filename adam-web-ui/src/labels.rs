@@ -5,6 +5,7 @@
 //! [`format_adam_error`] formats an [`adam_rs::Error`] as a rustc-style diagnostic when
 //! possible.
 
+use crate::input::{InputError, NumberKind, NumericRange};
 use adam_lang::SheetDiagnostics;
 use adam_lang::type_registry::TypeShape;
 use adam_rs::{CellId, Error, Sheet};
@@ -13,20 +14,93 @@ use cel_parser::{FormatRustcStyle, SpanContext, SpanLabel};
 use indexmap::IndexMap;
 use std::any::TypeId;
 
-/// Type-erased write closure: parses a string and writes it to a cell.
+/// Parses canonical input without mutating a model.
 ///
 /// # Examples
 ///
-/// `(meta.write_str)(&mut sheet, "42")` applies a draft through its registered
-/// cell-type parser before the caller propagates the sheet.
-pub type WriteStrFn = Box<dyn Fn(&mut Sheet, &str) -> Result<(), Error>>;
+/// `(meta.prepare)("42")` produces an owned write before a transaction starts.
+pub type PrepareFn = Box<dyn Fn(&str) -> Result<PreparedWrite, InputError>>;
+
+/// Encodes an effective value exactly or reports an unavailable capability.
+///
+/// # Examples
+/// `(meta.capture)(&sheet)` returns canonical text, not rounded display text.
+pub type CaptureFn = Box<dyn Fn(&Sheet) -> Result<String, InputError>>;
+
+/// Reads exact live filter endpoints without a binary64 conversion.
+///
+/// # Examples
+/// `meta.exact_range.as_ref().map(|range| range(&sheet))` queries a range filter.
+pub type ExactRangeFn = Box<dyn Fn(&Sheet) -> Result<NumericRange, InputError>>;
+
+/// Owns the heterogeneous write operation until its transaction applies it.
+type ApplyFn = Box<dyn FnOnce(&mut Sheet, CellId) -> Result<(), Error>>;
+
+/// Owns an already decoded scalar, independent of any mutable sheet.
+///
+/// # Examples
+/// ```
+/// let mut sheet = adam_rs::Sheet::new();
+/// let id = sheet.add_cell(1_i32);
+/// adam_web_ui::PreparedWrite::new(2_i32).apply(&mut sheet, id).unwrap();
+/// assert_eq!(*sheet.read::<i32>(id).unwrap(), 2);
+/// ```
+pub struct PreparedWrite {
+    apply: ApplyFn,
+}
+
+impl PreparedWrite {
+    /// Takes ownership of a decoded scalar for one later write.
+    ///
+    /// # Examples
+    /// See [`PreparedWrite`] for applying a decoded scalar.
+    pub fn new<T: std::any::Any>(value: T) -> Self {
+        Self {
+            apply: Box::new(move |sheet, id| sheet.write(id, value)),
+        }
+    }
+
+    /// Consumes the value in one mutating write without parsing.
+    ///
+    /// # Errors
+    /// Returns the sheet's invalid-ID or type error. On error the caller must
+    /// discard the sheet without reading or reusing it.
+    ///
+    /// # Examples
+    /// See [`PreparedWrite`] for a successful write.
+    pub fn apply(self, sheet: &mut Sheet, id: CellId) -> Result<(), Error> {
+        (self.apply)(sheet, id)
+    }
+}
+
+/// Supplies an exact scalar encoding and its inverse.
+///
+/// - Precondition: decoding an encoded value preserves that value, including
+///   signed zero for floating-point scalars. NaN payload identity is not part of
+///   Rust primitive textual encoding.
+/// - Complexity: Encoding and decoding have the supplied functions' costs.
+///
+/// # Examples
+/// ```
+/// let codec = adam_web_ui::ScalarCodec::<u64> {
+///     encode: u64::to_string,
+///     decode: |s| s.parse().map_err(|_| adam_web_ui::input::InputError::Lexical(s.into())),
+/// };
+/// assert_eq!((codec.decode)(&(codec.encode)(&u64::MAX)).unwrap(), u64::MAX);
+/// ```
+pub struct ScalarCodec<T> {
+    /// Encodes without rounding or narrowing.
+    pub encode: fn(&T) -> String,
+    /// Decodes or reports an input diagnostic without mutation.
+    pub decode: fn(&str) -> Result<T, InputError>,
+}
 
 /// Display and write metadata for a single cell.
 ///
 /// # Examples
 ///
 /// Read `labels.cells[&id].number_input_safe` to select a binary64 numeric control, and
-/// invoke its `display` callback to obtain the exact current text.
+/// invoke its `capture` callback to obtain exact current text.
 pub struct CellMeta {
     /// Human-readable cell name shown in the inspector.
     pub label: String,
@@ -44,10 +118,16 @@ pub struct CellMeta {
     pub is_integer: bool,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,
-    /// Parses `s` and writes the result to the cell; returns `Err` on parse failure or type
-    /// mismatch. May also always return `Err` for a cell type with no write support yet (e.g.
-    /// compound values — see [`Labels::add_compound_cell`]).
-    pub write_str: WriteStrFn,
+    /// Decodes canonical input before any mutation in a transaction.
+    pub prepare: PrepareFn,
+    /// Encodes the effective scalar exactly, separately from display formatting.
+    pub capture: CaptureFn,
+    /// Reports whether exact scalar encoding and decoding are supported.
+    pub codec_supported: bool,
+    /// Identifies the concrete numeric primitive without narrowing.
+    pub number_kind: Option<NumberKind>,
+    /// Reads exact live filter bounds, if this cell has a range filter.
+    pub exact_range: Option<ExactRangeFn>,
     /// Live slider bounds, present only for a numeric cell whose filter is a
     /// [`adam_rs::FilterKind::Range`] — recomputed from the filter's current argument values on
     /// every call, so a range driven by other cells or relationships stays live.
@@ -86,9 +166,11 @@ impl Labels {
     ///
     /// - Precondition: `id` is a live cell in the sheet this `Labels` will be used with.
     /// - Precondition: `T` matches the type registered with `Sheet::add_cell` for `id`.
+    /// - Precondition: `T`'s `Display`/`FromStr` pair satisfies [`ScalarCodec`]'s
+    ///   preservation contract; otherwise use [`Self::add_cell_with_codec`].
     ///
-    /// Only Boolean control classification is inferred here. Use
-    /// [`labels_from_cell_names`] for automatic numeric/range classification.
+    /// Infers Boolean and primitive numeric classification. Use
+    /// [`labels_from_cell_names`] to attach live filter-range metadata.
     ///
     /// - Complexity: O(label.len()) registration time and space; display and parsing
     ///   callbacks subsequently incur their concrete type's formatting/parsing costs.
@@ -105,29 +187,73 @@ impl Labels {
     pub fn add_cell<T>(&mut self, id: CellId, label: &str)
     where
         T: std::any::Any + std::fmt::Display + std::str::FromStr + 'static,
-        T::Err: std::fmt::Display,
+        T::Err: std::fmt::Display + std::any::Any,
     {
+        self.add_cell_with_codec(
+            id,
+            label,
+            ScalarCodec {
+                encode: T::to_string,
+                decode: decode_scalar::<T>,
+            },
+        );
+    }
+
+    /// Registers a custom scalar with an exact encoder and decoder.
+    ///
+    /// - Precondition: `id` stores `T` in the associated sheet.
+    /// - Precondition: `codec` satisfies [`ScalarCodec`]'s preservation contract.
+    /// - Complexity: O(label bytes) registration; callbacks incur codec costs.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut sheet = adam_rs::Sheet::new();
+    /// let id = sheet.add_cell(true);
+    /// let mut labels = adam_web_ui::Labels::new();
+    /// labels.add_cell_with_codec(id, "enabled", adam_web_ui::ScalarCodec {
+    ///     encode: bool::to_string,
+    ///     decode: |s| s.parse::<bool>()
+    ///         .map_err(|e| adam_web_ui::input::InputError::Lexical(e.to_string())),
+    /// });
+    /// assert_eq!((labels.cells[&id].capture)(&sheet).unwrap(), "true");
+    /// ```
+    pub fn add_cell_with_codec<T: std::any::Any>(
+        &mut self,
+        id: CellId,
+        label: &str,
+        codec: ScalarCodec<T>,
+    ) {
+        let kind = numeric_kind::<T>();
+        let encode = codec.encode;
         self.cells.insert(
             id,
             CellMeta {
                 label: label.to_owned(),
                 is_bool: TypeId::of::<T>() == TypeId::of::<bool>(),
-                is_numeric: false,
-                number_input_safe: false,
-                is_integer: false,
+                is_numeric: kind.is_some(),
+                number_input_safe: kind.is_some_and(|kind| {
+                    !matches!(
+                        kind,
+                        NumberKind::Signed(64 | 128) | NumberKind::Unsigned(64 | 128)
+                    )
+                }),
+                is_integer: matches!(kind, Some(NumberKind::Signed(_) | NumberKind::Unsigned(_))),
                 display: Box::new(move |sheet| {
                     sheet
                         .read::<T>(id)
-                        .map(|v| format!("{}", v))
-                        .unwrap_or_else(|_| "?".to_owned())
+                        .map(encode)
+                        .unwrap_or_else(|error| format!("<unavailable: {error}>"))
                 }),
-                write_str: Box::new(move |sheet, s| {
-                    let value = s.parse::<T>().map_err(|e| Error::MethodFailed {
-                        error: anyhow::anyhow!("parse error: {}", e),
-                        sites: vec![],
-                    })?;
-                    sheet.write(id, value)
+                prepare: Box::new(move |s| (codec.decode)(s).map(PreparedWrite::new)),
+                capture: Box::new(move |sheet| {
+                    sheet
+                        .read::<T>(id)
+                        .map(encode)
+                        .map_err(|e| InputError::UnsupportedEditor(e.to_string()))
                 }),
+                codec_supported: true,
+                number_kind: kind,
+                exact_range: None,
                 range: None,
             },
         );
@@ -135,7 +261,7 @@ impl Labels {
 
     /// Registers display-only metadata for a canonical compound cell of any shape.
     ///
-    /// `write_str` always returns `Err` — no compound editor exists yet (tracked as a
+    /// `prepare` and `capture` return `Err` — no exact compound codec exists yet (tracked as a
     /// follow-up: see the "Support editing tuple-typed cells in `begin`" GitHub issue). The
     /// field still participates fully in [`crate::SheetInspector`]'s existing
     /// invalid/warning/disabled machinery, since that's entirely keyed on `CellId`, not on any
@@ -173,12 +299,19 @@ impl Labels {
                         .and_then(|format| format(sheet).ok())
                         .unwrap_or_else(|| "?".to_owned())
                 }),
-                write_str: Box::new(|_sheet, _s| {
-                    Err(Error::MethodFailed {
-                        error: anyhow::anyhow!("editing compound cells is not yet supported"),
-                        sites: vec![],
-                    })
+                prepare: Box::new(|_| {
+                    Err(InputError::UnsupportedEditor(
+                        "editing compound cells is not yet supported".into(),
+                    ))
                 }),
+                capture: Box::new(|_| {
+                    Err(InputError::UnsupportedEditor(
+                        "exact compound capture is not yet supported".into(),
+                    ))
+                }),
+                codec_supported: false,
+                number_kind: None,
+                exact_range: None,
                 range: None,
             },
         );
@@ -248,8 +381,8 @@ impl_to_f64_display!(
 /// `adam_lang::TypeRegistry::new()` registers. Tuple and array cells
 /// appear with a Debug-formatted, display-only entry via
 /// [`Labels::add_compound_cell`]. Cells whose `TypeId` is none of the built-in
-/// primitives are silently skipped, so they simply won't appear in the sidebar.
-/// Callable signatures are skipped because no callable Inspector exists.
+/// primitives, including callable signatures, remain visible with an explicit
+/// unsupported-codec diagnostic.
 ///
 /// - Complexity: O(n + t + s) registration work for cells n, copied label bytes t,
 ///   and prepared compound type structure s; later value formatting has its own costs.
@@ -275,7 +408,10 @@ pub fn labels_from_cell_names(
                 labels.add_compound_cell(sheet, id, name);
                 continue;
             }
-            TypeShape::Callable(_, _) => continue,
+            TypeShape::Callable(_, _) => {
+                labels.add_compound_cell(sheet, id, name);
+                continue;
+            }
         };
         macro_rules! try_numeric_ty {
             ($T:ty) => {
@@ -329,13 +465,14 @@ pub fn labels_from_cell_names(
         }
         try_ty!(bool);
         try_ty!(String);
+        labels.add_compound_cell(sheet, id, name);
     }
     labels
 }
 
 /// Marks `id`'s `CellMeta` as numeric (and, per `is_integer`, as an integer type) and, if
 /// `sheet.filter_kind(id)` is a range clamp, populates its live-range closure.
-fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
+fn mark_numeric<T: std::any::Any + Clone + ToF64Display + std::fmt::Display>(
     labels: &mut Labels,
     sheet: &Sheet,
     id: CellId,
@@ -351,6 +488,15 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
         sheet.filter_kind(id),
         Some(adam_rs::FilterKind::Range { .. })
     ) {
+        meta.exact_range = Some(Box::new(move |sheet: &Sheet| {
+            sheet
+                .filter_range::<T>(id)
+                .map(|(lo, hi)| NumericRange {
+                    min: lo.to_string(),
+                    max: hi.to_string(),
+                })
+                .ok_or_else(|| InputError::UnsupportedEditor("range filter unavailable".into()))
+        }));
         meta.range = Some(Box::new(move |sheet: &Sheet| {
             sheet
                 .filter_range::<T>(id)
@@ -358,6 +504,59 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
                 .unwrap_or((0.0, 0.0))
         }));
     }
+}
+
+/// Identifies all fourteen Rust numeric primitive types without value conversion.
+fn numeric_kind<T: std::any::Any>() -> Option<NumberKind> {
+    let id = TypeId::of::<T>();
+    /// Dispatches concrete primitive identities without converting values.
+    macro_rules! kinds {
+        ($($ty:ty => $kind:expr),* $(,)?) => {
+            $(if id == TypeId::of::<$ty>() { return Some($kind); })*
+        };
+    }
+
+    kinds!(
+        i8 => NumberKind::Signed(8), i16 => NumberKind::Signed(16),
+        i32 => NumberKind::Signed(32), i64 => NumberKind::Signed(64),
+        i128 => NumberKind::Signed(128), isize => NumberKind::Signed(isize::BITS),
+        u8 => NumberKind::Unsigned(8), u16 => NumberKind::Unsigned(16),
+        u32 => NumberKind::Unsigned(32), u64 => NumberKind::Unsigned(64),
+        u128 => NumberKind::Unsigned(128), usize => NumberKind::Unsigned(usize::BITS),
+        f32 => NumberKind::F32, f64 => NumberKind::F64,
+    );
+    None
+}
+
+/// Decodes with Rust primitive parsing and preserves lexical/overflow classification.
+///
+/// # Errors
+/// Returns `TypeRange` for primitive integer overflow and `Lexical` for other
+/// parsing failures.
+///
+/// - Complexity: O(input bytes) plus the concrete parser's costs.
+fn decode_scalar<T>(s: &str) -> Result<T, InputError>
+where
+    T: std::any::Any + std::str::FromStr,
+    T::Err: std::fmt::Display + std::any::Any,
+{
+    s.parse::<T>().map_err(|error| {
+        let overflow = (&error as &dyn std::any::Any)
+            .downcast_ref::<std::num::ParseIntError>()
+            .is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    std::num::IntErrorKind::PosOverflow | std::num::IntErrorKind::NegOverflow
+                )
+            });
+        match numeric_kind::<T>().filter(|_| overflow) {
+            Some(kind) => InputError::TypeRange {
+                kind,
+                value: s.to_owned(),
+            },
+            None => InputError::Lexical(error.to_string()),
+        }
+    })
 }
 
 /// Formats an [`Error`] as a rustc-style diagnostic when possible.
@@ -523,7 +722,7 @@ fn diagnostic_message(error: &adam_lang::ModuleDiagnostic) -> String {
 /// Empty labels return the message unchanged.
 /// - Complexity: Expected O(n + l) time and O(n + l) space for source bytes n
 ///   and label bytes l, excluding the existing snippet renderer.
-fn format_source_labels(
+pub(crate) fn format_source_labels(
     message: &str,
     labels: &[adam_lang::SourceLabel],
     display_source: Option<(&adam_lang::SourceId, &str)>,
@@ -1077,13 +1276,17 @@ relationship choose(divisor: second);
             let meta = &labels.cells[&sheet.cell_names[name].0];
             assert_eq!((meta.display)(&sheet), expected);
             assert!(!meta.is_bool && !meta.is_numeric && !meta.is_integer);
-            let error = (meta.write_str)(&mut sheet, "[]").unwrap_err();
+            let error = (meta.prepare)("[]").err().unwrap();
             assert!(error.to_string().contains("not yet supported"));
             assert_eq!((meta.display)(&sheet), expected);
         }
         let scalar = &labels.cells[&sheet.cell_names["scalar"].0];
         assert_eq!((scalar.display)(&sheet), "5");
-        (scalar.write_str)(&mut sheet, "9").unwrap();
+        let scalar_id = sheet.cell_names["scalar"].0;
+        (scalar.prepare)("9")
+            .unwrap()
+            .apply(&mut sheet, scalar_id)
+            .unwrap();
         assert_eq!((scalar.display)(&sheet), "9");
         let id = sheet.cell_names["empty"].0;
         sheet
@@ -1181,10 +1384,15 @@ relationship choose(divisor: second);
 
     #[test]
     /// Generic write callbacks parse and update the registered cell.
-    fn write_str_closure_parses_and_writes() {
+    fn prepared_write_parses_and_writes() {
         let (mut sheet, labels) = sheet_with_one_cell();
         let a_id = *labels.cells.keys().next().unwrap();
-        assert!((labels.cells[&a_id].write_str)(&mut sheet, "5.0").is_ok());
+        assert!(
+            (labels.cells[&a_id].prepare)("5.0")
+                .unwrap()
+                .apply(&mut sheet, a_id)
+                .is_ok()
+        );
         let display = &labels.cells[&a_id].display;
         assert_eq!(display(&sheet), "5");
     }
@@ -1202,14 +1410,14 @@ relationship choose(divisor: second);
 
     #[test]
     /// Unsupported compound edits return an error without changing the stored value.
-    fn add_tuple_cell_write_str_always_errs_without_mutating_the_sheet() {
-        let mut sheet = tuple_sheet();
+    fn add_tuple_cell_prepare_always_errs_without_mutating_the_sheet() {
+        let sheet = tuple_sheet();
         let cell_id = sheet.cell_names["pair"].0;
         let mut labels = Labels::new();
         labels.add_compound_cell(&sheet, cell_id, "pair");
         let meta = labels.cells.get(&cell_id).unwrap();
         let before = adam_lang::debug_compound_cell(&sheet, cell_id).unwrap();
-        let result = (meta.write_str)(&mut sheet, "(1, 2.0)");
+        let result = (meta.prepare)("(1, 2.0)");
         assert!(result.is_err());
         let after = adam_lang::debug_compound_cell(&sheet, cell_id).unwrap();
         assert_eq!(before, after);
@@ -1231,7 +1439,7 @@ relationship choose(divisor: second);
         labels.add_compound_cell(&sheet, id, "unavailable");
         let meta = &labels.cells[&id];
         assert_eq!((meta.display)(&sheet), "?");
-        assert!((meta.write_str)(&mut sheet, "9").is_err());
+        assert!((meta.prepare)("9").is_err());
         assert_eq!(*sheet.read::<i32>(id).unwrap(), 7);
     }
 }
