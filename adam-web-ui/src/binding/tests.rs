@@ -5,6 +5,433 @@ use crate::{BuildError, BuiltSheet, PreparedWrite, build_sheet};
 use adam_rs::Method;
 use std::{cell::Cell, rc::Rc};
 
+/// Captures filtered effective values without replacing recovery aspirations.
+#[test]
+fn recording_captures_effective_not_aspired_values() {
+    let (mut owner, _) = owner();
+    owner.start_recording(&["limited", "limited"]).unwrap();
+    assert!(matches!(
+        owner.apply(&[edit("limited", "20")], UpdateOrigin::User),
+        HostOutcome::Accepted
+    ));
+    let recording = &owner.recordings()[0];
+    assert_eq!(recording.values, [edit("limited", "10")]);
+    assert_eq!(
+        owner.accepted_state().transactions[0],
+        [edit("limited", "20")]
+    );
+    let json = serde_json::to_string(recording.as_ref()).unwrap();
+    let persisted: Recording = serde_json::from_str(&json).unwrap();
+    let replayed = SheetOwner::playback(Rc::new(model), "test/v1".into(), &persisted).unwrap();
+    assert_eq!(
+        replayed
+            .inspect(|p, _| *p.read::<i32>(p.cell_names["limited"].0).unwrap())
+            .unwrap(),
+        10
+    );
+    owner.stop_recording();
+    owner.apply(&[edit("limited", "9")], UpdateOrigin::User);
+    assert_eq!(owner.recordings().len(), 1);
+}
+
+/// Requires the complete captured group to satisfy a requirement at propagation.
+#[test]
+fn playback_writes_all_sources_before_propagating() {
+    let evaluations = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let observed = evaluations.clone();
+    let factory: ModelFactory = Rc::new(move || {
+        let mut built = build_sheet(
+            "sheet s { source a: i32 = 1; source b: i32 = 1; source valid: bool = true require { @equal a == b; }; }",
+            "batch.adm2",
+        )?;
+        let result = built.parsed.add_cell(0_i32);
+        let observed = observed.clone();
+        built
+            .parsed
+            .add_relationship(vec![Method::from_fn_2_1(
+                [built.keys["a"], built.keys["b"]],
+                result,
+                move |a: &i32, b: &i32| {
+                    observed.borrow_mut().push((*a, *b));
+                    Ok(*a)
+                },
+            )])
+            .unwrap();
+        built.parsed.propagate().unwrap();
+        Ok(built)
+    });
+    let recording = Recording {
+        schema_key: "batch/v1".into(),
+        values: vec![edit("a", "9"), edit("b", "9")],
+    };
+    let owner = SheetOwner::playback(factory, "batch/v1".into(), &recording).unwrap();
+    assert_eq!(owner.accepted_state().transactions.len(), 1);
+    assert_eq!(*evaluations.borrow(), [(1, 1), (9, 9)]);
+    assert_eq!(
+        owner.views().iter().find(|v| v.key == "a").unwrap().text,
+        "9"
+    );
+}
+
+/// Playback and recovery origins never append user action recordings.
+#[test]
+fn playback_does_not_record_itself() {
+    let (mut owner, _) = owner();
+    owner.start_recording(&[]).unwrap();
+    owner.apply(&[edit("limited", "20")], UpdateOrigin::Playback);
+    owner.apply(&[edit("limited", "8")], UpdateOrigin::Recovery);
+    assert!(owner.recordings().is_empty());
+    let captured = owner.capture(&[]).unwrap();
+    let replayed = SheetOwner::playback(Rc::new(model), "test/v1".into(), &captured).unwrap();
+    assert!(replayed.recordings().is_empty());
+}
+
+/// Captures self-referencing producers even when they are not unclaimed sources.
+#[test]
+fn recording_self_reference_and_exact_float() {
+    let factory: ModelFactory = Rc::new(|| {
+        let mut built = build_sheet("sheet s { cell x: f64 = 1.2345678901234567; }", "self.adm2")?;
+        let x = built.keys["x"];
+        built
+            .parsed
+            .add_relationship(vec![Method::from_fn_1_1(x, x, |x: &f64| Ok(*x))])
+            .unwrap();
+        built.parsed.propagate().unwrap();
+        Ok(built)
+    });
+    let owner = SheetOwner::new(factory.clone(), "float/v1".into()).unwrap();
+    assert!(
+        !owner
+            .inspect(|p, _| p.is_source(p.cell_names["x"].0))
+            .unwrap()
+    );
+    assert_ne!(
+        owner
+            .inspect(|p, labels| (labels.cells[&p.cell_names["x"].0].display)(p))
+            .unwrap(),
+        "1.2345678901234567"
+    );
+    let captured = owner.capture(&["x", "x"]).unwrap();
+    assert_eq!(captured.values, [edit("x", "1.2345678901234567")]);
+    let replayed = SheetOwner::playback(factory, "float/v1".into(), &captured).unwrap();
+    assert_eq!(
+        replayed
+            .inspect(|p, _| p.read::<f64>(p.cell_names["x"].0).unwrap().to_bits())
+            .unwrap(),
+        1.2345678901234567_f64.to_bits()
+    );
+}
+
+/// Preserves wide integers, custom scalar codecs, private host keys, and aliases.
+#[test]
+fn recording_private_custom_and_wide_values_round_trip() {
+    /// Holds a host-defined scalar that has no display or parsing implementation.
+    #[derive(Debug, PartialEq)]
+    struct Token(u8);
+    let factory: ModelFactory = Rc::new(|| {
+        let mut built = build_sheet(
+            "sheet s { cell wide: u128 = 340282366920938463463374607431768211455u128; }",
+            "wide.adm2",
+        )?;
+        let id = built.parsed.add_source(Token(9));
+        built.keys.insert("private-token".into(), id);
+        built.keys.insert("alias".into(), id);
+        built.labels.add_cell_with_codec(
+            id,
+            "Token",
+            crate::ScalarCodec {
+                encode: |v: &Token| format!("token:{}", v.0),
+                decode: |text| {
+                    text.strip_prefix("token:")
+                        .and_then(|v| v.parse().ok())
+                        .map(Token)
+                        .ok_or_else(|| crate::input::InputError::Lexical(text.into()))
+                },
+            },
+        );
+        built.parsed.propagate().unwrap();
+        Ok(built)
+    });
+    let owner = SheetOwner::new(factory.clone(), "custom/v1".into()).unwrap();
+    let captured = owner.capture(&[]).unwrap();
+    assert_eq!(captured.values.len(), 2);
+    assert!(captured.values.contains(&edit("private-token", "token:9")));
+    assert!(
+        captured
+            .values
+            .contains(&edit("wide", "340282366920938463463374607431768211455"))
+    );
+    let replayed = SheetOwner::playback(factory, "custom/v1".into(), &captured).unwrap();
+    assert_eq!(
+        replayed
+            .inspect(|p, _| *p.read::<u128>(p.cell_names["wide"].0).unwrap())
+            .unwrap(),
+        u128::MAX
+    );
+    assert_eq!(
+        replayed
+            .views()
+            .iter()
+            .find(|v| v.key == "private-token")
+            .unwrap()
+            .text,
+        "token:9"
+    );
+}
+
+/// Empty models capture and replay without manufacturing a user action.
+#[test]
+fn recording_empty_model_has_empty_sources() {
+    let factory: ModelFactory = Rc::new(|| build_sheet("sheet s {}", "empty.adm2"));
+    let mut owner = SheetOwner::new(factory.clone(), "empty/v1".into()).unwrap();
+    owner.start_recording(&[]).unwrap();
+    assert!(matches!(
+        owner.apply(&[], UpdateOrigin::User),
+        HostOutcome::Accepted
+    ));
+    let recording = owner.capture(&[]).unwrap();
+    assert!(recording.values.is_empty());
+    let replayed = SheetOwner::playback(factory, "empty/v1".into(), &recording).unwrap();
+    assert!(replayed.accepted_state().transactions.is_empty());
+    assert!(replayed.recordings().is_empty());
+}
+
+/// Retains shared recordings across rejection and explicit aspiration-based recovery.
+#[test]
+fn recording_rejected_actions_do_not_append() {
+    let (mut owner, _) = owner();
+    owner.start_recording(&["limited"]).unwrap();
+    assert!(matches!(
+        owner.apply(&[edit("limited", "20")], UpdateOrigin::User),
+        HostOutcome::Accepted
+    ));
+    let first = owner.recordings()[0].clone();
+    assert!(matches!(
+        owner.apply(&[edit("valid", "false")], UpdateOrigin::User),
+        HostOutcome::Rejected(_)
+    ));
+    assert_eq!(owner.recordings().len(), 1);
+    owner.restore_accepted().unwrap();
+    assert!(Rc::ptr_eq(&first, &owner.recordings()[0]));
+    assert!(matches!(
+        owner.apply(&[edit("limited", "7")], UpdateOrigin::User),
+        HostOutcome::Accepted
+    ));
+    assert_eq!(owner.recordings().len(), 2);
+    assert_eq!(owner.recordings()[1].values, [edit("limited", "7")]);
+}
+
+/// Recomputes source membership after each conditional selection.
+#[test]
+fn recording_conditional_source_changes() {
+    let factory: ModelFactory = Rc::new(|| {
+        let mut built = build_sheet(
+            "sheet s { source enabled: bool = true; source input: i32 = 7; cell result: i32 = 0; }",
+            "conditional.adm2",
+        )?;
+        let relationship = built
+            .parsed
+            .add_relationship(vec![Method::from_fn_1_1(
+                built.keys["input"],
+                built.keys["result"],
+                |v: &i32| Ok(*v),
+            )])
+            .unwrap();
+        built
+            .parsed
+            .add_conditional(
+                adam_rs::MatchExpr::cell(built.keys["enabled"]),
+                vec![(vec![true], vec![relationship])],
+                vec![],
+            )
+            .unwrap();
+        built.parsed.propagate().unwrap();
+        Ok(built)
+    });
+    let mut owner = SheetOwner::new(factory.clone(), "conditional/v1".into()).unwrap();
+    let before = owner.capture(&["result"]).unwrap();
+    assert!(before.values.iter().any(|e| e.key == "input"));
+    owner.start_recording(&["result"]).unwrap();
+    owner.apply(&[edit("enabled", "false")], UpdateOrigin::User);
+    let after = &owner.recordings()[0];
+    assert!(!after.values.iter().any(|e| e.key == "input"));
+    assert!(after.values.iter().any(|e| e.key == "result"));
+    let replayed = SheetOwner::playback(factory, "conditional/v1".into(), after).unwrap();
+    assert_eq!(
+        replayed
+            .views()
+            .iter()
+            .find(|v| v.key == "result")
+            .unwrap()
+            .text,
+        "0"
+    );
+}
+
+/// Reports unknown results, missing stable identities/codecs, and unavailable models.
+#[test]
+fn recording_capture_errors_are_explicit() {
+    let (mut owner, _) = owner();
+    assert!(matches!(
+        owner.capture(&["absent"]),
+        Err(CaptureError::UnknownResult(_))
+    ));
+    assert!(owner.start_recording(&["absent"]).is_err());
+    owner.apply(&[edit("left", "bad")], UpdateOrigin::User);
+    assert!(matches!(
+        owner.capture(&[]),
+        Err(CaptureError::Unavailable(_))
+    ));
+    let factory = Rc::new(|| {
+        let mut built = model()?;
+        built.parsed.add_source(3_i32);
+        built.parsed.propagate().unwrap();
+        Ok(built)
+    });
+    assert!(matches!(
+        SheetOwner::new(factory, "private/v1".into())
+            .unwrap()
+            .capture(&[]),
+        Err(CaptureError::UnnamedSource)
+    ));
+    let factory = Rc::new(|| {
+        let mut built = model()?;
+        built
+            .labels
+            .cells
+            .get_mut(&built.keys["limited"])
+            .unwrap()
+            .codec_supported = false;
+        Ok(built)
+    });
+    assert!(matches!(
+        SheetOwner::new(factory, "unsupported/v1".into())
+            .unwrap()
+            .capture(&["limited"]),
+        Err(CaptureError::MissingCodec(_))
+    ));
+}
+
+/// Preserves typed playback errors without retrying a failed runtime.
+#[test]
+fn recording_playback_errors_are_classified() {
+    let recording = Recording {
+        schema_key: "test/v1".into(),
+        values: vec![edit("limited", "true")],
+    };
+    assert!(matches!(
+        SheetOwner::playback(Rc::new(model), "other/v1".into(), &recording),
+        Err(PlaybackError::Capture(CaptureError::SchemaMismatch { .. }))
+    ));
+    assert!(matches!(
+        SheetOwner::playback(Rc::new(model), "test/v1".into(), &recording),
+        Err(PlaybackError::Rejected(HostRejection::Input(_)))
+    ));
+    let unknown = Recording {
+        schema_key: "test/v1".into(),
+        values: vec![edit("absent", "1")],
+    };
+    assert!(matches!(
+        SheetOwner::playback(Rc::new(model), "test/v1".into(), &unknown),
+        Err(PlaybackError::Rejected(HostRejection::Binding(
+            BindingError::UnknownKey(_)
+        )))
+    ));
+    let invalid = Recording {
+        schema_key: "test/v1".into(),
+        values: vec![edit("valid", "false")],
+    };
+    assert!(matches!(
+        SheetOwner::playback(Rc::new(model), "test/v1".into(), &invalid),
+        Err(PlaybackError::Rejected(HostRejection::Validation(_)))
+    ));
+    let calls = Rc::new(Cell::new(0));
+    let count = calls.clone();
+    let factory = Rc::new(move || {
+        count.set(count.get() + 1);
+        build_sheet(
+            "sheet s { cell divisor: i32 = 1; out result: i32 := 10 / divisor; }",
+            "fatal.adm2",
+        )
+    });
+    let fatal = Recording {
+        schema_key: "fatal/v1".into(),
+        values: vec![edit("divisor", "0")],
+    };
+    assert!(matches!(
+        SheetOwner::playback(factory, "fatal/v1".into(), &fatal),
+        Err(PlaybackError::Fatal(_))
+    ));
+    assert_eq!(calls.get(), 1);
+    assert!(matches!(
+        SheetOwner::playback(
+            Rc::new(|| build_sheet("bad", "bad.adm2")),
+            "test/v1".into(),
+            &recording
+        ),
+        Err(PlaybackError::Build(_))
+    ));
+}
+
+/// Stops a failed recorder while retaining the newly accepted state and journal.
+#[test]
+fn recording_failure_preserves_accepted_transaction() {
+    let captures = Rc::new(Cell::new(0));
+    let counter = captures.clone();
+    let factory = Rc::new(move || {
+        let mut built = model()?;
+        let counter = counter.clone();
+        let id = built.keys["limited"];
+        built.labels.cells.get_mut(&id).unwrap().capture = Box::new(move |sheet| {
+            counter.set(counter.get() + 1);
+            if counter.get() == 4 {
+                Err(crate::input::InputError::UnsupportedEditor(
+                    "capture unavailable".into(),
+                ))
+            } else {
+                Ok(sheet.read::<i32>(id).unwrap().to_string())
+            }
+        });
+        Ok(built)
+    });
+    let mut owner = SheetOwner::new(factory, "record/v1".into()).unwrap();
+    owner.start_recording(&["limited"]).unwrap();
+    assert!(matches!(
+        owner.apply(&[edit("limited", "20")], UpdateOrigin::User),
+        HostOutcome::RecordingFailed(CaptureError::Encoding { .. })
+    ));
+    assert_eq!(
+        owner
+            .views()
+            .iter()
+            .find(|v| v.key == "limited")
+            .unwrap()
+            .text,
+        "10"
+    );
+    assert_eq!(
+        owner.accepted_state().transactions[0],
+        [edit("limited", "20")]
+    );
+    assert!(owner.inspect(|_, _| ()).is_ok());
+    assert!(owner.recordings().is_empty());
+    assert!(matches!(
+        owner.apply(&[edit("limited", "8")], UpdateOrigin::User),
+        HostOutcome::Accepted
+    ));
+    assert!(owner.recordings().is_empty());
+    owner.restore_accepted().unwrap();
+    assert_eq!(
+        owner
+            .views()
+            .iter()
+            .find(|v| v.key == "limited")
+            .unwrap()
+            .text,
+        "8"
+    );
+}
+
 /// Creates one canonical edit.
 fn edit(key: &str, canonical: &str) -> CellEdit {
     CellEdit {

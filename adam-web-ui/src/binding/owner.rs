@@ -3,6 +3,7 @@
 //! [`SheetOwner`] keeps accepted inputs and views outside its mutable model.
 
 use super::types::*;
+use super::{CaptureError, PlaybackError, Recording, recording};
 use crate::build::validation_issues;
 use crate::{BuildError, BuiltSheet, Labels, RuntimeFailure, ValidationIssue};
 use adam_lang::ParsedSheet;
@@ -42,6 +43,8 @@ pub struct SheetOwner {
     model: ModelState,
     accepted: RecoveryState,
     views: Vec<Rc<CellView>>,
+    recording_results: Option<Vec<String>>,
+    recordings: Vec<Rc<Recording>>,
 }
 
 impl SheetOwner {
@@ -66,24 +69,29 @@ impl SheetOwner {
                 transactions: Vec::new(),
             },
             views,
+            recording_results: None,
+            recordings: Vec::new(),
         })
     }
 
     /// Parses every edit, writes in order, and propagates once before acceptance.
     ///
-    /// `origin` identifies feedback-loop policy for the caller; all accepted
-    /// origins enter recovery history. No recording is performed here.
+    /// All accepted origins enter recovery history. Only `User` actions append
+    /// enabled recordings; playback and recovery suppress recording feedback.
     /// An empty group is an accepted no-op on a live model and is not journaled.
     ///
     /// - Postcondition: Rejection leaves accepted views and history unchanged and
     ///   makes inspection unavailable until explicit restoration.
     /// - Postcondition: A propagation error retires the owner permanently.
-    /// - Complexity: O(edit bytes + propagation + publication); retained history
-    ///   grows only by the accepted group, never by a copy of the prior journal.
+    /// - Postcondition: Recording failure preserves the newly accepted model,
+    ///   views, and history, stops recording, and returns `RecordingFailed`.
+    /// - Complexity: O(edit bytes + propagation + publication + enabled capture);
+    ///   retained history grows only by the accepted group and new recording,
+    ///   never by a copy of the prior journal.
     ///
     /// # Examples
     /// See [`SheetOwner`] for submitting a canonical edit.
-    pub fn apply(&mut self, edits: &[CellEdit], _origin: UpdateOrigin) -> HostOutcome {
+    pub fn apply(&mut self, edits: &[CellEdit], origin: UpdateOrigin) -> HostOutcome {
         if let Some(error) = state_error(&self.model) {
             return HostOutcome::Rejected(HostRejection::Binding(error));
         }
@@ -100,7 +108,7 @@ impl SheetOwner {
                     self.accepted.transactions.push(edits.to_vec());
                     self.views = views;
                     self.model = ModelState::Live(built);
-                    HostOutcome::Accepted
+                    self.record_accepted(origin)
                 }
                 Err(error) => {
                     self.model = ModelState::Unavailable;
@@ -114,6 +122,156 @@ impl SheetOwner {
                     ModelState::Unavailable
                 };
                 outcome
+            }
+        }
+    }
+
+    /// Captures exact effective sources contributing to the selected stable keys.
+    ///
+    /// Empty selection captures all sources. Source order is unspecified; aliases
+    /// use the first registered stable key. Models must satisfy the fixed-point
+    /// replay contracts of [`adam_rs::Sheet::source_cells`].
+    ///
+    /// # Errors
+    /// Returns explicit result, source identity, codec, encoding, or availability errors.
+    ///
+    /// - Complexity: Source-analysis cost plus expected O(results + keys + sources
+    ///   + encoded bytes) time and space.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_web_ui::{binding::*, build_sheet};
+    /// let owner = SheetOwner::new(std::rc::Rc::new(||
+    ///     build_sheet("sheet s { cell x: i32 = 1; }", "s.adm2")), "s/v1".into()).unwrap();
+    /// assert_eq!(owner.capture(&["x"]).unwrap().values[0].canonical, "1");
+    /// ```
+    pub fn capture(&self, result_keys: &[&str]) -> Result<Recording, CaptureError> {
+        match &self.model {
+            ModelState::Live(built) => recording::capture(
+                built,
+                &self.accepted.schema_key,
+                result_keys.iter().copied(),
+            ),
+            other => Err(CaptureError::Unavailable(
+                state_error(other).expect("non-live state"),
+            )),
+        }
+    }
+
+    /// Enables subsequent accepted user-action capture after validating selection.
+    ///
+    /// Does not append an initial recording. A failed start preserves prior selection.
+    ///
+    /// # Errors
+    /// Returns the same capability, encoding, and availability errors as [`Self::capture`].
+    ///
+    /// - Complexity: Capture cost plus O(result-key bytes) retained space.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_web_ui::{binding::*, build_sheet};
+    /// let mut owner = SheetOwner::new(std::rc::Rc::new(||
+    ///     build_sheet("sheet s { cell x: i32 = 1; }", "s.adm2")), "s/v1".into()).unwrap();
+    /// owner.start_recording(&["x"]).unwrap();
+    /// let outcome = owner.apply(&[CellEdit { key: "x".into(), canonical: "2".into() }],
+    ///     UpdateOrigin::User);
+    /// assert!(matches!(outcome, HostOutcome::Accepted));
+    /// assert_eq!(owner.recordings()[0].values[0].canonical, "2");
+    /// owner.stop_recording();
+    /// ```
+    pub fn start_recording(&mut self, result_keys: &[&str]) -> Result<(), CaptureError> {
+        self.capture(result_keys)?;
+        self.recording_results = Some(result_keys.iter().map(|key| (*key).into()).collect());
+        Ok(())
+    }
+
+    /// Stops future action recording without deleting retained recordings.
+    ///
+    /// - Complexity: O(selected result-key bytes) destruction.
+    ///
+    /// # Examples
+    /// See [`Self::start_recording`]; call `owner.stop_recording()` to stop capture.
+    pub fn stop_recording(&mut self) {
+        self.recording_results = None;
+    }
+
+    /// Borrows shared immutable recordings without copying action history.
+    ///
+    /// # Examples
+    /// See [`Self::start_recording`]; `owner.recordings().is_empty()` holds before actions.
+    pub fn recordings(&self) -> &[Rc<Recording>] {
+        &self.recordings
+    }
+
+    /// Replays one effective source group on a fresh compatible owner without recording.
+    ///
+    /// Validates schema before construction and decodes every edit before mutation.
+    /// Writes all values before one propagation and requirement validation.
+    ///
+    /// # Errors
+    /// Returns schema, build, rejected-input/requirement, or fatal runtime errors.
+    /// Fatal failures never trigger a retry or reconstruction.
+    ///
+    /// - Complexity: Factory, transaction, and publication cost plus encoded bytes.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_web_ui::{binding::*, build_sheet};
+    /// let factory: ModelFactory = std::rc::Rc::new(||
+    ///     build_sheet("sheet s { cell x: i32 = 1; }", "s.adm2"));
+    /// let owner = SheetOwner::new(factory.clone(), "s/v1".into()).unwrap();
+    /// let recording = owner.capture(&[]).unwrap();
+    /// let replayed = SheetOwner::playback(factory, "s/v1".into(), &recording).unwrap();
+    /// assert!(replayed.recordings().is_empty());
+    /// ```
+    pub fn playback(
+        factory: ModelFactory,
+        schema_key: String,
+        recording: &Recording,
+    ) -> Result<Self, PlaybackError> {
+        if schema_key != recording.schema_key {
+            return Err(PlaybackError::Capture(CaptureError::SchemaMismatch {
+                expected: schema_key,
+                actual: recording.schema_key.clone(),
+            }));
+        }
+        let mut owner = Self::new(factory, schema_key).map_err(|error| match error {
+            BuildError::Runtime(failure) => PlaybackError::Fatal(*failure),
+            other => PlaybackError::Build(other),
+        })?;
+        match owner.apply(&recording.values, UpdateOrigin::Playback) {
+            HostOutcome::Accepted => Ok(owner),
+            HostOutcome::Rejected(error) => Err(PlaybackError::Rejected(error)),
+            HostOutcome::Fatal(error) => Err(PlaybackError::Fatal(error)),
+            HostOutcome::RecordingFailed(error) => Err(PlaybackError::Capture(error)),
+        }
+    }
+
+    /// Appends one user recording or explicitly stops a failed recorder.
+    ///
+    /// - Complexity: Capture cost.
+    fn record_accepted(&mut self, origin: UpdateOrigin) -> HostOutcome {
+        if origin != UpdateOrigin::User {
+            return HostOutcome::Accepted;
+        }
+        let Some(results) = &self.recording_results else {
+            return HostOutcome::Accepted;
+        };
+        let ModelState::Live(built) = &self.model else {
+            unreachable!("recording follows accepted publication");
+        };
+        match recording::capture(
+            built,
+            &self.accepted.schema_key,
+            results.iter().map(String::as_str),
+        ) {
+            Ok(recording) => {
+                self.recordings.push(Rc::new(recording));
+                HostOutcome::Accepted
+            }
+            Err(error) => {
+                self.stop_recording();
+                HostOutcome::RecordingFailed(error)
             }
         }
     }
@@ -231,7 +389,9 @@ impl SheetOwner {
                 Err(HostOutcome::Rejected(error)) => {
                     return Err(BuildError::Recovery(Box::new(error)));
                 }
-                Err(HostOutcome::Accepted) => unreachable!("transaction errors are never accepted"),
+                Err(HostOutcome::Accepted | HostOutcome::RecordingFailed(_)) => {
+                    unreachable!("transaction errors are never accepted")
+                }
             };
         }
         let views =

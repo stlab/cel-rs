@@ -25,11 +25,11 @@ pub type ModelFactory = Rc<dyn Fn() -> Result<BuiltSheet, BuildError>>;
 /// let edit = adam_web_ui::binding::CellEdit { key: "count".into(), canonical: "20".into() };
 /// assert_eq!(edit.canonical, "20");
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CellEdit {
     /// Stable host-schema name, never a persisted runtime ID.
     pub key: String,
-    /// Unclamped input encoded by the cell's scalar codec.
+    /// Exact scalar text: an aspiration in a transaction, effective in a recording.
     pub canonical: String,
 }
 
@@ -187,6 +187,8 @@ pub enum HostRejection {
 pub enum HostOutcome {
     /// Commits the input group and coherently publishes its effective views.
     Accepted,
+    /// Accepts the transaction and publication but stops a failed recorder.
+    RecordingFailed(super::CaptureError),
     /// Preserves accepted publication/history but requires explicit restoration.
     Rejected(HostRejection),
     /// Permanently retires the model; reconstruction and retry are forbidden.
