@@ -83,7 +83,7 @@ pub enum BuildError {
     /// A lexical or syntactic error with its source text and display name.
     Parse {
         /// The parser's typed error.
-        error: cel_parser::ParseError,
+        error: Box<cel_parser::ParseError>,
         /// The complete input source.
         source: String,
         /// The display name used for the diagnostic header.
@@ -92,13 +92,13 @@ pub enum BuildError {
     /// A module compilation or instantiation diagnostic.
     Module(ModuleDiagnostic),
     /// A fatal initial runtime propagation error.
-    Runtime(RuntimeFailure),
+    Runtime(Box<RuntimeFailure>),
     /// Requirements that evaluated to false after propagation.
     Validation {
         /// False requirements with their owning source labels.
         issues: Vec<ValidationIssue>,
         /// Source owners used to restrict the root display-name override.
-        diagnostics: SheetDiagnostics,
+        diagnostics: Box<SheetDiagnostics>,
         /// Requested display name for the anonymous root source.
         file_name: String,
     },
@@ -212,7 +212,7 @@ pub fn build_sheet(source: &str, file_name: &str) -> Result<BuiltSheet, BuildErr
                 return Err(BuildError::Module(module.clone()));
             }
             return Err(BuildError::Parse {
-                error,
+                error: Box::new(error),
                 source: source.to_owned(),
                 name: file_name.to_owned(),
             });
@@ -285,7 +285,7 @@ fn initialize_sheet_with_file_name(
                 return Err(BuildError::Validation {
                     issues,
                     file_name: display_file_name(&diagnostics, requested_file_name),
-                    diagnostics,
+                    diagnostics: Box::new(diagnostics),
                 });
             }
             parsed.clear_changed();
@@ -296,11 +296,11 @@ fn initialize_sheet_with_file_name(
                 keys,
             })
         }
-        Err(error) => Err(BuildError::Runtime(RuntimeFailure {
+        Err(error) => Err(BuildError::Runtime(Box::new(RuntimeFailure {
             error,
             file_name: display_file_name(&diagnostics, requested_file_name),
             diagnostics,
-        })),
+        }))),
     }
 }
 
