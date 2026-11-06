@@ -5,8 +5,10 @@
 //! `dioxus/web` app, or a plain `wasm-bindgen` embed with no full app shell around it.
 
 pub mod build;
+pub mod components;
 pub mod diagnostics;
 pub mod graph;
+pub mod input;
 mod inspector;
 pub mod labels;
 pub mod spectrum;
