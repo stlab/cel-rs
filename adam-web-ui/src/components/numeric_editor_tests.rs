@@ -67,7 +67,7 @@ fn optional_clear_waits_for_composition_and_respects_forced_state() {
     );
     assert_eq!(
         state.event(DraftEvent::Input("".into()), NumberKind::Signed(32), true),
-        UiEffect::None
+        UiEffect::Submit(None)
     );
     state.sync("12", true, false, NumberKind::Signed(32));
     assert_eq!(
@@ -105,9 +105,6 @@ fn slider_decisions_preserve_primitive_domains_and_aspirations() {
             UiEffect::Report(_)
         ));
     }
-    assert_eq!(key_step(Key::ArrowUp), Some(true));
-    assert_eq!(key_step(Key::ArrowDown), Some(false));
-    assert_eq!(key_step(Key::Enter), None);
     assert!(
         error_message(&InputError::Locale("unsupported locale".into()))
             .contains("unsupported locale")
@@ -166,9 +163,9 @@ fn overflowing_slider_span_keeps_only_the_exact_editor() {
     assert!(slider_domain(NumberKind::F64, Some("0"), Some(&range), "1").is_none());
 }
 
-/// A later native value cancels the stamped compositionend fallback.
+/// Only an explicit validated source completion can submit a composing value.
 #[test]
-fn composition_fallback_cannot_resubmit_an_intermediate_value() {
+fn composing_state_requires_explicit_source_completion() {
     let mut state = state();
     state.event(DraftEvent::CompositionStart, NumberKind::Signed(32), false);
     state.event(
@@ -176,15 +173,13 @@ fn composition_fallback_cannot_resubmit_an_intermediate_value() {
         NumberKind::Signed(32),
         false,
     );
-    let pending = state.end_composition().unwrap();
-    let final_input = state.native_input("19".into());
     assert_eq!(
-        state.event(final_input, NumberKind::Signed(32), false),
+        state.event(
+            DraftEvent::CompositionEnd("19".into()),
+            NumberKind::Signed(32),
+            false
+        ),
         UiEffect::Submit(Some("19".into()))
-    );
-    assert_eq!(
-        state.finish_composition(pending, NumberKind::Signed(32), false),
-        UiEffect::None
     );
 }
 

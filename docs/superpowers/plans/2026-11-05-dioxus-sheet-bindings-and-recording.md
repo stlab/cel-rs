@@ -399,9 +399,18 @@ generated component subdirectories and shared theme assets. Modify
   `dioxus-primitives` to that revision rather than leaving a moving branch;
   disable its unused default router feature. Keep the existing Dioxus version.
   Adapt generated CSS/assets for a library used by multiple roots; add adjacent
-  contracts required by repository conventions. Use native FormEvent values,
-  not asynchronous DOM-value reads. Resolve locale once per locale change and
-  feed the reducer. Preserve equivalent focused text and selection.
+  contracts required by repository conventions. Capture full native text events
+  synchronously in a shared web/desktop source adapter; transport immutable
+  snapshots through the component-owned Dioxus eval channel. Retain native
+  selection, composition passage, input type, and composition state. Validate
+  actual full snapshots against the owned replacement span for either
+  composition event order; never use a timer or reconstruct a submitted value.
+  Correlate terminal echoes without suppressing ordinary equal-valued edits.
+  Retire sessions on reset/blur/replacement and acknowledge source epochs.
+  Report unsupported native ranges and channel failures as `EventSource` errors.
+  This user-authorized Task 5 extension replaces the lossy FormEvent path, not
+  the prohibition on asynchronous DOM-value reads. Resolve locale once per
+  locale change and feed the reducer. Preserve focused text and selection.
 - [ ] **Run green:** `cargo test -p adam-web-ui --lib` and the locale JS tests.
   Render a controlled numeric editor with disabled and validation states using
   the existing rendered-verification workflow; retain evidence in session files.

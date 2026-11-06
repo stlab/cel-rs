@@ -201,6 +201,20 @@ aspirations; the widget must not silently clamp an edit before submitting it.
 A range change must not display a different numeric value from the model
 merely because a slider's bounds changed.
 
+The user-authorized native event adapter captures full values, UTF-16 selection,
+input type, and composition state synchronously at the element. The same
+component-owned eval channel transports these snapshots on web and desktop.
+Composition completion validates an actual full snapshot against the
+source-captured replacement span and final passage; it never submits a
+reconstructed value or infers finality from elapsed time. Both pre-end-only
+and delayed post-end native input orders remain supported. Terminal composition
+echoes do not count as another edit; ordinary equal-valued edits still do.
+Source sessions retire on blur and replacement; acknowledged source epochs
+reject queued events from before a forced reset.
+Missing authoritative selection or an uncorrelatable range expansion produces
+an explicit `InputError::EventSource` limitation, not a guessed write. Neither
+this adapter nor formatting asynchronously reads the native input value.
+
 ### Host ownership and error boundary
 
 Model construction returns a `Result`. Only `Ok` contains the constructed

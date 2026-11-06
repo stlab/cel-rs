@@ -24,6 +24,15 @@ pub enum InputError {
     UnsupportedEditor(String),
     /// Reports locale resolution, symbol, serialization, or transport failure.
     Locale(String),
+    /// Reports native event capture, composition range support, or channel failure.
+    ///
+    /// # Examples
+    /// ```
+    /// use adam_web_ui::input::InputError;
+    /// let error = InputError::EventSource("Native selection is unavailable".into());
+    /// assert!(matches!(error, InputError::EventSource(_)));
+    /// ```
+    EventSource(String),
 }
 
 /// Identifies a concrete primitive without erasing its integer width.
@@ -121,6 +130,7 @@ impl std::fmt::Display for InputError {
             }
             Self::UnsupportedEditor(message) => write!(f, "Unsupported editor: {message}"),
             Self::Locale(message) => write!(f, "Numeric locale error: {message}"),
+            Self::EventSource(message) => write!(f, "Numeric event source error: {message}"),
         }
     }
 }

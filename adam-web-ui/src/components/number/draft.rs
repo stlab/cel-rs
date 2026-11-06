@@ -15,7 +15,7 @@ use crate::input::{InputError, NumberKind};
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DraftEvent {
-    /// Replaces the user draft.
+    /// Replaces the user draft; callers discard native composition echoes before reduction.
     Input(String),
     /// Captures the originating locale.
     Focus,
@@ -25,6 +25,8 @@ pub enum DraftEvent {
     CompositionStart,
     /// Processes the final composed draft.
     CompositionEnd(String),
+    /// Cancels composition without submission or changing the focus session's locale.
+    CompositionCancel,
     /// Synchronizes model state; a newer generation retires the previous draft.
     ModelUpdate {
         /// Contains canonical model text, including explicit NaN/infinity text.
@@ -100,8 +102,6 @@ pub struct NumberDraft {
     generation: u64,
     /// Distinguishes asynchronous work from subsequent edits or model changes.
     revision: u64,
-    /// Suppresses the native input duplicate following compositionend.
-    composed_input: bool,
     /// Retains the submitted value so acknowledgments preserve equivalent spelling.
     submitted: Option<String>,
     /// Allows localization of authoritative model text, never of an entered draft.
@@ -152,7 +152,6 @@ impl NumberDraft {
                     self.origin = None;
                     self.local = false;
                     self.composing = false;
-                    self.composed_input = false;
                     self.submitted = None;
                     self.generation = generation;
                 }
@@ -165,7 +164,6 @@ impl NumberDraft {
                     self.origin = None;
                     self.local = false;
                     self.composing = false;
-                    self.composed_input = false;
                     self.submitted = None;
                 }
                 let keep = self.focused
@@ -199,7 +197,6 @@ impl NumberDraft {
                 self.composing = false;
                 self.local = false;
                 self.origin = None;
-                self.composed_input = false;
                 self.submitted = None;
                 self.text.clone_from(&self.display);
                 self.format_visible = true;
@@ -210,8 +207,16 @@ impl NumberDraft {
                         return DraftEffect::None;
                     }
                     self.composing = true;
-                    self.composed_input = false;
                     self.format_visible = false;
+                }
+            }
+            DraftEvent::CompositionCancel => {
+                if self.advance() {
+                    self.composing = false;
+                    self.local = false;
+                    self.submitted = None;
+                    self.text.clone_from(&self.display);
+                    self.format_visible = true;
                 }
             }
             DraftEvent::CompositionEnd(text) => {
@@ -219,14 +224,10 @@ impl NumberDraft {
                     return DraftEffect::None;
                 }
                 self.composing = false;
-                self.composed_input = true;
                 return self.input(text, locale, kind);
             }
             DraftEvent::Input(text) => {
                 if self.blocked {
-                    return DraftEffect::None;
-                }
-                if std::mem::take(&mut self.composed_input) && self.text == text {
                     return DraftEffect::None;
                 }
                 return self.input(text, locale, kind);
@@ -360,7 +361,6 @@ impl NumberDraft {
         self.local = false;
         self.composing = false;
         self.origin = None;
-        self.composed_input = false;
         self.submitted = None;
         self.format_visible = false;
         self.text.clone_from(&self.display);

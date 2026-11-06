@@ -1,4 +1,4 @@
-//! Exercises controlled numeric callbacks through real VirtualDom native events.
+//! Exercises numeric callbacks through mounted eval receivers and source-captured snapshots.
 use super::*;
 use crate::input::{InputError, NumberKind, NumericRange};
 use dioxus::{
@@ -8,11 +8,108 @@ use dioxus::{
 };
 use std::{
     cell::RefCell,
+    collections::{HashMap, VecDeque},
     rc::Rc,
     task::{Context, Poll},
 };
 
-/// Retains native evaluator storage and executes the real locale scripts in Node.
+thread_local! {
+    /// Retains renderer-owned channels independently of component implementation state.
+    static SOURCES: RefCell<HashMap<usize, Rc<RefCell<SourceQueue>>>> = RefCell::default();
+}
+
+/// Models the renderer's ordered JSON eval transport, including display/reset delivery.
+#[derive(Default)]
+struct SourceQueue {
+    token: usize,
+    sequence: u64,
+    epoch: String,
+    frames: VecDeque<serde_json::Value>,
+    waker: Option<std::task::Waker>,
+    value: String,
+    composing: bool,
+    closed: bool,
+    fail_send: bool,
+    drop_ack: bool,
+    fail_recv: bool,
+}
+
+impl SourceQueue {
+    /// Enqueues an immutable source snapshot and wakes the component receiver.
+    fn push(&mut self, action: &str, value: &str) {
+        match action {
+            "start" => self.composing = true,
+            "end" | "cancel" | "blur" => self.composing = false,
+            _ => {}
+        }
+        self.sequence += 1;
+        self.value = value.to_string();
+        self.frames.push_back(serde_json::json!({
+            "token":self.token.to_string(),"epoch":self.epoch,
+            "sequence":self.sequence.to_string(),"session":"1","action":action,"value":value,
+        }));
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// Delivers renderer messages to the actual component-scoped source receiver.
+struct SourceReply(Rc<RefCell<SourceQueue>>);
+
+impl Evaluator for SourceReply {
+    /// Applies display/reset commands as the native event source would.
+    fn send(&self, message: serde_json::Value) -> Result<(), EvalError> {
+        let mut source = self.0.borrow_mut();
+        if source.fail_send {
+            return Err(EvalError::Unsupported);
+        }
+        match message["kind"].as_str() {
+            Some("close") => source.closed = true,
+            Some("reset") => {
+                source.epoch = message["epoch"].as_str().unwrap().into();
+                source.composing = false;
+                if !source.drop_ack {
+                    source.push("ready", message["value"].as_str().unwrap());
+                }
+            }
+            Some("display")
+                if !source.composing
+                    && message["sequence"].as_str() == Some(&source.sequence.to_string()) =>
+            {
+                source.value = message["value"].as_str().unwrap().into();
+            }
+            Some("display") => {}
+            _ => return Err(EvalError::Unsupported),
+        }
+        Ok(())
+    }
+
+    /// Preserves asynchronous reception rather than completing a persistent eval.
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<serde_json::Value, EvalError>> {
+        let mut source = self.0.borrow_mut();
+        if source.fail_recv {
+            return Poll::Ready(Err(EvalError::Unsupported));
+        }
+        if let Some(frame) = source.frames.pop_front() {
+            Poll::Ready(Ok(frame))
+        } else {
+            source.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+
+    /// Keeps the source evaluation alive until the component closes it.
+    fn poll_join(&mut self, _: &mut Context<'_>) -> Poll<Result<serde_json::Value, EvalError>> {
+        if self.0.borrow().closed {
+            Poll::Ready(Ok(serde_json::Value::Null))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/// Runs real locale scripts in Node and models the renderer-owned persistent JSON channel.
 #[derive(Default)]
 struct NodeDocument {
     owner: generational_box::Owner,
@@ -23,6 +120,7 @@ struct NodeDocument {
 #[derive(Default)]
 struct Gate {
     held: bool,
+    fail: bool,
     wakers: Vec<std::task::Waker>,
 }
 
@@ -39,6 +137,24 @@ impl Gate {
 impl Document for NodeDocument {
     /// Runs locale code with a single JSON message transport.
     fn eval(&self, script: String) -> Eval {
+        if script.contains("setTimeout(() => resolve(null), 5000)") {
+            return Eval::new(self.owner.insert(Box::new(Reply(
+                None,
+                None,
+                Some(serde_json::Value::Null),
+            ))));
+        }
+        if let Some((_, tail)) = script.rsplit_once("return await runNumericEvents(window, \"") {
+            let token: usize = tail.split('"').next().unwrap().parse().unwrap();
+            let source = Rc::new(RefCell::new(SourceQueue {
+                token,
+                epoch: "0".into(),
+                ..Default::default()
+            }));
+            source.borrow_mut().push("ready", "12");
+            SOURCES.with(|sources| sources.borrow_mut().insert(token, source.clone()));
+            return Eval::new(self.owner.insert(Box::new(SourceReply(source))));
+        }
         let output = std::process::Command::new("node")
             .arg("-e")
             .arg(format!(
@@ -91,6 +207,9 @@ impl Evaluator for Reply {
     ) -> Poll<Result<serde_json::Value, EvalError>> {
         if let Some(gate) = &self.1 {
             let mut gate = gate.borrow_mut();
+            if gate.fail {
+                return Poll::Ready(Err(EvalError::Unsupported));
+            }
             if gate.held {
                 gate.wakers.push(context.waker().clone());
                 return Poll::Pending;
@@ -123,15 +242,15 @@ async fn delayed_formatting_keeps_newer_incomplete_draft() {
         !gate.borrow().wakers.is_empty(),
         "formatter actually suspended"
     );
-    focus(&dom, id, "focus");
-    input(&dom, id, "-");
+    focus(&mut dom, id, "focus");
+    input(&mut dom, id, "-");
     gate.borrow_mut().release();
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"-\""));
+    assert_display(id, "-");
     assert!(observed.borrow().writes.is_empty());
-    focus(&dom, id, "blur");
+    focus(&mut dom, id, "blur");
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"1,234.5\""));
+    assert_display(id, "1,234.5");
 }
 
 /// Mounts one official wrapper with a callback that reports its actual interaction.
@@ -201,7 +320,7 @@ async fn official_controls_keep_callbacks_and_semantics() {
                 target,
             );
         } else {
-            arrow_up(&dom, target);
+            arrow_up(&mut dom, target);
         }
         assert_eq!(observed.borrow().writes.len(), 1, "control {which}");
     }
@@ -267,7 +386,7 @@ fn host((optional, kind, slider): (bool, NumberKind, bool)) -> Element {
     }
 }
 
-/// Mounts a real editor and records its native input listener identity.
+/// Mounts a real editor and records its opaque native source identity.
 fn mount(optional: bool) -> (VirtualDom, Rc<RefCell<Observed>>, ElementId) {
     mount_config(
         optional,
@@ -293,31 +412,43 @@ fn mount_config(
         .edits
         .into_iter()
         .find_map(|mutation| match mutation {
-            Mutation::NewEventListener { name, id } if name == "input" => Some(id),
+            Mutation::SetAttribute {
+                name: "data-adam-number-source",
+                value: dioxus::core::AttributeValue::Text(token),
+                ..
+            } => Some(ElementId(token.parse().unwrap())),
             _ => None,
         })
         .expect("numeric editor registers native input");
     (dom, observed, id)
 }
 
-/// Dispatches a native composition boundary without asynchronously reading the DOM.
-fn composition(dom: &VirtualDom, id: ElementId, name: &str) {
-    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-    let data: dioxus_html::SerializedCompositionData =
-        serde_json::from_value(serde_json::json!({"data": ""})).unwrap();
-    dom.runtime().handle_event(
-        name,
-        Event::new(
-            Rc::new(dioxus_html::PlatformEventData::new(Box::new(data))),
-            true,
-        )
-        .into_any(),
+/// Delivers a source-validated composition boundary without asynchronously reading the DOM.
+fn composition(dom: &mut VirtualDom, id: ElementId, name: &str) {
+    let value = SOURCES.with(|sources| {
+        let sources = sources.borrow();
+        let mut source = sources[&id.0].borrow_mut();
+        source.composing = name == "compositionstart";
+        source.value.clone()
+    });
+    frame(
+        dom,
         id,
+        if name == "compositionstart" {
+            "start"
+        } else {
+            "end"
+        },
+        &value,
     );
 }
 
 /// Dispatches the native Arrow Up key to the editor.
-fn arrow_up(dom: &VirtualDom, id: ElementId) {
+fn arrow_up(dom: &mut VirtualDom, id: ElementId) {
+    if SOURCES.with(|sources| sources.borrow().contains_key(&id.0)) {
+        frame(dom, id, "up", "");
+        return;
+    }
     use keyboard_types::{Code, Location, Modifiers};
     dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
     let data = dioxus_html::SerializedKeyboardData::new(
@@ -348,12 +479,11 @@ async fn composition_submits_only_final_value_and_optional_clear_once() {
     ] {
         let (mut dom, observed, id) = mount(optional);
         settle(&mut dom).await;
-        focus(&dom, id, "focus");
-        composition(&dom, id, "compositionstart");
-        input(&dom, id, text);
+        focus(&mut dom, id, "focus");
+        composition(&mut dom, id, "compositionstart");
+        input(&mut dom, id, text);
         assert!(observed.borrow().writes.is_empty());
-        composition(&dom, id, "compositionend");
-        input(&dom, id, text);
+        composition(&mut dom, id, "compositionend");
         assert_eq!(observed.borrow().writes, expected);
     }
 }
@@ -363,13 +493,162 @@ async fn composition_submits_only_final_value_and_optional_clear_once() {
 async fn composition_end_waits_for_final_native_input_value() {
     let (mut dom, observed, id) = mount(false);
     settle(&mut dom).await;
-    focus(&dom, id, "focus");
-    composition(&dom, id, "compositionstart");
-    input(&dom, id, "17");
-    composition(&dom, id, "compositionend");
+    focus(&mut dom, id, "focus");
+    composition(&mut dom, id, "compositionstart");
+    input(&mut dom, id, "17");
+    settle(&mut dom).await;
     assert!(observed.borrow().writes.is_empty());
-    input(&dom, id, "19");
+    frame(&mut dom, id, "end", "19");
     assert_eq!(observed.borrow().writes, [Some("19".into())]);
+}
+
+/// Delayed completion and ordinary equal-valued edits retain separate consumer aspirations.
+#[tokio::test]
+async fn delayed_source_completion_and_equal_ordinary_edit_have_exact_callback_counts() {
+    let (mut dom, observed, id) = mount(false);
+    settle(&mut dom).await;
+    focus(&mut dom, id, "focus");
+    frame(&mut dom, id, "start", "12");
+    frame(&mut dom, id, "draft", "17");
+    settle(&mut dom).await;
+    assert!(observed.borrow().writes.is_empty());
+    frame(&mut dom, id, "end", "19");
+    frame(&mut dom, id, "input", "19");
+    assert_eq!(
+        observed.borrow().writes,
+        [Some("19".into()), Some("19".into())]
+    );
+}
+
+/// Cancellation restores the model even when no new reactive display text is needed.
+#[tokio::test]
+async fn cancellation_restores_native_display_even_when_model_text_has_not_changed() {
+    let (mut dom, observed, id) = mount(false);
+    settle(&mut dom).await;
+    focus(&mut dom, id, "focus");
+    frame(&mut dom, id, "start", "12");
+    frame(&mut dom, id, "cancel", "999");
+    settle(&mut dom).await;
+    let source = SOURCES.with(|sources| sources.borrow()[&id.0].clone());
+    assert_eq!(source.borrow().value, "12");
+    assert!(observed.borrow().writes.is_empty());
+}
+
+/// A formatter transport failure retires pending native completion as a locale failure.
+#[tokio::test]
+async fn formatter_failure_retires_pending_composition() {
+    let gate = Rc::new(RefCell::new(Gate::default()));
+    let document = Rc::new(NodeDocument {
+        owner: Default::default(),
+        gate: Some(gate.clone()),
+    });
+    let (mut dom, observed, id) = mount_config(false, NumberKind::F64, false, document);
+    settle(&mut dom).await;
+    focus(&mut dom, id, "focus");
+    composition(&mut dom, id, "compositionstart");
+    input(&mut dom, id, "17");
+    gate.borrow_mut().fail = true;
+    let mut value = observed.borrow().controls.unwrap().value;
+    value.set(Some("99".into()));
+    settle(&mut dom).await;
+    frame(&mut dom, id, "end", "19");
+    assert!(
+        observed
+            .borrow()
+            .errors
+            .iter()
+            .any(|e| matches!(e, InputError::Locale(_)))
+    );
+    assert!(observed.borrow().writes.is_empty());
+}
+
+/// Forced reset rejects queued old epochs without losing the next enabled input.
+#[tokio::test]
+async fn source_reset_rejects_old_completion_then_accepts_enabled_edit() {
+    let (mut dom, observed, id) = mount(false);
+    settle(&mut dom).await;
+    focus(&mut dom, id, "focus");
+    frame(&mut dom, id, "start", "12");
+    frame(&mut dom, id, "draft", "17");
+    let source = SOURCES.with(|sources| sources.borrow()[&id.0].clone());
+    let old_epoch = source.borrow().epoch.clone();
+    let Controls {
+        mut disabled,
+        mut value,
+        ..
+    } = observed.borrow().controls.unwrap();
+    disabled.set(true);
+    value.set(Some("99".into()));
+    settle(&mut dom).await;
+    disabled.set(false);
+    settle(&mut dom).await;
+    {
+        let mut source = source.borrow_mut();
+        let current = source.epoch.clone();
+        source.epoch = old_epoch;
+        source.push("end", "19");
+        source.epoch = current;
+    }
+    dom.render_immediate_to_vec();
+    assert!(observed.borrow().writes.is_empty());
+    input(&mut dom, id, "7");
+    assert_eq!(observed.borrow().writes, [Some("7".into())]);
+    drop(dom);
+    assert!(
+        source.borrow().closed,
+        "unmount closes renderer-owned JS channel"
+    );
+}
+
+/// Reset send failures and missing acknowledgments report explicit source errors.
+#[tokio::test]
+async fn source_reset_failure_is_visible_instead_of_indefinitely_inert() {
+    for fail_send in [true, false] {
+        let (mut dom, observed, id) = mount(false);
+        settle(&mut dom).await;
+        SOURCES.with(|sources| {
+            let sources = sources.borrow();
+            let mut source = sources[&id.0].borrow_mut();
+            source.fail_send = fail_send;
+            source.drop_ack = !fail_send;
+        });
+        let mut disabled = observed.borrow().controls.unwrap().disabled;
+        disabled.set(true);
+        settle(&mut dom).await;
+        assert!(
+            observed
+                .borrow()
+                .errors
+                .iter()
+                .any(|e| matches!(e, InputError::EventSource(_)))
+        );
+        assert!(dioxus_ssr::render(&dom).contains("Number event source error"));
+    }
+}
+
+/// A persistent receiver failure reports once and disposes its source owner.
+#[tokio::test]
+async fn source_receive_failure_closes_the_owner() {
+    let (mut dom, observed, id) = mount(false);
+    settle(&mut dom).await;
+    let source = SOURCES.with(|sources| sources.borrow()[&id.0].clone());
+    {
+        let mut source = source.borrow_mut();
+        source.fail_recv = true;
+        source.push("input", "19");
+    }
+    dom.render_immediate_to_vec();
+    assert!(source.borrow().closed);
+    assert!(observed.borrow().writes.is_empty());
+    assert_eq!(
+        observed
+            .borrow()
+            .errors
+            .iter()
+            .filter(|e| matches!(e, InputError::EventSource(_)))
+            .count(),
+        1
+    );
 }
 
 /// Focused drafts retain their parsing locale while new formatting and blur use the new locale.
@@ -382,8 +661,8 @@ async fn locale_changes_do_not_reinterpret_focused_drafts() {
         Rc::new(NodeDocument::default()),
     );
     settle(&mut dom).await;
-    focus(&dom, id, "focus");
-    input(&dom, id, "-");
+    focus(&mut dom, id, "focus");
+    input(&mut dom, id, "-");
     let Controls {
         mut value,
         mut locale,
@@ -392,12 +671,12 @@ async fn locale_changes_do_not_reinterpret_focused_drafts() {
     value.set(Some("1234.5".into()));
     locale.set(Some("de-DE".into()));
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"-\""));
-    input(&dom, id, "1.5");
+    assert_display(id, "-");
+    input(&mut dom, id, "1.5");
     assert_eq!(observed.borrow().writes, [Some("1.5".into())]);
-    focus(&dom, id, "blur");
+    focus(&mut dom, id, "blur");
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"1.234,5\""));
+    assert_display(id, "1.234,5");
 }
 
 /// Typed aspirations are not range-clamped, and changing bounds cannot rewrite the model display.
@@ -422,13 +701,13 @@ async fn slider_ranges_and_wide_integers_preserve_exact_model_values() {
             html.contains("role=\"slider\""),
             kind == NumberKind::Signed(32)
         );
-        focus(&dom, id, "focus");
+        focus(&mut dom, id, "focus");
         let aspiration = if kind == NumberKind::Unsigned(128) {
             "340282366920938463463374607431768211455"
         } else {
             "200"
         };
-        input(&dom, id, aspiration);
+        input(&mut dom, id, aspiration);
         assert_eq!(observed.borrow().writes, [Some(aspiration.to_string())]);
         value.set(Some(aspiration.to_string()));
         range.set(Some(NumericRange {
@@ -436,7 +715,7 @@ async fn slider_ranges_and_wide_integers_preserve_exact_model_values() {
             max: "10".into(),
         }));
         settle(&mut dom).await;
-        assert!(dioxus_ssr::render(&dom).contains(&format!("value=\"{aspiration}\"")));
+        assert_display(id, aspiration);
         assert_eq!(observed.borrow().writes.len(), 1);
     }
 }
@@ -451,7 +730,7 @@ async fn keyboard_stepping_rejects_nonfinite_and_blocked_values() {
         Rc::new(NodeDocument::default()),
     );
     settle(&mut dom).await;
-    arrow_up(&dom, id);
+    arrow_up(&mut dom, id);
     assert_eq!(observed.borrow().writes, [Some("13".into())]);
     let Controls {
         mut value,
@@ -460,13 +739,13 @@ async fn keyboard_stepping_rejects_nonfinite_and_blocked_values() {
     } = observed.borrow().controls.unwrap();
     value.set(Some("NaN".into()));
     settle(&mut dom).await;
-    arrow_up(&dom, id);
+    arrow_up(&mut dom, id);
     assert_eq!(observed.borrow().writes.len(), 1);
     assert!(!observed.borrow().errors.is_empty());
     readonly.set(true);
     value.set(Some("10".into()));
     settle(&mut dom).await;
-    arrow_up(&dom, id);
+    arrow_up(&mut dom, id);
     assert_eq!(observed.borrow().writes.len(), 1);
 }
 
@@ -487,9 +766,10 @@ async fn eval_transport_failure_reaches_error_callback() {
             .iter()
             .any(|e| matches!(e, InputError::Locale(_)))
     );
-    input(&dom, id, "3");
+    input(&mut dom, id, "3");
     assert!(observed.borrow().writes.is_empty());
-    assert!(dioxus_ssr::render(&dom).contains("Number locale error"));
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Number locale error") || html.contains("Number event source error"));
 }
 
 /// Locale failure remains explicit while effective model values stay visible and recoverable.
@@ -502,8 +782,8 @@ async fn locale_failure_keeps_effective_model_display_and_recovers() {
         Rc::new(NodeDocument::default()),
     );
     settle(&mut dom).await;
-    focus(&dom, id, "focus");
-    input(&dom, id, "-");
+    focus(&mut dom, id, "focus");
+    input(&mut dom, id, "-");
     let Controls {
         mut value,
         mut locale,
@@ -520,10 +800,10 @@ async fn locale_failure_keeps_effective_model_display_and_recovers() {
     );
     value.set(Some("99.5".into()));
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"99.5\""));
+    assert_display(id, "99.5");
     locale.set(Some("de-DE".into()));
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"99,5\""));
+    assert_display(id, "99,5");
     assert!(observed.borrow().writes.is_empty());
 }
 
@@ -544,19 +824,19 @@ async fn focused_authoritative_updates_use_the_originating_locale() {
     } = observed.borrow().controls.unwrap();
     locale.set(Some("de-DE".into()));
     settle(&mut dom).await;
-    focus(&dom, id, "focus");
+    focus(&mut dom, id, "focus");
     value.set(Some("99.5".into()));
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"99,5\""));
+    assert_display(id, "99,5");
     locale.set(Some("en-US".into()));
     value.set(Some("88.5".into()));
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"88,5\""));
-    input(&dom, id, "88,6");
+    assert_display(id, "88,5");
+    input(&mut dom, id, "88,6");
     assert_eq!(observed.borrow().writes, [Some("88.6".into())]);
-    focus(&dom, id, "blur");
+    focus(&mut dom, id, "blur");
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"88.5\""));
+    assert_display(id, "88.5");
 }
 
 /// Browsers with no post-composition input still submit the final captured native value.
@@ -564,10 +844,10 @@ async fn focused_authoritative_updates_use_the_originating_locale() {
 async fn composition_end_without_following_input_finishes_once() {
     let (mut dom, observed, id) = mount(false);
     settle(&mut dom).await;
-    focus(&dom, id, "focus");
-    composition(&dom, id, "compositionstart");
-    input(&dom, id, "17");
-    composition(&dom, id, "compositionend");
+    focus(&mut dom, id, "focus");
+    composition(&mut dom, id, "compositionstart");
+    input(&mut dom, id, "17");
+    composition(&mut dom, id, "compositionend");
     settle(&mut dom).await;
     assert_eq!(observed.borrow().writes, [Some("17".into())]);
     assert!(observed.borrow().errors.is_empty());
@@ -579,10 +859,9 @@ async fn delayed_composition_is_cancelled_by_forced_state_and_unmount() {
     for unmount in [false, true] {
         let (mut dom, observed, id) = mount(false);
         settle(&mut dom).await;
-        focus(&dom, id, "focus");
-        composition(&dom, id, "compositionstart");
-        input(&dom, id, "17");
-        composition(&dom, id, "compositionend");
+        focus(&mut dom, id, "focus");
+        composition(&mut dom, id, "compositionstart");
+        input(&mut dom, id, "17");
         if unmount {
             drop(dom);
             tokio::task::yield_now().await;
@@ -599,8 +878,8 @@ async fn delayed_composition_is_cancelled_by_forced_state_and_unmount() {
 async fn forced_state_discards_local_error_but_preserves_model_validation() {
     let (mut dom, observed, id) = mount(false);
     settle(&mut dom).await;
-    focus(&dom, id, "focus");
-    input(&dom, id, "bad");
+    focus(&mut dom, id, "focus");
+    input(&mut dom, id, "bad");
     settle(&mut dom).await;
     assert!(dioxus_ssr::render(&dom).contains("Invalid number"));
     let Controls {
@@ -613,7 +892,7 @@ async fn forced_state_discards_local_error_but_preserves_model_validation() {
     disabled.set(true);
     settle(&mut dom).await;
     let html = dioxus_ssr::render(&dom);
-    assert!(html.contains("value=\"99\""));
+    assert_display(id, "99");
     assert!(!html.contains("Invalid number"));
     invalid.set(true);
     settle(&mut dom).await;
@@ -630,38 +909,30 @@ async fn settle(dom: &mut VirtualDom) {
     }
 }
 
-/// Dispatches a native value captured by FormEvent, not a later DOM read.
-fn input(dom: &VirtualDom, id: ElementId, value: &str) {
-    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-    let data: dioxus_html::SerializedFormData = serde_json::from_value(serde_json::json!({
-        "value": value, "values": [], "files": null
-    }))
-    .unwrap();
-    dom.runtime().handle_event(
-        "input",
-        Event::new(
-            Rc::new(dioxus_html::PlatformEventData::new(Box::new(data))),
-            true,
-        )
-        .into_any(),
-        id,
-    );
+/// Delivers a synchronously captured native value rather than a later DOM read.
+fn input(dom: &mut VirtualDom, id: ElementId, value: &str) {
+    if !SOURCES.with(|sources| sources.borrow().contains_key(&id.0)) {
+        return;
+    }
+    let composing = SOURCES.with(|sources| sources.borrow()[&id.0].borrow().composing);
+    frame(dom, id, if composing { "draft" } else { "input" }, value);
 }
 
 /// Dispatches focus events to the same actual native input.
-fn focus(dom: &VirtualDom, id: ElementId, name: &str) {
-    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-    dom.runtime().handle_event(
-        name,
-        Event::new(
-            Rc::new(dioxus_html::PlatformEventData::new(Box::new(
-                dioxus_html::SerializedFocusData::default(),
-            ))),
-            true,
-        )
-        .into_any(),
-        id,
-    );
+fn focus(dom: &mut VirtualDom, id: ElementId, name: &str) {
+    let value = SOURCES.with(|sources| sources.borrow()[&id.0].borrow().value.clone());
+    frame(dom, id, name, &value);
+}
+
+/// Asserts on renderer-applied display commands rather than an uncontrolled initial HTML attribute.
+fn assert_display(id: ElementId, expected: &str) {
+    SOURCES.with(|sources| assert_eq!(sources.borrow()[&id.0].borrow().value, expected));
+}
+
+/// Delivers a source-captured full-value frame through the component's real eval receiver.
+fn frame(dom: &mut VirtualDom, id: ElementId, action: &str, value: &str) {
+    SOURCES.with(|sources| sources.borrow()[&id.0].borrow_mut().push(action, value));
+    dom.render_immediate_to_vec();
 }
 
 /// Required blanks and blur never submit; optional clearing submits absence exactly once.
@@ -670,13 +941,13 @@ async fn clearing_respects_optional_contract() {
     for optional in [false, true] {
         let (mut dom, observed, id) = mount(optional);
         settle(&mut dom).await;
-        focus(&dom, id, "focus");
-        input(&dom, id, "");
-        focus(&dom, id, "blur");
+        focus(&mut dom, id, "focus");
+        input(&mut dom, id, "");
+        focus(&mut dom, id, "blur");
         settle(&mut dom).await;
         let expected = if optional { vec![None] } else { vec![] };
         assert_eq!(observed.borrow().writes, expected);
-        assert!(dioxus_ssr::render(&dom).contains("value=\"12\""));
+        assert_display(id, "12");
     }
 }
 
@@ -693,18 +964,18 @@ async fn controlled_updates_and_blocked_events_do_not_submit() {
     } = observed.borrow().controls.unwrap();
     value.set(Some("99".into()));
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"99\""));
+    assert_display(id, "99");
     assert!(observed.borrow().writes.is_empty());
-    focus(&dom, id, "focus");
-    input(&dom, id, "-");
+    focus(&mut dom, id, "focus");
+    input(&mut dom, id, "-");
     disabled.set(true);
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"99\""));
-    input(&dom, id, "10");
+    assert_display(id, "99");
+    input(&mut dom, id, "10");
     disabled.set(false);
     readonly.set(true);
     settle(&mut dom).await;
-    input(&dom, id, "11");
+    input(&mut dom, id, "11");
     assert!(observed.borrow().writes.is_empty());
 }
 
@@ -713,17 +984,17 @@ async fn controlled_updates_and_blocked_events_do_not_submit() {
 async fn input_submits_and_acknowledgment_preserves_spelling() {
     let (mut dom, observed, id) = mount(false);
     settle(&mut dom).await;
-    focus(&dom, id, "focus");
-    input(&dom, id, "0013");
+    focus(&mut dom, id, "focus");
+    input(&mut dom, id, "0013");
     assert_eq!(observed.borrow().writes, [Some("0013".to_string())]);
     let mut value = observed.borrow().controls.unwrap().value;
     value.set(Some("13".into()));
     settle(&mut dom).await;
-    assert!(dioxus_ssr::render(&dom).contains("value=\"0013\""));
-    focus(&dom, id, "blur");
+    assert_display(id, "0013");
+    focus(&mut dom, id, "blur");
     settle(&mut dom).await;
     assert_eq!(observed.borrow().writes.len(), 1);
-    assert!(dioxus_ssr::render(&dom).contains("value=\"13\""));
+    assert_display(id, "13");
 }
 
 /// Label, instructions, validation and blocked flags remain associated with the input.

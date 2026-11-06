@@ -2,6 +2,7 @@
 //!
 //! Pass canonical strings and handle aspirations in `on_value`; the host's
 //! validation remains authoritative. Wrap controls in [`super::Theme`].
+use super::numeric_events::{SourceChannel, SourceFrame};
 use super::{button::Button, input::Input, label::Label, number::*, slider::Slider};
 use crate::input::{InputError, NumberKind, NumericRange};
 use dioxus::prelude::*;
@@ -85,6 +86,12 @@ pub struct NumericEditorProps {
 /// the latest effective value without submitting. Replacing `id` or `kind` retires
 /// the old instance; use a different key when replacing the underlying model.
 ///
+/// Native capture supports selected/collapsed composition spans and expansions
+/// exposed by synchronous `beforeinput` selection. A native mutation outside
+/// that span without authoritative range metadata reports `InputError::EventSource`
+/// without guessing a write (range generalization: issue #280). Native composition
+/// terminal echoes use composition input metadata, not text equality alone.
+///
 /// - Complexity: O(value + draft + locale bytes) per transition.
 ///
 /// # Examples
@@ -118,8 +125,6 @@ struct EditorState {
     locale: Option<NumberLocale>,
     model: Option<(bool, bool)>,
     composing: bool,
-    pending_composition: bool,
-    duplicate_clear: bool,
     retired: bool,
 }
 
@@ -133,8 +138,6 @@ impl EditorState {
             locale: None,
             model: None,
             composing: false,
-            pending_composition: false,
-            duplicate_clear: false,
             retired: false,
         }
     }
@@ -165,8 +168,6 @@ impl EditorState {
         self.locale = None;
         self.model = None;
         self.composing = false;
-        self.pending_composition = false;
-        self.duplicate_clear = false;
     }
 
     /// Synchronizes changed model state and reports whether it discards a forced draft.
@@ -196,53 +197,8 @@ impl EditorState {
         self.model = Some((disabled, readonly));
         if disabled || readonly {
             self.composing = false;
-            self.pending_composition = false;
-            self.duplicate_clear = false;
         }
         disabled || readonly
-    }
-
-    /// Marks compositionend while waiting for the browser's final native input.
-    ///
-    /// - Complexity: O(draft bytes) time and space.
-    fn end_composition(&mut self) -> Option<PendingComposition> {
-        if self.retired || !self.composing {
-            return None;
-        }
-        self.pending_composition = true;
-        Some(PendingComposition {
-            generation: self.generation,
-            revision: self.draft.revision(),
-            epoch: self.epoch,
-            text: self.draft.text().to_string(),
-        })
-    }
-
-    /// Uses the final FormEvent value when it follows compositionend.
-    fn native_input(&mut self, text: String) -> DraftEvent {
-        if std::mem::take(&mut self.pending_composition) {
-            DraftEvent::CompositionEnd(text)
-        } else {
-            DraftEvent::Input(text)
-        }
-    }
-
-    /// Finishes browsers without a post-composition input only while the captured stamp is current.
-    ///
-    /// - Complexity: O(draft + locale bytes) time and space.
-    fn finish_composition(
-        &mut self,
-        pending: PendingComposition,
-        kind: NumberKind,
-        optional: bool,
-    ) -> UiEffect {
-        if !self.pending_composition
-            || !self.accepts(pending.generation, pending.revision, pending.epoch)
-        {
-            return UiEffect::None;
-        }
-        self.pending_composition = false;
-        self.event(DraftEvent::CompositionEnd(pending.text), kind, optional)
     }
 
     /// Applies a stamped native transition and derives the optional-clear callback.
@@ -257,24 +213,17 @@ impl EditorState {
         };
         let blocked = self.model.as_ref().is_none_or(|(d, r)| *d || *r);
         let clear = match &event {
-            DraftEvent::Input(text) => {
-                let duplicate = std::mem::take(&mut self.duplicate_clear);
-                optional && text.is_empty() && !self.composing && !duplicate
-            }
+            DraftEvent::Input(text) => optional && text.is_empty() && !self.composing,
             DraftEvent::CompositionStart => {
                 self.composing = true;
-                self.pending_composition = false;
                 false
             }
             DraftEvent::CompositionEnd(text) => {
                 let was_composing = std::mem::take(&mut self.composing);
-                self.duplicate_clear = optional && text.is_empty() && was_composing;
-                self.duplicate_clear
+                optional && text.is_empty() && was_composing
             }
-            DraftEvent::Blur => {
+            DraftEvent::Blur | DraftEvent::CompositionCancel => {
                 self.composing = false;
-                self.pending_composition = false;
-                self.duplicate_clear = false;
                 false
             }
             _ => false,
@@ -291,14 +240,6 @@ impl EditorState {
             DraftEffect::None => UiEffect::None,
         }
     }
-}
-
-/// Captures a compositionend draft and its Rust-only cancellation stamp.
-struct PendingComposition {
-    generation: u64,
-    revision: u64,
-    epoch: u64,
-    text: String,
 }
 
 /// Separates reducer decisions from framework callback delivery.
@@ -430,15 +371,47 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
     let mut visible = use_signal(|| props.value.peek().clone().unwrap_or_default());
     let mut error = use_signal(|| None::<InputError>);
     let mut ready = use_signal(|| false);
+    let mut source_failed = use_signal(|| false);
+    let initial_value = use_hook(|| value.peek().clone().unwrap_or_default());
+    let source_token = use_hook(|| state.borrow().generation);
+    let source = use_hook(|| Rc::new(RefCell::new(None::<SourceChannel>)));
+    let closing = source.clone();
     let dropped = state.clone();
     use_drop(move || {
         dropped.borrow_mut().retire();
+        closing.borrow_mut().take();
+    });
+    let failed_locale_state = state.clone();
+    let failed_locale_source = source.clone();
+    let locale_failure = use_callback(move |failure: InputError| {
+        failed_locale_state.borrow_mut().lose_locale();
+        visible.set(value.peek().clone().unwrap_or_default());
+        ready.set(false);
+        let reset_error = failed_locale_source
+            .borrow_mut()
+            .as_mut()
+            .and_then(|source| {
+                source
+                    .reset(value.peek().as_deref().unwrap_or_default(), true, false)
+                    .err()
+            });
+        deliver(UiEffect::Report(failure), error, on_value, on_error);
+        if let Some(message) = reset_error {
+            deliver(
+                UiEffect::Report(InputError::EventSource(message)),
+                error,
+                on_value,
+                on_error,
+            );
+        }
     });
 
     let locale = props.locale.clone();
+    let locale_source = source.clone();
     let resolving = state.clone();
     use_effect(use_reactive!(|locale| {
         let state = resolving.clone();
+        let locale_source = locale_source.clone();
         let epoch = {
             let mut state = state.borrow_mut();
             state.epoch = state.epoch.checked_add(1).expect("locale epochs exhausted");
@@ -471,6 +444,15 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
                     Err(failure) => {
                         state.lose_locale();
                         visible.set(value.peek().clone().unwrap_or_default());
+                        if let Some(source) = locale_source.borrow_mut().as_mut()
+                            && let Err(message) = source.reset(
+                                value.peek().as_deref().unwrap_or_default(),
+                                true,
+                                false,
+                            )
+                        {
+                            on_error.call(InputError::EventSource(message));
+                        }
                         Some(failure)
                     }
                 }
@@ -483,12 +465,14 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
                 if matches!(*error.peek(), Some(InputError::Locale(_))) {
                     error.set(None);
                 }
-                format_model(state, visible, error, kind, on_error);
+                format_model(state, visible, error, kind, locale_failure);
             }
         });
     }));
 
     let updating = state.clone();
+    let resetting = source.clone();
+    let source_flags = use_hook(|| Rc::new(RefCell::new(None)));
     use_effect(move || {
         let canonical = value.read();
         let disabled = disabled();
@@ -510,7 +494,18 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
                 visible.set(canonical.clone().unwrap_or_default());
             }
         }
-        format_model(updating.clone(), visible, error, kind, on_error);
+        let flags = (disabled, readonly, ready());
+        if source_flags.borrow().as_ref() != Some(&flags) {
+            *source_flags.borrow_mut() = Some(flags);
+            if let Some(source) = resetting.borrow_mut().as_mut()
+                && let Err(message) = source.reset(&visible.peek(), disabled || !flags.2, readonly)
+            {
+                let failure = InputError::EventSource(message);
+                error.set(Some(failure.clone()));
+                on_error.call(failure);
+            }
+        }
+        format_model(updating.clone(), visible, error, kind, locale_failure);
     });
 
     let event_state = state.clone();
@@ -528,40 +523,8 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
         deliver(effect, error, on_value, on_error);
         if blur {
             error.set(None);
-            format_model(event_state.clone(), visible, error, kind, on_error);
+            format_model(event_state.clone(), visible, error, kind, locale_failure);
         }
-    });
-    let input_state = state.clone();
-    let composing_state = state.clone();
-    let composition_ended = use_callback(move |()| {
-        let Some(pending) = composing_state.borrow_mut().end_composition() else {
-            return;
-        };
-        let state = composing_state.clone();
-        spawn(async move {
-            let result = document::eval(
-                "return new Promise(resolve => setTimeout(() => resolve(null), 0));",
-            )
-            .join::<serde_json::Value>()
-            .await;
-            let effect = {
-                let mut state = state.borrow_mut();
-                if *disabled.peek()
-                    || *readonly.peek()
-                    || !state.pending_composition
-                    || !state.accepts(pending.generation, pending.revision, pending.epoch)
-                {
-                    return;
-                }
-                let effect = match result {
-                    Ok(_) => state.finish_composition(pending, kind, optional),
-                    Err(failure) => UiEffect::Report(InputError::Locale(failure.to_string())),
-                };
-                publish(&state, visible);
-                effect
-            };
-            deliver(effect, error, on_value, on_error);
-        });
     });
     let step_state = state.clone();
     let step = props.step.clone();
@@ -576,32 +539,107 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
         );
         deliver(effect, error, on_value, on_error);
     });
+    let receiving = source.clone();
+    let source_state = state.clone();
+    let receive = use_callback(move |result: Result<SourceFrame, String>| {
+        let frame = match result {
+            Ok(frame) if frame.action != "fatal" => frame,
+            result => {
+                let message = match result {
+                    Ok(frame) => frame.message,
+                    Err(message) => message,
+                };
+                source_failed.set(true);
+                receiving.borrow_mut().take();
+                deliver(
+                    UiEffect::Report(InputError::EventSource(message)),
+                    error,
+                    on_value,
+                    on_error,
+                );
+                return;
+            }
+        };
+        let accepted = receiving
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(|source| source.accept(&frame, source_token));
+        if !accepted {
+            return;
+        }
+        match frame.action.as_str() {
+            "error" => deliver(
+                UiEffect::Report(InputError::EventSource(frame.message)),
+                error,
+                on_value,
+                on_error,
+            ),
+            "ready" => {}
+            "focus" => native.call(DraftEvent::Focus),
+            "blur" => native.call(DraftEvent::Blur),
+            "start" => native.call(DraftEvent::CompositionStart),
+            "draft" | "input" => native.call(DraftEvent::Input(frame.value)),
+            "end" => native.call(DraftEvent::CompositionEnd(frame.value)),
+            "cancel" => native.call(DraftEvent::CompositionCancel),
+            "up" | "down" if !source_state.borrow().composing => {
+                stepping.call(frame.action == "up")
+            }
+            "up" | "down" => {}
+            _ => deliver(
+                UiEffect::Report(InputError::EventSource(
+                    "Unknown numeric source action".into(),
+                )),
+                error,
+                on_value,
+                on_error,
+            ),
+        }
+        // Retirement must restore native text even when the reactive display is unchanged.
+        if matches!(frame.action.as_str(), "ready" | "blur" | "cancel" | "error")
+            && let Some(source) = receiving.borrow().as_ref()
+            && let Err(message) = source.display(&visible.peek())
+        {
+            deliver(
+                UiEffect::Report(InputError::EventSource(message)),
+                error,
+                on_value,
+                on_error,
+            );
+        }
+    });
+    let starting = source.clone();
+    use_effect(move || {
+        if starting.borrow().is_none() && !*source_failed.peek() {
+            *starting.borrow_mut() = Some(SourceChannel::start(source_token, receive));
+        }
+    });
+    let displaying = source.clone();
+    use_effect(move || {
+        let text = visible.read();
+        if let Some(source) = displaying.borrow().as_ref()
+            && let Err(message) = source.display(&text)
+        {
+            deliver(
+                UiEffect::Report(InputError::EventSource(message)),
+                error,
+                on_value,
+                on_error,
+            );
+        }
+    });
     let error_text = error.read().as_ref().map(error_message);
     let invalid = (props.invalid)() || error_text.is_some();
-    let blocked = (props.disabled)() || (props.readonly)() || !ready();
+    let blocked = (props.disabled)() || (props.readonly)() || !ready() || source_failed();
     rsx! {
         div { class: "adam-numeric-editor",
             Label { html_for: props.id.clone(), "{props.label}" }
             div { class: "adam-numeric-controls",
                 Input {
                     id: props.id.clone(), r#type: "text", inputmode: "decimal",
-                    value: visible(), disabled: (props.disabled)() || !ready(), readonly: (props.readonly)(),
+                    value: initial_value.clone(), disabled: (props.disabled)() || !ready() || source_failed(), readonly: (props.readonly)(),
+                    "data-adam-number-source": "{source_token}",
                     "aria-invalid": "{invalid}",
                     "aria-describedby": "{props.id}-help {props.id}-error",
-                    onfocus: move |_| native.call(DraftEvent::Focus),
-                    onblur: move |_| native.call(DraftEvent::Blur),
-                    oninput: move |event: FormEvent| {
-                        let event = input_state.borrow_mut().native_input(event.value());
-                        native.call(event);
-                    },
-                    oncompositionstart: move |_| native.call(DraftEvent::CompositionStart),
-                    oncompositionend: move |_| composition_ended.call(()),
-                    onkeydown: move |event: KeyboardEvent| {
-                        if let Some(increase) = key_step(event.key()) {
-                            event.prevent_default();
-                            stepping.call(increase);
-                        }
-                    },
                 }
                 Button {
                     r#type: "button", disabled: blocked,
@@ -622,15 +660,6 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
                 else if (props.invalid)() { "The model rejected this value." }
             }
         }
-    }
-}
-
-/// Selects numeric stepping keys without consuming other keyboard input.
-fn key_step(key: Key) -> Option<bool> {
-    match key {
-        Key::ArrowUp => Some(true),
-        Key::ArrowDown => Some(false),
-        _ => None,
     }
 }
 
@@ -667,6 +696,7 @@ fn error_message(error: &InputError) -> String {
         InputError::TypeRange { kind, value } => format!("{value} is outside {kind:?}."),
         InputError::UnsupportedEditor(message) => message.clone(),
         InputError::Locale(message) => format!("Number locale error: {message}"),
+        InputError::EventSource(message) => format!("Number event source error: {message}"),
     }
 }
 

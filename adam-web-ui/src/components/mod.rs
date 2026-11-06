@@ -7,6 +7,7 @@ pub mod input;
 pub mod label;
 pub mod number;
 mod numeric_editor;
+mod numeric_events;
 pub mod separator;
 pub mod slider;
 pub mod switch;

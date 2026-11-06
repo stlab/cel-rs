@@ -309,6 +309,28 @@ fn draft_preserves_origin_and_restores_latest_without_writes() {
     assert_eq!(draft.text(), "20,00");
 }
 
+/// Cancelling composition preserves the originating locale and never submits.
+#[test]
+fn composition_cancellation_retains_focus_locale() {
+    let en = locale("en-US");
+    let de = locale("de-DE");
+    let kind = NumberKind::F64;
+    let mut draft = NumberDraft::default();
+    draft.reduce(update("5", false, 1), &en, kind);
+    draft.reduce(DraftEvent::Focus, &en, kind);
+    draft.reduce(DraftEvent::CompositionStart, &en, kind);
+    draft.reduce(DraftEvent::Input("17".into()), &en, kind);
+    assert_eq!(
+        draft.reduce(DraftEvent::CompositionCancel, &de, kind),
+        DraftEffect::None
+    );
+    assert_eq!(draft.text(), "5");
+    assert_eq!(
+        draft.reduce(DraftEvent::Input("1.5".into()), &de, kind),
+        DraftEffect::Submit("1.5".into())
+    );
+}
+
 /// Catches partial composition writes and stale replies after edits or replacement.
 #[test]
 fn composition_disable_replacement_and_stale_work() {
@@ -329,7 +351,7 @@ fn composition_disable_replacement_and_stale_work() {
     );
     assert_eq!(
         draft.reduce(DraftEvent::Input("12".into()), &en, kind),
-        DraftEffect::None
+        DraftEffect::Submit("12".into())
     );
     draft.reduce(
         DraftEvent::Formatted {
