@@ -935,6 +935,53 @@ fn frame(dom: &mut VirtualDom, id: ElementId, action: &str, value: &str) {
     dom.render_immediate_to_vec();
 }
 
+/// Blur restores valid text and clears draft errors without hiding source failures or resubmitting.
+#[tokio::test]
+async fn blur_recovers_draft_errors_without_hiding_source_failures() {
+    let (mut dom, observed, id) = mount(false);
+    settle(&mut dom).await;
+    focus(&mut dom, id, "focus");
+    input(&mut dom, id, "wrong");
+    assert!(dioxus_ssr::render(&dom).contains("Invalid number"));
+    focus(&mut dom, id, "blur");
+    settle(&mut dom).await;
+    assert_display(id, "12");
+    assert!(!dioxus_ssr::render(&dom).contains("Invalid number"));
+    assert!(observed.borrow().writes.is_empty());
+    frame(&mut dom, id, "error", "");
+    assert!(dioxus_ssr::render(&dom).contains("Number event source error"));
+    focus(&mut dom, id, "blur");
+    settle(&mut dom).await;
+    assert!(dioxus_ssr::render(&dom).contains("Number event source error"));
+    assert!(observed.borrow().writes.is_empty());
+}
+
+/// Rendering a lexical diagnostic never overwrites the focused native draft.
+#[tokio::test]
+async fn lexical_error_render_preserves_native_draft() {
+    let (mut dom, observed, id) = mount(false);
+    settle(&mut dom).await;
+    focus(&mut dom, id, "focus");
+    SOURCES.with(|sources| sources.borrow()[&id.0].borrow_mut().push("input", "wrong"));
+    for _ in 0..8 {
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(5), dom.wait_for_work()).await;
+        for edit in dom.render_immediate_to_vec().edits {
+            if let dioxus::core::Mutation::SetAttribute {
+                name: "value",
+                value: dioxus::core::AttributeValue::Text(value),
+                ..
+            } = edit
+            {
+                assert_eq!(value, "wrong", "render must preserve the live native draft");
+            }
+        }
+    }
+    assert_display(id, "wrong");
+    assert!(dioxus_ssr::render(&dom).contains("Invalid number"));
+    assert!(observed.borrow().writes.is_empty());
+}
+
 /// Required blanks and blur never submit; optional clearing submits absence exactly once.
 #[tokio::test]
 async fn clearing_respects_optional_contract() {

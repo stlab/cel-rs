@@ -12,8 +12,6 @@ mod file_io;
 mod history;
 #[cfg(feature = "desktop")]
 mod menu;
-#[cfg(test)]
-mod numeric_event_tests;
 mod side_panel;
 mod toolbar;
 

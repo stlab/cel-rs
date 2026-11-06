@@ -46,6 +46,14 @@ fn host(mode: u8) -> Element {
             let id = document.cell_order[0];
             document.cells[id].ty = CellType::f64();
         }
+        if mode == 7 {
+            let id = document.conditional_group_order[0];
+            document.conditional_groups[id].condition =
+                crate::model::conditional_group::ConditionExpr::Formula {
+                    referenced_cells: vec![document.cell_order[1]],
+                    expr: "enabled".into(),
+                };
+        }
         document
     });
     let selection = use_signal(|| {
@@ -53,12 +61,15 @@ fn host(mode: u8) -> Element {
         match mode {
             0 | 4 | 6 => HashSet::from([NodeId::CellNode(doc.cell_nodes.keys().next().unwrap())]),
             1 | 3 => HashSet::from([NodeId::RelationshipGroup(doc.relationship_group_order[0])]),
-            2 => HashSet::from([NodeId::ConditionalGroup(doc.conditional_group_order[0])]),
+            2 | 7 => HashSet::from([NodeId::ConditionalGroup(doc.conditional_group_order[0])]),
             _ => HashSet::new(),
         }
     });
     let active_tool = use_signal(|| Tool::AddRelationship);
     let document_epoch = use_signal(|| 0u64);
+    if let Some(epoch) = try_consume_context::<numeric_events::EpochObserver>() {
+        epoch.set(Some(document_epoch));
+    }
     let transform = use_signal(|| ViewTransform {
         x: 10.0,
         y: 20.0,
@@ -161,6 +172,11 @@ fn cell_panel_dispatches_output_toggle() {
     let (document, _, _) = observed.borrow().unwrap();
     let doc = document.peek();
     assert!(doc.cells[doc.cell_order[0]].output);
+    drop(doc);
+    click(&dom, *id);
+    settle_effects(&mut dom);
+    assert!(!document.peek().cells[document.peek().cell_order[0]].output);
+    assert!(dioxus_ssr::render(&dom).contains("aria-checked=\"false\""));
 }
 
 /// A bound Document update refreshes the checkbox's controlled visual state.
@@ -174,7 +190,13 @@ fn cell_panel_checkbox_tracks_external_document_updates() {
     settle_effects(&mut dom);
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("aria-checked=\"true\""), "{html}");
+    set_output(&mut document.write(), cell, false);
+    settle_effects(&mut dom);
+    assert!(dioxus_ssr::render(&dom).contains("aria-checked=\"false\""));
 }
+
+#[path = "numeric_event_tests.rs"]
+mod numeric_events;
 
 /// Gives every numeric bound one label and preserves full-width text fields.
 #[test]

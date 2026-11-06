@@ -196,5 +196,9 @@ fn discarded_draft_errors_remain_distinct_from_locale_diagnostics() {
     assert!(discard_error(true, Some(&range)));
     assert!(!discard_error(false, Some(&lexical)));
     assert!(!discard_error(true, Some(&locale)));
+    assert!(!discard_error(
+        true,
+        Some(&InputError::EventSource("offline".into()))
+    ));
     assert!(!discard_error(true, None));
 }

@@ -83,7 +83,9 @@ pub struct NumericEditorProps {
 /// Renders an exact, localized controlled numeric editor.
 ///
 /// Focus retains the originating locale and equivalent spelling. Blur restores
-/// the latest effective value without submitting. Replacing `id` or `kind` retires
+/// the latest effective value without submitting. Blur clears discarded lexical/range
+/// errors, but retains unresolved locale, support, and event-source failures.
+/// Replacing `id` or `kind` retires
 /// the old instance; use a different key when replacing the underlying model.
 ///
 /// Native capture supports selected/collapsed composition spans and expansions
@@ -372,7 +374,6 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
     let mut error = use_signal(|| None::<InputError>);
     let mut ready = use_signal(|| false);
     let mut source_failed = use_signal(|| false);
-    let initial_value = use_hook(|| value.peek().clone().unwrap_or_default());
     let source_token = use_hook(|| state.borrow().generation);
     let source = use_hook(|| Rc::new(RefCell::new(None::<SourceChannel>)));
     let closing = source.clone();
@@ -522,7 +523,9 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
         };
         deliver(effect, error, on_value, on_error);
         if blur {
-            error.set(None);
+            if discard_error(true, error.peek().as_ref()) {
+                error.set(None);
+            }
             format_model(event_state.clone(), visible, error, kind, locale_failure);
         }
     });
@@ -636,7 +639,8 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
             div { class: "adam-numeric-controls",
                 Input {
                     id: props.id.clone(), r#type: "text", inputmode: "decimal",
-                    value: initial_value.clone(), disabled: (props.disabled)() || !ready() || source_failed(), readonly: (props.readonly)(),
+                    // The native source owns text; volatile value attributes overwrite local drafts.
+                    disabled: (props.disabled)() || !ready() || source_failed(), readonly: (props.readonly)(),
                     "data-adam-number-source": "{source_token}",
                     "aria-invalid": "{invalid}",
                     "aria-describedby": "{props.id}-help {props.id}-error",

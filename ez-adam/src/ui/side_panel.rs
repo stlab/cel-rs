@@ -15,7 +15,7 @@ use crate::ops::relationships::{
 use crate::ui::canvas::NodeId;
 use crate::validation::validate_cel_expression;
 use adam_web_ui::components::{Checkbox, CheckboxState, Input, Label, NumericEditor, Separator};
-use adam_web_ui::input::{InputError, NumberKind};
+use adam_web_ui::input::NumberKind;
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
 
@@ -59,54 +59,25 @@ enum ClampBound {
     Max,
 }
 
-/// Describes a value event or blur from an optional numeric editor.
-enum NumericBoundEvent<'a> {
-    /// Carries the editor's canonical value, or `None` when the field is cleared.
-    Value(Option<&'a str>),
-    /// Synchronizes the draft after focus leaves without changing the model.
-    Blur,
-}
-
-/// Applies a numeric editor event to the selected document bound.
+/// Applies the numeric editor's canonical aspiration and returns whether its panel is current.
 ///
-/// - Postcondition: a value event updates or clears the selected bound; blur leaves the
-///   document unchanged.
+/// - Postcondition: a current panel updates the bound, or clears it when `value` is `None`.
+/// - Complexity: O(value length).
 fn apply_numeric_bound_event(
     panel_epoch: u64,
     document_epoch: Signal<u64>,
     document: Signal<Document>,
     cell: crate::model::cell::CellId,
     bound: ClampBound,
-    event: NumericBoundEvent<'_>,
+    value: Option<&str>,
 ) -> bool {
-    match event {
-        NumericBoundEvent::Value(value) => {
-            apply_panel_edit(panel_epoch, document_epoch, document, |document| {
-                let text = value.unwrap_or("");
-                match bound {
-                    ClampBound::Min => set_clamp_min(document, cell, text),
-                    ClampBound::Max => set_clamp_max(document, cell, text),
-                }
-            })
+    apply_panel_edit(panel_epoch, document_epoch, document, |document| {
+        let text = value.unwrap_or("");
+        match bound {
+            ClampBound::Min => set_clamp_min(document, cell, text),
+            ClampBound::Max => set_clamp_max(document, cell, text),
         }
-        NumericBoundEvent::Blur => false,
-    }
-}
-
-/// Returns a user-facing message for a numeric editor error.
-///
-/// # Examples
-///
-/// `numeric_error_message(&InputError::Lexical("bad input".into()))`
-/// returns `"Enter a complete number."`.
-pub(super) fn numeric_error_message(error: &InputError) -> &str {
-    match error {
-        InputError::Lexical(_) => "Enter a complete number.",
-        InputError::TypeRange { .. } => "The number is outside the supported range.",
-        InputError::UnsupportedEditor(message)
-        | InputError::Locale(message)
-        | InputError::EventSource(message) => message,
-    }
+    })
 }
 
 /// Returns whether a panel callback belongs to the active document generation.
@@ -241,10 +212,6 @@ pub fn CellPanel(
         sync_numeric_value(max_value, model_max);
     }));
     let range = use_signal(|| None);
-    let mut min_invalid = use_signal(|| false);
-    let mut max_invalid = use_signal(|| false);
-    let mut min_error = use_signal(|| None::<String>);
-    let mut max_error = use_signal(|| None::<String>);
     let name_id = format!("name-{cell:?}");
     let restrict_id = format!("restrict-{cell:?}");
     let clamp_min_id = format!("clamp-min-{cell:?}");
@@ -283,20 +250,6 @@ pub fn CellPanel(
             if has_clamp_bounds {
                 div {
                     class: "clamp-bound",
-                    onfocusout: move |_| {
-                        apply_numeric_bound_event(
-                            panel_epoch,
-                            document_epoch,
-                            document,
-                            cell,
-                            ClampBound::Min,
-                            NumericBoundEvent::Blur,
-                        );
-                        if is_current_panel_epoch(panel_epoch, document_epoch) {
-                            min_invalid.set(false);
-                            min_error.set(None);
-                        }
-                    },
                     NumericEditor {
                         id: clamp_min_id,
                         label: "Clamp min",
@@ -306,7 +259,7 @@ pub fn CellPanel(
                         step,
                         disabled: false,
                         readonly: false,
-                        invalid: min_invalid,
+                        invalid: false,
                         locale: None,
                         optional: true,
                         on_value: move |value: Option<String>| {
@@ -316,40 +269,16 @@ pub fn CellPanel(
                                 document,
                                 cell,
                                 ClampBound::Min,
-                                NumericBoundEvent::Value(value.as_deref()),
+                                value.as_deref(),
                             ) {
                                 min_value.set(value);
-                                min_invalid.set(false);
-                                min_error.set(None);
                             }
                         },
-                        on_error: move |error: InputError| {
-                            if is_current_panel_epoch(panel_epoch, document_epoch) {
-                                min_invalid.set(true);
-                                min_error.set(Some(numeric_error_message(&error).to_owned()));
-                            }
-                        },
-                    }
-                    if let Some(error) = min_error.read().as_deref() {
-                        div { role: "alert", class: "diagnostic", "{error}" }
+                        on_error: |_| {},
                     }
                 }
                 div {
                     class: "clamp-bound",
-                    onfocusout: move |_| {
-                        apply_numeric_bound_event(
-                            panel_epoch,
-                            document_epoch,
-                            document,
-                            cell,
-                            ClampBound::Max,
-                            NumericBoundEvent::Blur,
-                        );
-                        if is_current_panel_epoch(panel_epoch, document_epoch) {
-                            max_invalid.set(false);
-                            max_error.set(None);
-                        }
-                    },
                     NumericEditor {
                         id: clamp_max_id,
                         label: "Clamp max",
@@ -359,7 +288,7 @@ pub fn CellPanel(
                         step,
                         disabled: false,
                         readonly: false,
-                        invalid: max_invalid,
+                        invalid: false,
                         locale: None,
                         optional: true,
                         on_value: move |value: Option<String>| {
@@ -369,22 +298,12 @@ pub fn CellPanel(
                                 document,
                                 cell,
                                 ClampBound::Max,
-                                NumericBoundEvent::Value(value.as_deref()),
+                                value.as_deref(),
                             ) {
                                 max_value.set(value);
-                                max_invalid.set(false);
-                                max_error.set(None);
                             }
                         },
-                        on_error: move |error: InputError| {
-                            if is_current_panel_epoch(panel_epoch, document_epoch) {
-                                max_invalid.set(true);
-                                max_error.set(Some(numeric_error_message(&error).to_owned()));
-                            }
-                        },
-                    }
-                    if let Some(error) = max_error.read().as_deref() {
-                        div { role: "alert", class: "diagnostic", "{error}" }
+                        on_error: |_| {},
                     }
                 }
             }
@@ -820,7 +739,7 @@ pub fn SidePanel(
                 Some(NodeId::CellNode(node)) => {
                     let cell = document.read().cell_nodes.get(node).map(|node| node.cell);
                     rsx! { if let Some(cell) = cell { CellPanel {
-                        key: "{cell:?}",
+                        key: "{panel_epoch}:{node:?}",
                         document,
                         cell,
                         document_epoch,
@@ -829,7 +748,7 @@ pub fn SidePanel(
                 }
                 Some(NodeId::RelationshipGroup(group)) => {
                     rsx! { if document.read().relationship_groups.contains_key(group) { RelationshipPanel {
-                        key: "{group:?}",
+                        key: "{panel_epoch}:{group:?}",
                         document,
                         group,
                         document_epoch,
@@ -838,7 +757,7 @@ pub fn SidePanel(
                 }
                 Some(NodeId::ConditionalGroup(conditional)) => rsx! {
                     if document.read().conditional_groups.contains_key(conditional) { ConditionalPanel {
-                        key: "{conditional:?}",
+                        key: "{panel_epoch}:{conditional:?}",
                         document,
                         conditional,
                         document_epoch,
@@ -874,7 +793,7 @@ mod component_migration_tests {
                 document,
                 cell,
                 ClampBound::Min,
-                NumericBoundEvent::Value(Some("1234.5")),
+                Some("1234.5"),
             ));
 
             let CellType::F64 { clamp } = &document.read().cells[cell].ty else {
@@ -903,7 +822,7 @@ mod component_migration_tests {
                 document,
                 cell,
                 ClampBound::Min,
-                NumericBoundEvent::Value(Some("9007199254740993")),
+                Some("9007199254740993"),
             ));
 
             let CellType::I64 { clamp } = &document.read().cells[cell].ty else {
@@ -932,7 +851,7 @@ mod component_migration_tests {
                 document,
                 cell,
                 ClampBound::Max,
-                NumericBoundEvent::Value(Some("9876.5")),
+                Some("9876.5"),
             ));
 
             let CellType::F64 { clamp } = &document.read().cells[cell].ty else {
@@ -962,45 +881,13 @@ mod component_migration_tests {
                 document,
                 cell,
                 ClampBound::Min,
-                NumericBoundEvent::Value(None),
+                None,
             ));
 
             let CellType::I64 { clamp } = &document.read().cells[cell].ty else {
                 panic!("expected I64");
             };
             assert_eq!(clamp.min, None);
-            rsx! {}
-        }
-
-        VirtualDom::new(host).rebuild_in_place();
-    }
-
-    #[test]
-    /// Blurring a numeric editor leaves the serialized document unchanged.
-    fn numeric_editor_blur_does_not_change_the_document() {
-        /// Blurs without submitting an editor value.
-        fn host() -> Element {
-            let mut initial = Document::new("demo");
-            let cell = add_cell(&mut initial, "amount", CellType::i64());
-            let mut document = use_signal(|| initial);
-            let epoch = use_signal(|| 1);
-            set_clamp_min(&mut document.write(), cell, "10");
-            let serialized_document_before_blur = to_json(&document.read()).unwrap();
-
-            assert!(!apply_numeric_bound_event(
-                1,
-                epoch,
-                document,
-                cell,
-                ClampBound::Min,
-                NumericBoundEvent::Blur,
-            ));
-
-            let serialized_document_after_blur = to_json(&document.read()).unwrap();
-            assert_eq!(
-                serialized_document_after_blur,
-                serialized_document_before_blur
-            );
             rsx! {}
         }
 
