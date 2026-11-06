@@ -15,6 +15,7 @@ To build and run it yourself, see [Run Begin](#run-begin).
 | Live presentation | [Adam slides](https://stlab.github.io/cel-rs/adam-slides/) · [Authoring and preview](adam-slides/README.md) |
 | CEL libraries | [cel-rs](https://stlab.github.io/cel-rs/cel_rs/) · [Runtime](https://stlab.github.io/cel-rs/cel_runtime/) · [Parser](https://stlab.github.io/cel-rs/cel_parser/) · [Macros](https://stlab.github.io/cel-rs/cel_rs_macros/) · [Standard library](https://stlab.github.io/cel-rs/cel_std/) |
 | Adam libraries | [Property-model runtime](https://stlab.github.io/cel-rs/adam_rs/) · [Language](https://stlab.github.io/cel-rs/adam_lang/) · [Web UI](https://stlab.github.io/cel-rs/adam_web_ui/) |
+| Dioxus integration | [Standalone consumer and host lifecycle](docs/dioxus-integration.md) |
 | Adam tools | [Formatter](https://stlab.github.io/cel-rs/adam_fmt/) · [Language server](https://stlab.github.io/cel-rs/adam_lsp/) · [VS Code extension](editors/vscode-adam-lang/README.md) |
 | Applications | [Begin web app](https://stlab.github.io/cel-rs/begin/) · [Begin architecture](docs/VISION.md) · [EZ Adam design](docs/superpowers/specs/2026-08-24-ez-adam-design.md) |
 

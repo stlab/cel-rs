@@ -5,7 +5,7 @@ edition = "2024"
 description = "Reusable Dioxus + Spectrum Web Components UI for browsing and editing a live adam-rs Sheet"
 
 [features]
-desktop = []
+desktop = ["dioxus/desktop"]
 web = ["dioxus-primitives/web"]
 
 [dependencies]
@@ -36,3 +36,8 @@ tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "sheet-binding"
+path = "examples/sheet_binding.rs"
+required-features = ["desktop"]
