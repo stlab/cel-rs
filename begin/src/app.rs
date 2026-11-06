@@ -4,13 +4,11 @@ use dioxus::prelude::*;
 
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
 use crate::graph_legend::GraphLegend;
+use crate::recovery::HostBoundary;
 use adam_web_ui::GraphView;
 use adam_web_ui::SheetInspector;
 use adam_web_ui::binding::{BindingError, HostOutcome, SheetEvent, SheetHandle, SheetOwner};
-use adam_web_ui::spectrum::{
-    SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
-    SpSideNavItem, SpSwitch, SpTheme,
-};
+use adam_web_ui::components::{Button, ButtonVariant, Separator, Switch, Theme};
 use adam_web_ui::to_graph_data;
 use adam_web_ui::{Renderer, build_sheet};
 
@@ -35,6 +33,11 @@ struct LiveSheet {
 ///
 /// - Complexity: O(source/name bytes) storage plus construction/publication.
 fn build_owner(source: &str, name: &str) -> Result<SheetOwner, adam_web_ui::BuildError> {
+    if current_boundary().is_some_and(HostBoundary::is_fatal) {
+        return Err(adam_web_ui::BuildError::Recovery(Box::new(
+            adam_web_ui::binding::HostRejection::Binding(BindingError::RetiredInstance),
+        )));
+    }
     let source = source.to_string();
     let name = name.to_string();
     let schema = name.clone();
@@ -47,26 +50,72 @@ fn build_owner(source: &str, name: &str) -> Result<SheetOwner, adam_web_ui::Buil
 /// Reports structured host outcomes and restores only a recoverably discarded model.
 ///
 /// Fatal outcomes leave the owner retired; recorder failure retains accepted state.
-/// Durable persistence and shutdown policy remain the later host migration's work.
 ///
 /// - Complexity: Diagnostic bytes plus explicit reconstruction cost on rejection.
-fn sheet_outcome(event: SheetEvent) {
+pub(crate) fn sheet_outcome(event: SheetEvent) {
+    let boundary = try_consume_context::<HostBoundary>();
+    if boundary.is_some_and(HostBoundary::is_fatal) {
+        return;
+    }
     match event.outcome {
-        HostOutcome::Accepted => {}
+        HostOutcome::Accepted => {
+            if let Some(boundary) = boundary {
+                boundary.accept();
+            }
+        }
         HostOutcome::Rejected(error) => {
-            adam_web_ui::diagnostics::report_error(&format!("{error:?}"));
+            let error = adam_web_ui::BuildError::Recovery(Box::new(error));
+            adam_web_ui::diagnostics::report_error(&error.render(&Renderer::plain()));
             if matches!(
                 event.sheet.inspect(|_, _| ()),
                 Err(BindingError::Unavailable)
             ) && let Err(error) = event.sheet.restore_accepted()
             {
-                adam_web_ui::diagnostics::report_error(&error.render(&Renderer::styled()));
+                report_build_error(&error);
             }
         }
-        HostOutcome::Fatal(error) => adam_web_ui::diagnostics::report_error(&format!("{error:?}")),
+        HostOutcome::Fatal(error) => {
+            report_build_error(&adam_web_ui::BuildError::Runtime(Box::new(error)));
+        }
         HostOutcome::RecordingFailed(error) => {
+            if let Some(boundary) = boundary {
+                boundary.accept();
+            }
             adam_web_ui::diagnostics::report_error(&format!("{error:?}"))
         }
+    }
+}
+
+/// Returns the application boundary only while a Dioxus owner scope exists.
+fn current_boundary() -> Option<HostBoundary> {
+    dioxus::core::Runtime::try_current().and_then(|_| try_consume_context::<HostBoundary>())
+}
+
+/// Reports an authored diagnostic and applies fatal policy only to propagation failures.
+///
+/// - Complexity: O(rendered diagnostic bytes), plus fatal persistence work.
+pub(crate) fn report_build_error(error: &adam_web_ui::BuildError) -> String {
+    let message = error.render(&Renderer::plain());
+    let boundary = current_boundary();
+    if matches!(error, adam_web_ui::BuildError::Runtime(_))
+        && let Some(boundary) = boundary
+    {
+        boundary.fatal(message.clone());
+    } else {
+        adam_web_ui::diagnostics::report_error(&message);
+    }
+    message
+}
+
+/// Forwards graph propagation to the application boundary without treating transport as fatal.
+///
+/// - Complexity: Diagnostic and fatal persistence bytes.
+pub(crate) fn graph_outcome(error: adam_web_ui::graph::GraphFailure) {
+    match error {
+        adam_web_ui::graph::GraphFailure::Runtime(failure) => {
+            report_build_error(&adam_web_ui::BuildError::Runtime(failure));
+        }
+        error => adam_web_ui::diagnostics::report_error(&error.to_string()),
     }
 }
 
@@ -98,6 +147,10 @@ fn install_loaded_source(
     sheet_labels: Option<SheetOwner>,
     candidate: ActiveSource,
 ) {
+    let boundary = try_consume_context::<HostBoundary>();
+    if boundary.is_some_and(HostBoundary::is_fatal) {
+        return;
+    }
     if let Some(owner) = sheet_labels {
         if let Some(current) = model.peek().as_ref().copied() {
             if let Err(error) = current.sheet.install(owner) {
@@ -111,6 +164,11 @@ fn install_loaded_source(
             }));
         }
         initial_error.set(None);
+        if let Some(boundary) = boundary
+            && let Some(live) = *model.peek()
+        {
+            boundary.installed(candidate.clone(), live.sheet);
+        }
         displayed_source.set(candidate.clone());
     }
     active_source.set(candidate);
@@ -132,7 +190,7 @@ fn pick_default_example_name(names: &[String]) -> String {
     }
 }
 
-/// Root component: Spectrum theme wrapper with an examples picker, the graph, and
+/// Renders the shared control theme, examples picker, graph, and
 /// the SheetInspector filling the viewport. `begin` ships with several example
 /// property models (`begin/examples/*.adm2` — see
 /// [`crate::example_source::available_examples`]); [`ExamplesPicker`] switches
@@ -180,11 +238,15 @@ pub fn App() -> Element {
 /// - Complexity: Loads, parses, and propagates the initial example once.
 #[component]
 fn AppWithExample(initial_name: String) -> Element {
+    let boundary = use_context_provider(HostBoundary::new);
     let (model, active_source, displayed_source, initial_error) = use_hook(|| {
         let (sheet, source, error) = load_example(&initial_name);
         let model = sheet.map(|owner| LiveSheet {
             sheet: SheetHandle::from_owner(owner, EventHandler::new(sheet_outcome)),
         });
+        if let Some(live) = model {
+            boundary.installed(source.clone(), live.sheet);
+        }
         (
             Signal::new(model),
             Signal::new(source.clone()),
@@ -258,7 +320,7 @@ fn AppWithExample(initial_name: String) -> Element {
                     };
                     let (sheet_labels, error) = match build_owner(&source, &current.file_name()) {
                         Ok(owner) => (Some(owner), None),
-                        Err(error) => (None, Some(error.render(&Renderer::styled()))),
+                        Err(error) => (None, Some(report_build_error(&error))),
                     };
                     if let Some(message) = error.as_ref()
                         && model.peek().is_none()
@@ -299,6 +361,9 @@ fn AppWithExample(initial_name: String) -> Element {
         ));
     }
 
+    if boundary.is_fatal() {
+        return rsx! { InitialBuildFailure { error: boundary.message().unwrap_or_default() } };
+    }
     let Some(live_sheet) = model.read().as_ref().copied() else {
         let error = initial_error
             .read()
@@ -463,38 +528,38 @@ fn LiveApp(
         document::Link { rel: "stylesheet", href: asset!("/assets/inspector.css") }
         document::Script { src: asset!("/assets/d3.v7.min.js") }
         document::Script { src: asset!("/assets/graph.js") }
-        document::Script { r#type: "module", src: asset!("/assets/swc.js") }
         document::Script { src: asset!("/assets/open_file.js") }
 
-        SpTheme {
-            color: "light".to_string(),
-            scale: "medium".to_string(),
-            system: "spectrum-two".to_string(),
+        Theme {
             div {
                 style: "position: fixed; inset: 0; display: flex; flex-direction: column; overflow: hidden;",
                 div {
                     style: "padding: 8px 12px; border-bottom: 1px solid #ccc; flex: none; display: flex; align-items: center; gap: 16px;",
                     {open_file_controls}
-                    SpSwitch {
+                    label {
+                    style: "display:flex; align-items:center; gap:8px;",
+                    Switch {
+                        aria_label: "Show inactive",
                         checked: *show_inactive.read(),
-                        onclick: move |_| {
-                            let next = !*show_inactive.read();
-                            show_inactive.set(next);
-                        },
-                        "Show inactive"
+                        on_checked_change: move |next| show_inactive.set(next),
                     }
-                    SpActionGroup {
-                        compact: true,
-                        SpActionButton {
+                    "Show inactive"
+                    }
+                    div {
+                        role: "group", aria_label: "Graph zoom", class: "begin-action-group",
+                        Button {
+                            variant: ButtonVariant::Outline,
+                            aria_label: "Zoom out",
                             onclick: move |_| {
                                 let id = graph_id.peek().clone();
                                 spawn(async move {
                                     let _ = document::eval(&format!("window.beginGraph.zoomOut('{id}');")).await;
                                 });
                             },
-                            SpIconZoomOut {}
+                            "−"
                         }
-                        SpActionButton {
+                        Button {
+                            variant: ButtonVariant::Outline,
                             onclick: move |_| {
                                 let id = graph_id.peek().clone();
                                 spawn(async move {
@@ -503,14 +568,16 @@ fn LiveApp(
                             },
                             "Fit"
                         }
-                        SpActionButton {
+                        Button {
+                            variant: ButtonVariant::Outline,
+                            aria_label: "Zoom in",
                             onclick: move |_| {
                                 let id = graph_id.peek().clone();
                                 spawn(async move {
                                     let _ = document::eval(&format!("window.beginGraph.zoomIn('{id}');")).await;
                                 });
                             },
-                            SpIconZoomIn {}
+                            "+"
                         }
                     }
                 }
@@ -546,17 +613,14 @@ fn AcceptedGraph(
     source_id: Memo<String>,
 ) -> Element {
     let data = use_memo(use_reactive((&snapshot,), |(snapshot,)| snapshot));
-    rsx! { GraphView { graph_id, data, source_id } }
+    rsx! { GraphView { graph_id, data, source_id, on_error: graph_outcome } }
 }
 
 /// Renders an initial construction diagnostic without mounting model controls.
 #[component]
 fn InitialBuildFailure(error: String) -> Element {
     rsx! {
-        SpTheme {
-            color: "light".to_string(),
-            scale: "medium".to_string(),
-            system: "spectrum-two".to_string(),
+        Theme {
             pre { class: "adam-live-error", "{error}" }
         }
     }
@@ -581,8 +645,7 @@ fn load_example(name: &str) -> (Option<SheetOwner>, ActiveSource, Option<String>
             match result {
                 Ok(owner) => (Some(owner), active_source, None),
                 Err(error) => {
-                    let message = error.render(&Renderer::styled());
-                    adam_web_ui::diagnostics::report_error(&message);
+                    let message = report_build_error(&error);
                     (None, active_source, Some(message))
                 }
             }
@@ -630,7 +693,7 @@ fn load_opened(path: std::path::PathBuf) -> (Option<SheetOwner>, ActiveSource) {
             let sheet_labels = match build_owner(&source, &file_name) {
                 Ok(owner) => Some(owner),
                 Err(error) => {
-                    eprintln!("{}", error.render(&Renderer::styled()));
+                    report_build_error(&error);
                     None
                 }
             };
@@ -674,16 +737,28 @@ fn OpenFileControls(
     reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>>,
     mut watcher_slot: Signal<Option<notify::RecommendedWatcher>>,
 ) -> Element {
+    let source_owner = use_memo(move || {
+        let _source = active_source.read();
+        FileSourceOwner(std::rc::Rc::new(()))
+    });
+    let mut request_revision = use_signal(|| 0u64);
     rsx! {
-        SpActionGroup {
-            compact: true,
-            SpActionButton {
+        div {
+            class: "begin-action-group",
+            Button {
+                variant: ButtonVariant::Outline,
                 onclick: move |_| {
+                    let revision = request_revision.peek().checked_add(1).expect("file request revision overflow");
+                    request_revision.set(revision);
+                    let owner = source_owner.peek().clone();
                     let reload_tx = reload_tx.read().clone();
                     spawn(async move {
                         let Some(path) = crate::open_file::pick_file().await else {
                             return;
                         };
+                        if !file_reply_is_current(&owner, &source_owner.peek(), revision, *request_revision.peek()) {
+                            return;
+                        }
                         let (new_sheet_labels, new_active) = load_opened(path.clone());
                         install_loaded_source(model, initial_error, active_source, displayed_source, new_sheet_labels, new_active);
                         match crate::open_file::spawn_watch(path, move || {
@@ -728,7 +803,7 @@ fn load_from_payload(
     let sheet_labels = match build_owner(&payload.text, &payload.name) {
         Ok(owner) => Some(owner),
         Err(error) => {
-            adam_web_ui::diagnostics::report_error(&error.render(&Renderer::styled()));
+            report_build_error(&error);
             None
         }
     };
@@ -740,12 +815,10 @@ fn load_from_payload(
     (sheet_labels, active_source)
 }
 
-/// Retains the unique source allocation that owns a pending browser file response.
-#[cfg(not(feature = "desktop"))]
+/// Retains the unique source allocation that owns a pending file-dialog response.
 #[derive(Clone)]
 struct FileSourceOwner(std::rc::Rc<()>);
 
-#[cfg(not(feature = "desktop"))]
 impl PartialEq for FileSourceOwner {
     /// Compares live source identity rather than diagnostic names or source contents.
     fn eq(&self, other: &Self) -> bool {
@@ -754,7 +827,6 @@ impl PartialEq for FileSourceOwner {
 }
 
 /// Accepts only the newest response still owned by the active source.
-#[cfg(not(feature = "desktop"))]
 fn file_reply_is_current(
     captured: &FileSourceOwner,
     current: &FileSourceOwner,
@@ -784,9 +856,10 @@ fn OpenFileControls(
     });
     let mut request_revision = use_signal(|| 0u64);
     rsx! {
-        SpActionGroup {
-            compact: true,
-            SpActionButton {
+        div {
+            class: "begin-action-group",
+            Button {
+                variant: ButtonVariant::Outline,
                 onclick: move |_| {
                     let mut refresh_handle = refresh_handle;
                     let revision = request_revision.peek().checked_add(1).expect("file request revision overflow");
@@ -830,7 +903,8 @@ fn OpenFileControls(
                 "Open…"
             }
             if let Some(id) = *refresh_handle.read() {
-                SpActionButton {
+                Button {
+                    variant: ButtonVariant::Outline,
                     onclick: move |_| {
                         let revision = request_revision.peek().checked_add(1).expect("file request revision overflow");
                         request_revision.set(revision);
@@ -890,28 +964,18 @@ fn ExamplesPicker(
 ) -> Element {
     let is_example_active = matches!(active_source.read().origin, SourceOrigin::Example);
     let current = active_source.read().name.clone();
-    // Empty string never matches a real example name, so when an opened file
-    // (rather than an example) is active, this deliberately leaves every
-    // `SpSideNavItem` unselected instead of matching one by coincidence.
-    let sidenav_value = if is_example_active {
-        current.clone()
-    } else {
-        String::new()
-    };
-
     rsx! {
         div {
             style: "width: 260px; min-width: 260px; height: 100%; overflow-y: auto; padding: 12px; box-sizing: border-box; border-right: 1px solid #ccc;",
-            SpHeading { "Examples" }
-            SpDivider {}
-            SpSideNav {
-                value: sidenav_value,
+            h2 { "Examples" }
+            Separator {}
+            nav {
+                aria_label: "Examples", class: "begin-examples",
                 for name in example_names.read().iter().cloned() {
-                    SpSideNavItem {
+                    Button {
+                        variant: ButtonVariant::Ghost,
                         key: "{name}",
-                        label: name.clone(),
-                        value: name.clone(),
-                        selected: is_example_active && name == current,
+                        "aria-current": if is_example_active && name == current { "page" } else { "false" },
                         onclick: {
                             let name = name.clone();
                             move |_| {
@@ -920,6 +984,7 @@ fn ExamplesPicker(
                                 on_select.call(());
                             }
                         },
+                        "{name}"
                     }
                 }
             }

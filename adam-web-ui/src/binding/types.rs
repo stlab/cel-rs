@@ -61,7 +61,7 @@ pub enum UpdateOrigin {
 /// };
 /// assert!(state.transactions.is_empty());
 /// ```
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct RecoveryState {
     /// Identifies the factory's schema and codec contract.
     pub schema_key: String,

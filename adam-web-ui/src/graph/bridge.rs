@@ -8,14 +8,16 @@
 //! let mut bridge = BridgeState::default();
 //! bridge.start(1)?;
 //! bridge.dispose(1);
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), adam_web_ui::graph::GraphFailure>(())
 //! ```
 
-use anyhow::{Result, ensure};
 use cel_euclid::{Point2D, Rect, Size2D};
 use serde::{Deserialize, Serialize};
 
+use super::GraphFailure;
 use super::{ViewAction, ViewConstraints, ViewInput, ViewOutput};
+/// Preserves thread-confined diagnostics through dispatch.
+type Result<T> = std::result::Result<T, GraphFailure>;
 
 /// A geometry snapshot and source action with a generation-local ordering key.
 ///
@@ -118,10 +120,12 @@ pub enum ViewReply {
 /// let mut bridge = adam_web_ui::graph::BridgeState::default();
 /// bridge.start(1)?;
 /// assert!(bridge.start(1).is_err());
-/// # Ok::<(), anyhow::Error>(())
+/// # Ok::<(), adam_web_ui::graph::GraphFailure>(())
 /// ```
 #[derive(Default)]
 pub struct BridgeState {
+    /// The typed cause of the last failed reply, consumed by the application channel.
+    failure: Option<super::GraphFailure>,
     /// The greatest successfully claimed generation, including disposed generations.
     generation: Option<u32>,
     /// The active generation's model, absent after disposal or failed startup.
@@ -131,6 +135,10 @@ pub struct BridgeState {
 }
 
 impl BridgeState {
+    /// Transfers a failed reply's typed cause to the host without serializing it.
+    pub(crate) fn take_failure(&mut self) -> Option<super::GraphFailure> {
+        self.failure.take()
+    }
     /// Decodes a wire message or returns a JavaScript diagnostic as an error.
     ///
     /// # Errors
@@ -139,9 +147,12 @@ impl BridgeState {
     /// - Complexity: O(n + p) time and space in message size `n` and model work `p`.
     pub(crate) fn receive(&mut self, payload: serde_json::Value) -> Result<Option<ViewReply>> {
         if let Some(message) = payload.as_str() {
-            anyhow::bail!("{message}");
+            return Err(GraphFailure::Transport(message.into()));
         }
-        self.process(serde_json::from_value(payload)?)
+        self.process(
+            serde_json::from_value(payload)
+                .map_err(|error| GraphFailure::Transport(error.to_string()))?,
+        )
     }
 
     /// Dispatches a typed lifecycle message without framework-specific branching.
@@ -155,7 +166,7 @@ impl BridgeState {
     /// ```
     /// use adam_web_ui::graph::{BridgeState, ViewMessage};
     /// assert!(BridgeState::default().process(ViewMessage::Start { generation: 1 })?.is_none());
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), adam_web_ui::graph::GraphFailure>(())
     /// ```
     pub fn process(&mut self, message: ViewMessage) -> Result<Option<ViewReply>> {
         match message {
@@ -182,14 +193,16 @@ impl BridgeState {
     /// ```
     /// let mut bridge = adam_web_ui::graph::BridgeState::default();
     /// bridge.start(1)?;
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), adam_web_ui::graph::GraphFailure>(())
     /// ```
     pub fn start(&mut self, generation: u32) -> Result<()> {
-        ensure!(
-            self.generation.is_none_or(|last| generation > last),
-            "graph generation must increase monotonically"
-        );
+        if !self.generation.is_none_or(|last| generation > last) {
+            return Err(GraphFailure::InvalidInput(
+                "graph generation must increase monotonically".into(),
+            ));
+        }
         self.generation = Some(generation);
+        self.failure = None;
         self.processed = None;
         self.model = None;
         self.model = Some(ViewConstraints::new()?);
@@ -215,7 +228,7 @@ impl BridgeState {
     /// assert!(bridge.handle(ViewRequest { generation: 1, revision: 1, sequence: 1,
     ///     bounds: [0.0, 0.0, 1.0, 1.0], viewport: [100.0, 100.0],
     ///     action: ViewAction::Fit })?.is_none());
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), adam_web_ui::graph::GraphFailure>(())
     /// ```
     pub fn handle(&mut self, request: ViewRequest) -> Result<Option<ViewReply>> {
         if self.generation != Some(request.generation) {
@@ -232,10 +245,9 @@ impl BridgeState {
         self.processed = Some((request.sequence, request.revision));
         let [min_x, min_y, max_x, max_y] = request.bounds;
         let result = (|| {
-            ensure!(
-                request.bounds.iter().all(|v| v.is_finite()) && min_x <= max_x && min_y <= max_y,
-                "invalid graph bounds"
-            );
+            if !(request.bounds.iter().all(|v| v.is_finite()) && min_x <= max_x && min_y <= max_y) {
+                return Err(GraphFailure::InvalidInput("invalid graph bounds".into()));
+            }
             model.update(ViewInput {
                 bounds: Rect::new(
                     Point2D::new(min_x, min_y),
@@ -252,12 +264,16 @@ impl BridgeState {
                 sequence: request.sequence,
                 output,
             },
-            Err(error) => ViewReply::Failed {
-                generation: request.generation,
-                revision: request.revision,
-                sequence: request.sequence,
-                message: error.to_string(),
-            },
+            Err(error) => {
+                let message = error.to_string();
+                self.failure = Some(error);
+                ViewReply::Failed {
+                    generation: request.generation,
+                    revision: request.revision,
+                    sequence: request.sequence,
+                    message,
+                }
+            }
         }))
     }
 
@@ -269,7 +285,7 @@ impl BridgeState {
     /// bridge.start(1)?;
     /// bridge.dispose(1);
     /// assert!(bridge.start(1).is_err());
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), adam_web_ui::graph::GraphFailure>(())
     /// ```
     pub fn dispose(&mut self, generation: u32) {
         if self.generation == Some(generation) {
@@ -282,6 +298,28 @@ impl BridgeState {
 mod tests {
     use super::*;
     use crate::graph::{ViewAction, ViewTransform};
+
+    /// Invalid requests forward a typed cause while preserving the valid candidate.
+    #[test]
+    fn malformed_input_forwards_cause_without_retiring_model() {
+        let mut state = BridgeState::default();
+        state.start(1).unwrap();
+        let mut invalid = request(1, 1);
+        invalid.viewport = [0.0, 100.0];
+        assert!(matches!(
+            state.handle(invalid).unwrap(),
+            Some(ViewReply::Failed { .. })
+        ));
+        assert!(matches!(
+            state.take_failure(),
+            Some(GraphFailure::InvalidInput(_))
+        ));
+        assert!(matches!(
+            state.handle(request(1, 2)).unwrap(),
+            Some(ViewReply::Accepted { .. })
+        ));
+        assert!(state.take_failure().is_none());
+    }
 
     /// Builds a valid absolute proposal with fixed geometry.
     fn request(generation: u32, sequence: u32) -> ViewRequest {

@@ -280,7 +280,6 @@ fn invalid_view_input_is_reported() {
 /// Finite inputs whose evaluation overflows or underflows fail explicitly.
 #[test]
 fn extreme_geometry_is_reported() {
-    let mut model = ViewConstraints::new().unwrap();
     for request in [
         input(rect(f64::MAX * 0.5, 0.0, 0.0, 0.0), ViewAction::Fit),
         ViewInput {
@@ -294,9 +293,14 @@ fn extreme_geometry_is_reported() {
             action: ViewAction::Fit,
         },
     ] {
+        let mut model = ViewConstraints::new().unwrap();
         let err = model
             .update(request)
             .expect_err("unrepresentable output must fail");
         assert!(!err.to_string().is_empty());
+        let retired = model
+            .update(input(rect(0.0, 0.0, 200.0, 100.0), ViewAction::Fit))
+            .expect_err("a mutated failed candidate cannot be reused");
+        assert!(retired.to_string().contains("unavailable"));
     }
 }

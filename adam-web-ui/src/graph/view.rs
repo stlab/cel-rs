@@ -81,37 +81,59 @@ fn graph_channel_script(container_id: &str, data: &GraphData, external_container
 /// Reports a terminal channel failure and requests JS resource disposal.
 ///
 /// - Complexity: O(message.len()) diagnostic reporting work.
-fn channel_failed(eval: document::Eval, mut failure: Signal<Option<String>>, message: String) {
+fn channel_failed(
+    eval: document::Eval,
+    mut failure: Signal<Option<String>>,
+    error: super::GraphFailure,
+    on_error: EventHandler<super::GraphFailure>,
+) {
+    let message = error.to_string();
     crate::diagnostics::report_error(&message);
     failure.set(Some(message.clone()));
     let _ = eval.send(serde_json::json!({ "kind": "fatal", "message": message }));
+    on_error.call(error);
 }
 
 /// Processes typed messages sequentially through the generation's cached model.
 ///
 /// - Complexity: each received frame adds deserialization, layout-constraint evaluation,
 ///   and reply serialization work; total work follows frames received until closure/cancellation.
-async fn receive_views(mut eval: document::Eval, failure: Signal<Option<String>>) {
+async fn receive_views(
+    mut eval: document::Eval,
+    failure: Signal<Option<String>>,
+    on_error: EventHandler<super::GraphFailure>,
+) {
     let mut bridge = BridgeState::default();
     let mut ended = std::pin::pin!(eval.join::<serde_json::Value>());
     loop {
         let result = async {
             let payload =
                 match prefer_message(eval.recv::<serde_json::Value>(), ended.as_mut()).await {
-                    Ok(message) => message?,
+                    Ok(message) => message
+                        .map_err(|error| super::GraphFailure::Transport(error.to_string()))?,
                     Err(completion) => {
-                        completion?;
-                        anyhow::bail!("graph channel ended unexpectedly");
+                        completion
+                            .map_err(|error| super::GraphFailure::Transport(error.to_string()))?;
+                        return Err(super::GraphFailure::Transport(
+                            "graph channel ended unexpectedly".into(),
+                        ));
                     }
                 };
             if let Some(reply) = bridge.receive(payload)? {
-                eval.send(reply)?;
+                if let Some(error) = bridge.take_failure() {
+                    if error.stops_channel() {
+                        return Err(error);
+                    }
+                    on_error.call(error);
+                }
+                eval.send(reply)
+                    .map_err(|error| super::GraphFailure::Transport(error.to_string()))?;
             }
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), super::GraphFailure>(())
         }
         .await;
         if let Err(error) = result {
-            channel_failed(eval, failure, format!("Graph view failed: {error}"));
+            channel_failed(eval, failure, error, on_error);
             return;
         }
     }
@@ -182,6 +204,10 @@ pub fn graph_drive_script(container_id: &str, data: &GraphData, call: GraphDrive
 /// reported through the platform diagnostics channel and a visible alert;
 /// no JavaScript view policy substitutes for a failed model.
 ///
+/// Calls `on_error` with the original typed failure. A runtime failure stops the
+/// channel before transport can mask its cause; the application owns shutdown policy.
+/// Invalid requests leave the channel available for another request.
+///
 /// With `external_container`, the host supplies an existing container outside
 /// this Dioxus root (as mdBook does). This component renders only its lifecycle
 /// anchor and fallback diagnostic, never a second element with the same id.
@@ -199,7 +225,7 @@ pub fn graph_drive_script(container_id: &str, data: &GraphData, call: GraphDrive
 ///
 /// fn graph(id: ReadSignal<String>, data: ReadSignal<GraphData>,
 ///          source: ReadSignal<String>) -> Element {
-///     rsx! { GraphView { graph_id: id, data, source_id: source } }
+///     rsx! { GraphView { graph_id: id, data, source_id: source, on_error: |_| {} } }
 /// }
 /// ```
 #[component]
@@ -207,6 +233,7 @@ pub fn GraphView(
     graph_id: ReadSignal<String>,
     data: ReadSignal<GraphData>,
     source_id: ReadSignal<String>,
+    on_error: EventHandler<super::GraphFailure>,
     #[props(default = false)] external_container: bool,
 ) -> Element {
     let container_id = graph_id.read().clone();
@@ -232,7 +259,7 @@ pub fn GraphView(
         }
         failure.set(None);
         let eval = document::eval(&graph_channel_script(&id, &data.peek(), external_container));
-        let task = spawn(receive_views(eval, failure));
+        let task = spawn(receive_views(eval, failure, on_error));
         *session.borrow_mut() = Some(ChannelSession {
             identity: Rc::new(()),
             eval,
@@ -259,10 +286,16 @@ pub fn GraphView(
                 }
                 let message = format!("Graph update failed: {error}");
                 if let Some(session) = current.as_ref() {
-                    channel_failed(session.eval, failure, message);
+                    channel_failed(
+                        session.eval,
+                        failure,
+                        super::GraphFailure::Transport(message),
+                        on_error,
+                    );
                 } else {
                     crate::diagnostics::report_error(&message);
-                    failure.set(Some(message));
+                    failure.set(Some(message.clone()));
+                    on_error.call(super::GraphFailure::Transport(message));
                 }
             }
         });
@@ -292,7 +325,7 @@ mod tests {
             let id = use_signal(|| "book-graph".to_string());
             let data = use_signal(empty_graph_data);
             let source = use_signal(|| "book-source".to_string());
-            rsx! { GraphView { graph_id: id, data, source_id: source, external_container: true } }
+            rsx! { GraphView { graph_id: id, data, source_id: source, external_container: true, on_error: |_| {} } }
         }
         let mut dom = VirtualDom::new(external_host);
         let mutations = dom.rebuild_to_vec();

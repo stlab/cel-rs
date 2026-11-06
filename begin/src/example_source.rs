@@ -31,7 +31,7 @@ include!(concat!(env!("OUT_DIR"), "/example_manifest.rs"));
 
 /// Identifies where an [`ActiveSource`]'s content came from: a bundled example
 /// discovered under `examples/`, or a file the user opened via the "Open…" action.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, serde::Serialize)]
 ///
 /// # Examples
 ///
@@ -49,12 +49,33 @@ pub enum SourceOrigin {
     /// same `Path`, breaking reload/re-read for non-UTF-8 paths. Web: the
     /// picked file's name only — browsers never expose a real filesystem
     /// path, and a browser-supplied name is always valid UTF-8 anyway.
-    Opened(std::ffi::OsString),
+    Opened(#[serde(serialize_with = "serialize_opened_path")] std::ffi::OsString),
+}
+
+/// Serializes a native lossless path or the browser's UTF-8-only file name.
+///
+/// # Errors
+/// Returns the serializer's error or a browser path that is not UTF-8.
+///
+/// - Complexity: O(path bytes).
+fn serialize_opened_path<S: serde::Serializer>(
+    path: &std::ffi::OsString,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::Serialize;
+    #[cfg(target_arch = "wasm32")]
+    {
+        path.to_str()
+            .ok_or_else(|| serde::ser::Error::custom("browser file name is not UTF-8"))?
+            .serialize(serializer)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    path.serialize(serializer)
 }
 
 /// The currently active source: its display name, full text, and where it
 /// came from (a bundled example or a user-opened file) — see [`SourceOrigin`].
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize)]
 ///
 /// # Examples
 ///

@@ -14,16 +14,19 @@
 //!     action: ViewAction::Fit,
 //! })?;
 //! assert_eq!((output.view.x, output.view.y, output.view.k), (0.0, 50.0, 2.0));
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), adam_web_ui::graph::GraphFailure>(())
 //! ```
 
 use adam_lang::{AdamParser, ParsedSheet, SheetDiagnostics};
 use adam_rs::CellId;
-use anyhow::{Result, anyhow, ensure};
+use anyhow::ensure;
 use cel_euclid::{Rect, Size2D, Transform2D, Vector2D};
 use serde::{Deserialize, Serialize};
 
-use crate::{build, labels::Renderer, labels::format_adam_error};
+use super::GraphFailure;
+use crate::{RuntimeFailure, build, labels::Renderer};
+/// Keeps thread-confined diagnostic owners in their original typed error.
+type Result<T> = std::result::Result<T, GraphFailure>;
 
 /// The embedded policy evaluated by every model instance.
 const SOURCE: &str = include_str!("view_constraints.adm2");
@@ -145,8 +148,8 @@ struct Cells {
 /// Owns one parsed sheet and cached identities without per-request parsing.
 ///
 /// All fit, centering, clamping, and zoom-limit arithmetic lives in the sheet.
-/// Errors leave the model available for subsequent updates, but do not promise
-/// rollback of writes already propagated.
+/// Invalid input leaves the model available. Any error after mutation discards
+/// its candidate permanently; subsequent updates report unavailable.
 ///
 /// # Examples
 /// ```
@@ -154,13 +157,61 @@ struct Cells {
 /// assert!(model.is_ok());
 /// ```
 pub struct ViewConstraints {
+    /// The sole candidate, absent after a mutating error.
+    candidate: Option<ViewCandidate>,
+}
+
+impl ViewConstraints {
+    /// Constructs the embedded policy once.
+    ///
+    /// # Errors
+    /// Returns construction, initialization, or output diagnostics.
+    ///
+    /// - Complexity: O(s² + n + p) time and O(s + n + p) space for installed
+    ///   signatures `s`, source bytes `n`, and propagation work `p`.
+    ///
+    /// # Examples
+    /// ```
+    /// let model = adam_web_ui::graph::ViewConstraints::new()?;
+    /// # Ok::<(), adam_web_ui::graph::GraphFailure>(())
+    /// ```
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            candidate: Some(ViewCandidate::new()?),
+        })
+    }
+
+    /// Applies valid input only to an available candidate and retires it on error.
+    ///
+    /// # Errors
+    /// Returns invalid input before mutation, typed runtime errors, invalid outputs,
+    /// or unavailable after any previous mutating failure.
+    ///
+    /// - Complexity: O(p) time and space in propagation work; no parsing.
+    ///
+    /// # Examples
+    /// See the module example for a fit request.
+    pub fn update(&mut self, input: ViewInput) -> Result<ViewOutput> {
+        if self.candidate.is_none() {
+            return Err(GraphFailure::Unavailable);
+        }
+        validate_input(&input).map_err(|error| GraphFailure::InvalidInput(error.to_string()))?;
+        let mut candidate = self.candidate.take().expect("availability checked");
+        let output = candidate.update(input)?;
+        self.candidate = Some(candidate);
+        Ok(output)
+    }
+}
+
+/// Contains the live model only while its owner admits mutation.
+struct ViewCandidate {
     /// The persistent source and derived values.
     parsed: ParsedSheet,
     /// The identities resolved once during construction.
     cells: Cells,
 }
 
-impl ViewConstraints {
+impl ViewCandidate {
     /// Parses and propagates the embedded sheet using the configured library host.
     ///
     /// # Errors
@@ -173,19 +224,26 @@ impl ViewConstraints {
     /// # Examples
     /// ```
     /// let mut model = adam_web_ui::graph::ViewConstraints::new()?;
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), adam_web_ui::graph::GraphFailure>(())
     /// ```
     pub fn new() -> Result<Self> {
         let mut parser = AdamParser::new(build::type_registry(), build::op_lookup());
         let parsed = parser.parse_str(SOURCE).map_err(|error| {
-            anyhow!(error.format_rustc_style(SOURCE, FILE_NAME, 1, &Renderer::plain()))
+            GraphFailure::InvalidInput(error.format_rustc_style(
+                SOURCE,
+                FILE_NAME,
+                1,
+                &Renderer::plain(),
+            ))
         })?;
         let id = |name: &str| {
             parsed
                 .cell_names
                 .get(name)
                 .map(|&(id, _)| id)
-                .ok_or_else(|| anyhow!("{FILE_NAME}: missing cell `{name}`"))
+                .ok_or_else(|| {
+                    GraphFailure::InvalidInput(format!("{FILE_NAME}: missing cell `{name}`"))
+                })
         };
         let cells = Cells {
             bounds: id("bounds")?,
@@ -228,10 +286,9 @@ impl ViewConstraints {
     ///     action: ViewAction::Fit,
     /// })?;
     /// assert_eq!(output.view.k, 300.0);
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), adam_web_ui::graph::GraphFailure>(())
     /// ```
     pub fn update(&mut self, input: ViewInput) -> Result<ViewOutput> {
-        validate_input(&input)?;
         self.write(self.cells.bounds, input.bounds)?;
         self.write(self.cells.viewport, input.viewport)?;
         if let ViewAction::Propose { view } = input.action {
@@ -251,25 +308,23 @@ impl ViewConstraints {
         Ok(output)
     }
 
-    /// Formats a sheet error against the embedded source.
+    /// Retains a mutating sheet error with independently owned diagnostics.
     ///
-    /// - Complexity: O(n + e) in source length and error sites.
-    fn diagnostic(diagnostics: &SheetDiagnostics, error: adam_rs::Error) -> anyhow::Error {
-        anyhow!(format_adam_error(
-            &error,
-            diagnostics,
-            SOURCE,
-            FILE_NAME,
-            &Renderer::plain(),
-        ))
+    /// - Complexity: O(file name bytes); moves the existing diagnostic snapshot.
+    fn diagnostic(diagnostics: SheetDiagnostics, error: adam_rs::Error) -> GraphFailure {
+        GraphFailure::Runtime(Box::new(RuntimeFailure {
+            error,
+            diagnostics: Box::new(diagnostics),
+            file_name: FILE_NAME.into(),
+        }))
     }
 
-    /// Writes a typed source, returning a formatted sheet error on failure.
+    /// Writes a typed source, retaining its typed mutation error on failure.
     fn write<T: 'static>(&mut self, id: CellId, value: T) -> Result<()> {
         let diagnostics = self.parsed.diagnostics();
         self.parsed
             .write(id, value)
-            .map_err(|error| Self::diagnostic(&diagnostics, error))
+            .map_err(|error| Self::diagnostic(diagnostics, error))
     }
 
     /// Reads a complete typed value, snapshotting diagnostics only when it fails.
@@ -281,7 +336,9 @@ impl ViewConstraints {
             Ok(value) => Ok(value),
             Err(error) => {
                 let diagnostics = self.parsed.diagnostics();
-                Err(Self::diagnostic(&diagnostics, error))
+                Err(GraphFailure::InvalidInput(
+                    Self::diagnostic(diagnostics, error).to_string(),
+                ))
             }
         }
     }
@@ -289,14 +346,14 @@ impl ViewConstraints {
     /// Propagates the cached sheet and clears its presentation change flags.
     ///
     /// # Errors
-    /// Returns the formatted evaluation diagnostic on failure.
+    /// Returns the typed evaluation error with its pre-mutation diagnostic snapshot.
     ///
     /// - Complexity: O(p) time and space in sheet propagation work.
     fn propagate(&mut self) -> Result<()> {
         let diagnostics = self.parsed.diagnostics();
         self.parsed
             .propagate()
-            .map_err(|error| Self::diagnostic(&diagnostics, error))?;
+            .map_err(|error| Self::diagnostic(diagnostics, error))?;
         self.parsed.clear_changed();
         Ok(())
     }
@@ -311,19 +368,21 @@ impl ViewConstraints {
         let fit_zoom: f64 = self.read(self.cells.fit_zoom)?;
         let min_zoom: f64 = self.read(self.cells.min_zoom)?;
         let max_zoom: f64 = self.read(self.cells.max_zoom)?;
-        ensure!(
-            [
-                view.m11, view.m12, view.m21, view.m22, view.m31, view.m32, fit_pan.x, fit_pan.y,
-                fit_zoom, min_zoom, max_zoom,
-            ]
-            .into_iter()
-            .all(f64::is_finite)
-                && fit_zoom > 0.0
-                && min_zoom > 0.0
-                && min_zoom <= view.m11
-                && view.m11 <= max_zoom,
-            "{FILE_NAME}: invalid or unrepresentable view/fit outputs"
-        );
+        if !([
+            view.m11, view.m12, view.m21, view.m22, view.m31, view.m32, fit_pan.x, fit_pan.y,
+            fit_zoom, min_zoom, max_zoom,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+            && fit_zoom > 0.0
+            && min_zoom > 0.0
+            && min_zoom <= view.m11
+            && view.m11 <= max_zoom)
+        {
+            return Err(GraphFailure::InvalidInput(format!(
+                "{FILE_NAME}: invalid or unrepresentable view/fit outputs"
+            )));
+        }
         Ok(ViewOutput {
             view: ViewTransform {
                 x: view.m31,
@@ -347,7 +406,7 @@ impl ViewConstraints {
 ///
 /// # Errors
 /// Returns a named input error for invalid bounds, viewport, or proposal.
-fn validate_input(input: &ViewInput) -> Result<()> {
+fn validate_input(input: &ViewInput) -> anyhow::Result<()> {
     let bounds = input.bounds;
     for (origin, extent, end) in [
         (bounds.origin.x, bounds.size.width, bounds.max_x()),
@@ -364,6 +423,7 @@ fn validate_input(input: &ViewInput) -> Result<()> {
             "invalid bounds: expected finite ordered endpoints and representable nonnegative extents"
         );
     }
+
     ensure!(
         input.viewport.width.is_finite()
             && input.viewport.height.is_finite()
@@ -382,4 +442,46 @@ fn validate_input(input: &ViewInput) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mutating error discards its candidate; later work never invokes that sheet.
+    #[test]
+    fn runtime_failure_retires_without_invoking_sheet_again() {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = calls.clone();
+        let mut model = ViewConstraints::new().unwrap();
+        let candidate = model.candidate.as_mut().unwrap();
+        let output = candidate.parsed.add_cell(0.0_f64);
+        candidate
+            .parsed
+            .add_relationship(vec![adam_rs::Method::from_fn_1_1(
+                candidate.cells.bounds,
+                output,
+                move |_bounds: &Rect| {
+                    observed.set(observed.get() + 1);
+                    Err::<f64, _>(anyhow::anyhow!("graph fixture propagation failure"))
+                },
+            )])
+            .unwrap();
+        let input = ViewInput {
+            bounds: Rect::default(),
+            viewport: Size2D::new(400.0, 300.0),
+            action: ViewAction::Fit,
+        };
+        let error = model.update(input).unwrap_err();
+        let GraphFailure::Runtime(failure) = error else {
+            panic!("typed runtime failure required");
+        };
+        assert_eq!(failure.file_name, FILE_NAME);
+        assert_eq!(calls.get(), 1);
+        assert!(matches!(
+            model.update(input),
+            Err(GraphFailure::Unavailable)
+        ));
+        assert_eq!(calls.get(), 1);
+    }
 }

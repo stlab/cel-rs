@@ -6,7 +6,7 @@ description = "Cross-platform property model development environment"
 
 [features]
 default = ["desktop"]
-desktop = ["dioxus/desktop", "dep:rfd", "dep:notify", "adam-web-ui/desktop"]
+desktop = ["dioxus/desktop", "dep:rfd", "dep:notify", "dep:tempfile", "dep:directories", "adam-web-ui/desktop"]
 web = ["dioxus/web"]
 playground = []
 
@@ -26,6 +26,8 @@ cel-std = { path = "../cel-std" }
 adam-lang = { path = "../adam-lang" }
 rfd = { version = "0.17.2", optional = true }
 notify = { version = "8.2.1", optional = true }
+tempfile = { version = "3", optional = true }
+directories = { version = "6", optional = true }
 
 [dev-dependencies]
 dioxus-ssr = "0.7"

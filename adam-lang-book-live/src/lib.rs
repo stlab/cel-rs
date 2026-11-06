@@ -193,7 +193,11 @@ fn AcceptedGraph(
     source_id: Memo<String>,
 ) -> Element {
     let data = use_memo(use_reactive((&snapshot,), |(snapshot,)| snapshot));
-    rsx! { GraphView { graph_id, data, source_id, external_container: true } }
+    rsx! { GraphView { graph_id, data, source_id, external_container: true,
+        on_error: move |error: adam_web_ui::graph::GraphFailure| {
+            adam_web_ui::diagnostics::report_error(&error.to_string());
+        }
+    } }
 }
 
 /// Mounts a live [`SheetInspector`] for `source` into the DOM element with id `element_id`,
