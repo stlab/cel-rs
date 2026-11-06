@@ -111,7 +111,7 @@ impl Evaluator for SourceReply {
 
 /// Runs real locale scripts in Node and models the renderer-owned persistent JSON channel.
 #[derive(Default)]
-struct NodeDocument {
+pub(crate) struct NodeDocument {
     owner: generational_box::Owner,
     gate: Option<Rc<RefCell<Gate>>>,
 }
@@ -444,7 +444,7 @@ fn composition(dom: &mut VirtualDom, id: ElementId, name: &str) {
 }
 
 /// Dispatches the native Arrow Up key to the editor.
-fn arrow_up(dom: &mut VirtualDom, id: ElementId) {
+pub(crate) fn arrow_up(dom: &mut VirtualDom, id: ElementId) {
     if SOURCES.with(|sources| sources.borrow().contains_key(&id.0)) {
         frame(dom, id, "up", "");
         return;
@@ -901,7 +901,7 @@ async fn forced_state_discards_local_error_but_preserves_model_validation() {
 }
 
 /// Drains immediately-ready locale tasks and reactive renders without waiting on timers.
-async fn settle(dom: &mut VirtualDom) {
+pub(crate) async fn settle(dom: &mut VirtualDom) {
     for _ in 0..8 {
         let _ =
             tokio::time::timeout(std::time::Duration::from_millis(5), dom.wait_for_work()).await;
@@ -910,7 +910,7 @@ async fn settle(dom: &mut VirtualDom) {
 }
 
 /// Delivers a synchronously captured native value rather than a later DOM read.
-fn input(dom: &mut VirtualDom, id: ElementId, value: &str) {
+pub(crate) fn input(dom: &mut VirtualDom, id: ElementId, value: &str) {
     if !SOURCES.with(|sources| sources.borrow().contains_key(&id.0)) {
         return;
     }

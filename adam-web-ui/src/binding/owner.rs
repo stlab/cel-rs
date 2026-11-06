@@ -552,6 +552,8 @@ fn publish(
                     && view.is_source == is_source
                     && view.flags == flags
                     && view.number_kind == meta.number_kind
+                    && view.is_bool == meta.is_bool
+                    && view.codec_supported == meta.codec_supported
                     && view.range == range
                     && view.issues == issues
             }) {
@@ -563,6 +565,8 @@ fn publish(
                 is_source,
                 flags,
                 number_kind: meta.number_kind,
+                is_bool: meta.is_bool,
+                codec_supported: meta.codec_supported,
                 range,
                 issues,
             }))

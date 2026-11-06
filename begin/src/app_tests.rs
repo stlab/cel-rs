@@ -104,12 +104,11 @@ fn file_replies_require_current_source_and_request() {
 fn host(picker: bool) -> Element {
     let (model, initial_error, active_source, displayed_source) = use_hook(|| {
         let (sheet, mut source, _) = load_example("diamond");
-        let (parsed, labels) = sheet.expect("diamond builds successfully");
+        let owner = sheet.expect("diamond builds successfully");
         source.origin = SourceOrigin::Opened("diamond".into());
         (
             Signal::new(Some(LiveSheet {
-                parsed: Signal::new(parsed),
-                labels: Signal::new(labels),
+                sheet: SheetHandle::from_owner(owner, EventHandler::new(sheet_outcome)),
             })),
             Signal::new(None),
             Signal::new(source.clone()),
@@ -280,14 +279,14 @@ fn recovery_host() -> Element {
                     .expect("the app publishes state before the click")
                     .clone();
                 let source = "sheet recovered { cell x: i64 = 10i64; }";
-                let built = build_sheet(source, "recovered.adm2")
+                let owner = build_owner(source, "recovered.adm2")
                     .expect("replacement source builds");
                 install_loaded_source(
                     model,
                     error,
                     active,
                     displayed,
-                    Some((built.parsed, built.labels)),
+                    Some(owner),
                     ActiveSource {
                         name: "cycle".to_string(),
                         text: source.to_string(),

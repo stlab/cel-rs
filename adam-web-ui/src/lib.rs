@@ -1,8 +1,8 @@
 //! Reusable Dioxus controls and UI for browsing and editing a live `adam_rs::Sheet`.
 //!
 //! [`components`] supplies model-independent official Dioxus controls and numeric
-//! editors. Wrap each root in [`components::Theme`]. Existing Inspector consumers
-//! still use Spectrum until their migration.
+//! editors. Wrap each root in [`components::Theme`]. [`binding::use_sheet`] owns
+//! one reactive model and supplies bindings to controls and [`SheetInspector`].
 //!
 //! Components render as DOM in a browser or embedded webview. The library does
 //! not select a Dioxus renderer: use it from a desktop app (`begin`), a `dioxus/web`

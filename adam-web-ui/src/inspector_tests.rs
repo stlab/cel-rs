@@ -1,146 +1,385 @@
-//! Exercises Inspector controls, flags, and source ownership through real Dioxus components.
+//! Exercises bound controls and host boundaries with actual Dioxus event dispatch.
+use crate::{SheetInspector, binding::*, components::Theme};
+use dioxus::{
+    core::{ElementId, Mutation},
+    prelude::*,
+};
+use std::{cell::RefCell, rc::Rc};
 
-use super::*;
-use dioxus::core::Mutation;
-use std::cell::RefCell;
+/// Retains consumer-visible outcomes and the scope-owned handle.
+#[derive(Default)]
+struct Observed {
+    sheet: Option<SheetHandle>,
+    outcomes: Vec<HostOutcome>,
+    restored: bool,
+}
 
-/// Exposes the current component-owned sheet and metadata for real event observations.
-type Observer = Rc<RefCell<Option<(Signal<ParsedSheet>, Signal<Labels>)>>>;
+/// Builds a multi-way model with text, Boolean and exact numeric controls.
+fn factory() -> ModelFactory {
+    Rc::new(|| {
+        let mut built = crate::build_sheet(
+            r#"sheet controls {
+                cell text: String = "001";
+                cell flag: bool = true;
+                cell a: i32 = 1;
+                cell b: i32 = 1;
+                cell ranged: i64 = 9007199254740993i64
+                    filter 9007199254740992i64..=9007199254740994i64;
+                cell unused: i32 = 2;
+                out result := (text, flag, a, b, ranged) require { @keep flag; };
+            }"#,
+            "same.adm2",
+        )?;
+        built
+            .parsed
+            .add_relationship(vec![
+                adam_rs::Method::from_fn_1_1(built.keys["a"], built.keys["b"], |a: &i32| Ok(*a)),
+                adam_rs::Method::from_fn_1_1(built.keys["b"], built.keys["a"], |b: &i32| Ok(*b)),
+            ])
+            .unwrap();
+        built.parsed.propagate().unwrap();
+        Ok(built)
+    })
+}
 
-/// Builds controls of every supported kind with a named failing output requirement.
+/// Mounts real bound widgets plus named application actions.
 fn host() -> Element {
-    let source = r#"sheet controls {
-        cell text: String = "001";
-        cell flag: bool = true;
-        cell count: i32 = 10;
-        cell ranged: i32 = 20 filter 0..=100;
-        cell inactive: i32 = 1;
-        out result := (text, flag, count, ranged) require { @limit count < 15; };
-    }"#;
-    let (parsed, labels) = use_hook(|| {
-        let built = crate::build_sheet(source, "same.adm2").expect("valid control fixture");
-        (Signal::new(built.parsed), Signal::new(built.labels))
-    });
-    let observed: Observer = consume_context();
-    *observed.borrow_mut() = Some((parsed, labels));
-    let source_text = use_memo(move || source.to_string());
-    let source_name = use_memo(|| "same.adm2".to_string());
-    rsx! { SheetInspector { parsed, labels, source_text, source_name } }
+    let observed: Rc<RefCell<Observed>> = consume_context();
+    let callbacks = observed.clone();
+    let sheet = use_sheet(
+        factory(),
+        "controls/v1".into(),
+        EventHandler::new(move |event: SheetEvent| {
+            if matches!(
+                event.outcome,
+                HostOutcome::Rejected(HostRejection::Validation(_))
+            ) {
+                event.sheet.restore_accepted().unwrap();
+                callbacks.borrow_mut().restored = true;
+            }
+            callbacks.borrow_mut().outcomes.push(event.outcome);
+        }),
+    )
+    .unwrap();
+    observed.borrow_mut().sheet = Some(sheet);
+    let a = sheet.cell("a");
+    let b = sheet.cell("b");
+    rsx! { Theme {
+        EditText { bind: sheet.cell("text"), label: "first" }
+        EditText { bind: sheet.cell("text"), label: "second" }
+        CheckBox { bind: sheet.cell("flag"), label: "Flag" }
+        EditNumber { bind: sheet.cell("a"), label: "A" }
+        EditSlider { bind: sheet.cell("ranged"), label: "Ranged" }
+        button { id: "edit-a".to_string(), onclick: move |_| a.submit("7".into()), "Edit A" }
+        button { id: "edit-b".to_string(), onclick: move |_| b.submit("9".into()), "Edit B" }
+        SheetInspector { sheet }
+    } }
 }
 
-/// Wide signed/unsigned cells use exact text controls even when ranged or readonly.
-#[test]
-fn wide_integer_controls_preserve_the_complete_type_domain() {
-    /// Builds one real Inspector over the requested primitive domain.
-    ///
-    /// - Complexity: source construction/build/propagation plus Inspector rendering.
-    fn wide_host((ty, initial): (String, String)) -> Element {
-        let source = format!(
-            "sheet wide {{
-            source value: {ty} = {initial};
-            cell bounded: {ty} = 9007199254740993{ty}
-                filter 9007199254740992{ty}..=9007199254740994{ty};
-            out echoed := value + (bounded - bounded);
-        }}"
-        );
-        let (parsed, labels) = use_hook(|| {
-            let built = crate::build_sheet(&source, "wide.adm2").unwrap();
-            (Signal::new(built.parsed), Signal::new(built.labels))
-        });
-        let source_text = use_memo(move || source.clone());
-        let source_name = use_memo(|| "wide.adm2".to_string());
-        rsx! { SheetInspector { parsed, labels, source_text, source_name } }
-    }
-    for (ty, initial, expected) in [
-        ("i64", "9007199254740993i64", "9007199254740993"),
-        ("u64", "9007199254740993u64", "9007199254740993"),
-        ("i128", "9007199254740993i128", "9007199254740993"),
-        ("u128", "9007199254740993u128", "9007199254740993"),
-        ("i64", "-9007199254740993i64", "-9007199254740993"),
-        (
-            "i64",
-            "-9223372036854775807i64 - 1i64",
-            "-9223372036854775808",
-        ),
-        ("u64", "18446744073709551615u64", "18446744073709551615"),
-        ("u64", "0u64", "0"),
-    ] {
-        let mut dom = VirtualDom::new_with_props(wide_host, (ty.to_string(), initial.to_string()));
-        dom.rebuild_in_place();
-        let html = dioxus_ssr::render(&dom);
-        assert_eq!(html.matches("<sp-number-field").count(), 0, "{ty}: {html}");
-        assert_eq!(html.matches("<sp-slider").count(), 0, "{ty}: {html}");
-        assert_eq!(html.matches("<sp-textfield").count(), 3, "{ty}: {html}");
-        assert_eq!(
-            html.matches(&format!(r#"value="{expected}""#)).count(),
-            if expected == "9007199254740993" { 3 } else { 2 }
-        );
-        assert_eq!(html.matches(r#"readonly="true""#).count(), 1);
-        assert!(!html.contains(r#"disabled="true""#));
-    }
-}
-
-/// Extracts actual rendered control IDs without assuming how the namespace is encoded.
-///
-/// - Complexity: O(rendered HTML bytes) time and space.
-fn ids(html: &str) -> HashSet<String> {
-    html.split(" id=\"")
-        .skip(1)
-        .map(|part| part.split('"').next().unwrap().to_string())
-        .collect()
-}
-
-/// Rows choose Boolean, text, integer, and ranged controls, preserve flags, and retire replaced owners.
-#[test]
-fn rendered_controls_flags_writes_and_source_replacement() {
-    let observed: Observer = Rc::new(RefCell::new(None));
+/// Mounts the fixture and returns its real mutation stream.
+fn mounted() -> (VirtualDom, Rc<RefCell<Observed>>, dioxus::core::Mutations) {
+    let observed = Rc::new(RefCell::new(Observed::default()));
     let mut dom = VirtualDom::new(host);
     dom.provide_root_context(observed.clone());
-    let mutations = dom.rebuild_to_vec();
-    let html = dioxus_ssr::render(&dom);
-    assert_eq!(html.matches("<sp-checkbox").count(), 1);
-    assert_eq!(html.matches("<sp-number-field").count(), 2);
-    assert_eq!(html.matches("<sp-slider").count(), 1);
-    assert_eq!(html.matches("<sp-textfield").count(), 2);
-    assert!(html.contains("value=\"001\"") && html.contains("value=\"10\""));
-    assert!(html.contains("disabled=\"true\""));
-    assert!(html.contains("readonly=\"true\""));
-    let click = mutations
+    let edits = dom.rebuild_to_vec();
+    (dom, observed, edits)
+}
+
+/// Dispatches a native serialized event to an actual mounted listener.
+fn dispatch(dom: &mut VirtualDom, name: &str, id: ElementId, value: &str) {
+    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+    let payload: Box<dyn std::any::Any> = match name {
+        "input" => Box::new(dioxus_html::SerializedFormData::new(value.into(), vec![])),
+        _ => Box::<dioxus_html::SerializedMouseData>::default(),
+    };
+    dom.runtime().handle_event(
+        name,
+        Event::new(Rc::new(dioxus_html::PlatformEventData::new(payload)), true).into_any(),
+        id,
+    );
+    dom.render_immediate_to_vec();
+}
+
+/// Locates a rendered application's explicit action by its emitted ID attribute.
+fn named(edits: &dioxus::core::Mutations, wanted: &str) -> ElementId {
+    edits
         .edits
-        .into_iter()
+        .iter()
         .find_map(|mutation| match mutation {
-            Mutation::NewEventListener { name, id } if name == "click" => Some(id),
+            Mutation::SetAttribute {
+                name: "id",
+                value: dioxus::core::AttributeValue::Text(value),
+                id,
+                ..
+            } if value == wanted => Some(*id),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// Editing one bound text control refreshes another without writing on synchronization.
+#[test]
+fn binding_edit_updates_other_widget() {
+    let (mut dom, observed, edits) = mounted();
+    let input = edits
+        .edits
+        .iter()
+        .find_map(|mutation| match mutation {
+            Mutation::NewEventListener { name, id } if name == "input" => Some(*id),
             _ => None,
         })
         .unwrap();
-    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-    dom.runtime().handle_event(
-        "click",
-        Event::new(
-            Rc::new(dioxus_html::PlatformEventData::new(Box::new(
-                dioxus_html::SerializedMouseData::default(),
-            ))),
-            true,
+    dispatch(&mut dom, "input", input, "changed");
+    let sheet = observed.borrow().sheet.unwrap();
+    assert_eq!(sheet.cell("text").view().unwrap().text, "changed");
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.matches("value=\"changed\"").count() >= 2, "{html}");
+    assert_eq!(
+        sheet.with_accepted_state(|s| s.transactions.len()).unwrap(),
+        1
+    );
+}
+
+/// Derived cells remain writable and reverse the relationship's source direction.
+#[test]
+fn derived_cell_write_changes_direction() {
+    let (mut dom, observed, edits) = mounted();
+    dispatch(&mut dom, "click", named(&edits, "edit-a"), "");
+    let sheet = observed.borrow().sheet.unwrap();
+    assert_eq!(sheet.cell("b").view().unwrap().text, "7");
+    assert!(!sheet.cell("b").view().unwrap().is_source);
+    assert!(!sheet.cell("b").view().unwrap().flags.disabled);
+    assert!(!sheet.cell("b").view().unwrap().flags.readonly);
+    assert!(sheet.cell("unused").view().unwrap().flags.disabled);
+    assert!(!sheet.cell("unused").view().unwrap().flags.relevant);
+    assert!(sheet.cell("result").view().unwrap().flags.readonly);
+    dispatch(&mut dom, "click", named(&edits, "edit-b"), "");
+    assert_eq!(sheet.cell("a").view().unwrap().text, "9");
+    assert!(sheet.cell("b").view().unwrap().is_source);
+}
+
+/// Unknown and incompatible bindings stay visible as structured configuration errors.
+#[test]
+fn unknown_or_incompatible_binding_reports_error() {
+    /// Renders invalid configuration without panicking or silently omitting controls.
+    fn invalid() -> Element {
+        let observed: Rc<RefCell<Observed>> = consume_context();
+        let sheet = use_sheet(
+            factory(),
+            "controls/v1".into(),
+            EventHandler::new(move |e: SheetEvent| observed.borrow_mut().outcomes.push(e.outcome)),
         )
-        .into_any(),
-        click,
-    );
-    let (mut parsed, mut labels) = observed.borrow().unwrap();
-    assert!(
-        !*parsed
-            .peek()
-            .read::<bool>(parsed.peek().cell_names["flag"].0)
+        .unwrap();
+        rsx! {
+            EditText { bind: sheet.cell("missing") }
+            CheckBox { bind: sheet.cell("text") }
+            EditNumber { bind: sheet.cell("flag") }
+            EditSlider { bind: sheet.cell("text") }
+        }
+    }
+    let observed = Rc::new(RefCell::new(Observed::default()));
+    let mut dom = VirtualDom::new(invalid);
+    dom.provide_root_context(observed.clone());
+    dom.rebuild_in_place();
+    dom.render_immediate_to_vec();
+    let html = dioxus_ssr::render(&dom);
+    assert_eq!(html.matches("role=\"alert\"").count(), 4, "{html}");
+    assert_eq!(observed.borrow().outcomes.len(), 4);
+    assert!(matches!(
+        observed.borrow().outcomes[0],
+        HostOutcome::Rejected(HostRejection::Binding(_))
+    ));
+}
+
+/// Old event handlers cannot write into a same-key replacement.
+#[test]
+fn retired_binding_cannot_write_replacement() {
+    let (mut dom, observed, edits) = mounted();
+    let sheet = observed.borrow().sheet.unwrap();
+    sheet.replace(factory(), "controls/v1".into()).unwrap();
+    dispatch(&mut dom, "click", named(&edits, "edit-a"), "");
+    assert_eq!(sheet.cell("a").view().unwrap().text, "1");
+    assert!(matches!(
+        observed.borrow().outcomes.last().unwrap(),
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::RetiredInstance))
+    ));
+}
+
+/// Rejected Boolean edits restore through a callback after the owner borrow ends.
+#[test]
+fn host_callback_runs_after_model_borrow_is_released() {
+    let (mut dom, observed, edits) = mounted();
+    let checkbox = edits
+        .edits
+        .iter()
+        .find_map(|mutation| match mutation {
+            Mutation::NewEventListener { name, id } if name == "click" => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    dispatch(&mut dom, "click", checkbox, "");
+    assert!(observed.borrow().restored);
+    assert_eq!(
+        observed
+            .borrow()
+            .sheet
             .unwrap()
+            .cell("flag")
+            .view()
+            .unwrap()
+            .text,
+        "true"
     );
-    let replacement =
-        crate::build_sheet("sheet new { cell fresh: i64 = 42i64; }", "same.adm2").unwrap();
-    parsed.set(replacement.parsed);
-    labels.set(replacement.labels);
+}
+
+/// Independent roots use distinct control IDs and keep drafts and callbacks isolated.
+#[test]
+fn independent_roots_isolate_controls_and_outcomes() {
+    let (mut left, left_seen, left_edits) = mounted();
+    let (right, right_seen, _) = mounted();
+    let left_html = dioxus_ssr::render(&left);
+    let right_html = dioxus_ssr::render(&right);
+    let left_ids: Vec<_> = left_html
+        .split(" id=\"")
+        .skip(1)
+        .map(|s| s.split('"').next().unwrap())
+        .filter(|id| id.starts_with("adam-cell-"))
+        .collect();
+    let right_ids: Vec<_> = right_html
+        .split(" id=\"")
+        .skip(1)
+        .map(|s| s.split('"').next().unwrap())
+        .filter(|id| id.starts_with("adam-cell-"))
+        .collect();
+    assert!(!left_ids.is_empty());
+    assert!(left_ids.iter().all(|id| !right_ids.contains(id)));
+    let input = left_edits
+        .edits
+        .iter()
+        .find_map(|m| match m {
+            Mutation::NewEventListener { name, id } if name == "input" => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    dispatch(&mut left, "input", input, "left only");
+    assert_eq!(left_seen.borrow().outcomes.len(), 1);
+    assert!(right_seen.borrow().outcomes.is_empty());
+    assert_eq!(
+        right_seen
+            .borrow()
+            .sheet
+            .unwrap()
+            .cell("text")
+            .view()
+            .unwrap()
+            .text,
+        "001"
+    );
+}
+
+/// Numeric adapters submit exact aspirations once and never write on synchronization.
+#[tokio::test]
+async fn bound_numeric_and_slider_keep_exact_types_and_host_filtering() {
+    use crate::components::tests::{NodeDocument, arrow_up, input, settle};
+    use dioxus::document::Document;
+    let observed = Rc::new(RefCell::new(Observed::default()));
+    let mut dom = VirtualDom::new(host);
+    dom.provide_root_context(observed.clone());
+    dom.provide_root_context(Rc::new(NodeDocument::default()) as Rc<dyn Document>);
+    let edits = dom.rebuild_to_vec();
+    let sources: Vec<_> = edits
+        .edits
+        .iter()
+        .filter_map(|m| match m {
+            Mutation::SetAttribute {
+                name: "data-adam-number-source",
+                value: dioxus::core::AttributeValue::Text(token),
+                ..
+            } => Some(ElementId(token.parse().unwrap())),
+            _ => None,
+        })
+        .collect();
+    assert!(sources.len() >= 2);
+    settle(&mut dom).await;
+    observed.borrow_mut().outcomes.clear();
+    input(&mut dom, sources[0], "17");
+    settle(&mut dom).await;
+    let sheet = observed.borrow().sheet.unwrap();
+    assert_eq!(sheet.cell("b").view().unwrap().text, "17");
+    assert_eq!(
+        sheet.with_accepted_state(|s| s.transactions.len()).unwrap(),
+        1
+    );
+    input(&mut dom, sources[1], "9007199254740995");
+    settle(&mut dom).await;
+    assert_eq!(
+        sheet.cell("ranged").view().unwrap().text,
+        "9007199254740994"
+    );
+    sheet
+        .with_accepted_state(|state| {
+            assert_eq!(state.transactions[1][0].canonical, "9007199254740995",)
+        })
+        .unwrap();
+    arrow_up(&mut dom, sources[1]);
+    settle(&mut dom).await;
+    assert_eq!(
+        sheet.with_accepted_state(|s| s.transactions.len()).unwrap(),
+        3
+    );
+    assert_eq!(observed.borrow().outcomes.len(), 3);
+}
+
+/// Concise bindings use their stable cell names as accessible labels.
+#[test]
+fn omitted_labels_use_binding_keys() {
+    /// Mounts controls without repeated label plumbing.
+    fn app() -> Element {
+        let sheet = use_sheet(factory(), "controls/v1".into(), EventHandler::new(|_| {})).unwrap();
+        rsx! {
+            EditText { bind: sheet.cell("text") }
+            CheckBox { bind: sheet.cell("flag") }
+            EditNumber { bind: sheet.cell("a") }
+            EditSlider { bind: sheet.cell("ranged") }
+        }
+    }
+    let mut dom = VirtualDom::new(app);
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains(">text</label>"), "{html}");
+    assert!(html.contains("aria-label=\"flag\""), "{html}");
+}
+
+/// Replacing a model remounts standalone numeric controls, not just Inspector rows.
+#[test]
+fn replacement_retires_standalone_numeric_instances() {
+    let (mut dom, observed, _) = mounted();
+    let before = dioxus_ssr::render(&dom);
+    let old_source = before
+        .split("data-adam-number-source=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string();
+    observed
+        .borrow()
+        .sheet
+        .unwrap()
+        .replace(factory(), "controls/v1".into())
+        .unwrap();
     dom.render_immediate_to_vec();
     let after = dioxus_ssr::render(&dom);
-    assert!(after.contains("fresh") && after.contains("value=\"42\""));
-    assert!(
-        ids(&html).is_disjoint(&ids(&after)),
-        "replaced source must retire DOM control identity"
+    let new_source = after
+        .split("data-adam-number-source=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_ne!(
+        old_source, new_source,
+        "standalone numeric source must retire on replacement"
     );
 }

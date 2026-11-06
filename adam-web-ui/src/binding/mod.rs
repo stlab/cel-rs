@@ -7,13 +7,19 @@
 //! [`HostOutcome::RecordingFailed`] accepts the model transaction but stops the
 //! recorder; do not roll accepted state back in response to that outcome.
 
+mod dioxus;
 mod owner;
 mod recording;
 mod types;
+mod widgets;
 
+pub use dioxus::{CellBinding, SheetEvent, SheetHandle, use_sheet};
 pub use owner::SheetOwner;
 pub use recording::{CaptureError, PlaybackError, Recording};
 pub use types::*;
+pub use widgets::{CheckBox, EditNumber, EditSlider, EditText};
 
+#[cfg(test)]
+mod dioxus_tests;
 #[cfg(test)]
 mod tests;

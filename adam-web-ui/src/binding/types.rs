@@ -97,7 +97,7 @@ pub struct CellFlags {
 ///
 /// # Examples
 /// See [`super::SheetOwner::views`] for reading shared immutable views.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct CellView {
     /// Stable host-schema key.
     pub key: String,
@@ -109,6 +109,10 @@ pub struct CellView {
     pub flags: CellFlags,
     /// Concrete primitive type for numeric editors.
     pub number_kind: Option<NumberKind>,
+    /// Selects the Boolean editor without inferring type from displayed text.
+    pub is_bool: bool,
+    /// Distinguishes editable scalar text from unsupported compound display text.
+    pub codec_supported: bool,
     /// Exact current filter endpoints, when a range filter exists.
     pub range: Option<NumericRange>,
     /// Nonfatal filter or unsupported-capability diagnostics.

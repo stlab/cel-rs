@@ -24,4 +24,4 @@ pub use switch::Switch;
 pub use theme::Theme;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

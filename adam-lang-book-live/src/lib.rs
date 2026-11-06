@@ -4,6 +4,7 @@
 //! `docs/superpowers/plans/2026-08-27-live-adam-book-examples.md`'s Task 8 spike); there is no
 //! shared state between them.
 
+use adam_web_ui::binding::{BindingError, HostOutcome, ModelFactory, SheetEvent, use_sheet};
 use adam_web_ui::spectrum::SpTheme;
 use adam_web_ui::{GraphView, Renderer, SheetInspector, build_sheet, to_graph_data};
 use dioxus::prelude::*;
@@ -34,10 +35,10 @@ mod tests {
     fn root_renders_success_and_parse_failure() {
         let good = render("sheet s { cell x: bool; }");
         assert!(good.contains("sp-theme"));
-        assert!(good.contains("sp-checkbox"));
+        assert!(good.contains("role=\"checkbox\""));
         let bad = render("sheet s { cell x }");
         assert!(bad.contains("adam-live-error"));
-        assert!(!bad.contains("sp-checkbox"));
+        assert!(!bad.contains("role=\"checkbox\""));
         assert!(!bad.contains('\u{1b}'));
     }
 
@@ -51,6 +52,33 @@ mod tests {
         assert!(html.contains("division"));
         assert!(!html.contains('\u{1b}'));
     }
+
+    /// Graph glue renders only accepted snapshots and exposes unavailable ownership.
+    #[test]
+    fn graph_reads_only_accepted_live_handle() {
+        /// Mounts an external graph over either a live or deliberately discarded owner.
+        fn host(unavailable: bool) -> Element {
+            let sheet = use_sheet(
+                std::rc::Rc::new(|| build_sheet("sheet s { cell x: i32 = 1; }", "s.adm2")),
+                "s/v1".into(),
+                EventHandler::new(|_| {}),
+            )
+            .unwrap();
+            use_hook(move || {
+                if unavailable {
+                    sheet.cell("x").submit("bad".into());
+                }
+            });
+            let source_id = use_memo(|| "s.adm2".to_string());
+            rsx! { BookGraph { graph_id: "book-graph", sheet, source_id } }
+        }
+        for unavailable in [false, true] {
+            let mut dom = VirtualDom::new_with_props(host, unavailable);
+            dom.rebuild_in_place();
+            let html = dioxus_ssr::render(&dom);
+            assert_eq!(html.contains("Graph unavailable:"), unavailable, "{html}");
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -61,60 +89,43 @@ struct RootProps {
     graph_ids: Vec<String>,
 }
 
-/// Parses `props.source`, then renders either a live [`SheetInspector`] (on success) or the
-/// formatted diagnostic (on parse failure), matching how a propagate failure alongside a
-/// successfully built sheet renders both. Wrapped in its own [`SpTheme`], since Spectrum Web
-/// Components render unstyled (correct custom elements, but none of Spectrum's CSS
-/// custom-property design tokens applied) without one — each independently-mounted `Root`
-/// gets its own `<sp-theme>`, exactly as `begin`'s single, app-wide one wraps its whole tree.
-/// Diagnostics render via [`Renderer::plain`], not [`Renderer::styled`]: the rendered `<pre>`
-/// is a browser element, not a terminal, so ANSI escape codes would show as literal garbage
-/// text rather than color.
+/// Builds one owner and renders its Inspector or a plain construction diagnostic.
 ///
-/// Each mount has immutable props. Initialization stores its non-copyable sheet
-/// inside scope-owned signals exactly once, including failed builds.
+/// Each mount has immutable props and caches initialization, including failed
+/// builds. The Inspector installs its Dioxus theme; the outer Spectrum shell
+/// remains until the book shell migration. Graphs read the same accepted owner.
 ///
 /// - Complexity: initialization includes parsing/propagation; rendering costs O(c + g)
 ///   components for c cells and g graph hosts, excluding graph serialization.
 #[component]
 fn Root(props: RootProps) -> Element {
-    let (sheet_labels, error) = use_hook(|| match build_sheet(&props.source, &props.name) {
-        Ok(built) => (
-            Some((Signal::new(built.parsed), Signal::new(built.labels))),
-            None,
-        ),
-        Err(error) => (None, Some(error.render(&Renderer::plain()))),
-    });
-    let source_text = use_memo({
+    let factory: ModelFactory = std::rc::Rc::new({
         let source = props.source.clone();
-        move || source.clone()
+        let name = props.name.clone();
+        move || build_sheet(&source, &name)
     });
+    let initialized = use_sheet(factory, props.name.clone(), EventHandler::new(book_outcome));
     let source_name = use_memo({
         let name = props.name.clone();
         move || name.clone()
     });
 
-    let inner = match sheet_labels {
-        Some((parsed, labels)) => {
-            let data = use_memo(move || to_graph_data(&parsed.read(), &labels.read()));
+    let inner = match initialized {
+        Ok(sheet) => {
             rsx! {
-                SheetInspector { parsed, labels, source_text, source_name }
+                SheetInspector { sheet }
                 for id in &props.graph_ids {
-                    GraphView {
+                    BookGraph {
                         key: "{id}",
                         graph_id: id.clone(),
-                        data,
+                        sheet,
                         source_id: source_name,
-                        external_container: true,
                     }
-                }
-                if let Some(err) = error {
-                    pre { class: "adam-live-error", "{err}" }
                 }
             }
         }
-        None => {
-            let error = error.unwrap_or_default();
+        Err(error) => {
+            let error = error.render(&Renderer::plain());
             rsx! {
                 pre { class: "adam-live-error", "{error}" }
             }
@@ -129,6 +140,60 @@ fn Root(props: RootProps) -> Element {
             {inner}
         }
     }
+}
+
+/// Reports structured host failures and explicitly restores recoverable candidates.
+///
+/// Fatal propagation never rebuilds; recording failure preserves accepted state.
+///
+/// - Complexity: Diagnostic bytes plus explicit reconstruction cost on rejection.
+fn book_outcome(event: SheetEvent) {
+    match event.outcome {
+        HostOutcome::Accepted => {}
+        HostOutcome::Rejected(error) => {
+            adam_web_ui::diagnostics::report_error(&format!("{error:?}"));
+            if matches!(
+                event.sheet.inspect(|_, _| ()),
+                Err(BindingError::Unavailable)
+            ) && let Err(error) = event.sheet.restore_accepted()
+            {
+                adam_web_ui::diagnostics::report_error(&error.render(&Renderer::plain()));
+            }
+        }
+        HostOutcome::Fatal(error) => adam_web_ui::diagnostics::report_error(&format!("{error:?}")),
+        HostOutcome::RecordingFailed(error) => {
+            adam_web_ui::diagnostics::report_error(&format!("{error:?}"))
+        }
+    }
+}
+
+/// Projects the graph only from the accepted live handle.
+///
+/// - Complexity: Graph projection and serialization.
+#[component]
+fn BookGraph(
+    graph_id: String,
+    sheet: adam_web_ui::binding::SheetHandle,
+    source_id: Memo<String>,
+) -> Element {
+    let snapshot = sheet.inspect(|parsed, labels| to_graph_data(parsed, labels));
+    match snapshot {
+        Ok(snapshot) => rsx! { AcceptedGraph { graph_id, snapshot, source_id } },
+        Err(error) => rsx! { p { role: "alert", "Graph unavailable: {error}" } },
+    }
+}
+
+/// Supplies a checked accepted snapshot to the existing external graph renderer.
+///
+/// - Complexity: O(graph size) snapshot transfer.
+#[component]
+fn AcceptedGraph(
+    graph_id: String,
+    snapshot: adam_web_ui::GraphData,
+    source_id: Memo<String>,
+) -> Element {
+    let data = use_memo(use_reactive((&snapshot,), |(snapshot,)| snapshot));
+    rsx! { GraphView { graph_id, data, source_id, external_container: true } }
 }
 
 /// Mounts a live [`SheetInspector`] for `source` into the DOM element with id `element_id`,

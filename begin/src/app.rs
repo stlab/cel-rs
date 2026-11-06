@@ -1,13 +1,12 @@
 //! Root [`App`] component.
 
-use adam_lang::ParsedSheet;
 use dioxus::prelude::*;
 
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
 use crate::graph_legend::GraphLegend;
 use adam_web_ui::GraphView;
-use adam_web_ui::Labels;
 use adam_web_ui::SheetInspector;
+use adam_web_ui::binding::{BindingError, HostOutcome, SheetEvent, SheetHandle, SheetOwner};
 use adam_web_ui::spectrum::{
     SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
     SpSideNavItem, SpSwitch, SpTheme,
@@ -28,10 +27,47 @@ const DEFAULT_EXAMPLE_NAME: &str = "diamond";
 /// Holds the signals that represent one successfully initialized sheet.
 #[derive(Clone, Copy, PartialEq)]
 struct LiveSheet {
-    /// The live parsed sheet.
-    parsed: Signal<ParsedSheet>,
-    /// Display and write metadata for the live sheet.
-    labels: Signal<Labels>,
+    /// The sole reactive owner of the accepted model and its journal.
+    sheet: SheetHandle,
+}
+
+/// Constructs a repeatable source owner without a partial-model failure result.
+///
+/// - Complexity: O(source/name bytes) storage plus construction/publication.
+fn build_owner(source: &str, name: &str) -> Result<SheetOwner, adam_web_ui::BuildError> {
+    let source = source.to_string();
+    let name = name.to_string();
+    let schema = name.clone();
+    SheetOwner::new(
+        std::rc::Rc::new(move || build_sheet(&source, &name)),
+        schema,
+    )
+}
+
+/// Reports structured host outcomes and restores only a recoverably discarded model.
+///
+/// Fatal outcomes leave the owner retired; recorder failure retains accepted state.
+/// Durable persistence and shutdown policy remain the later host migration's work.
+///
+/// - Complexity: Diagnostic bytes plus explicit reconstruction cost on rejection.
+fn sheet_outcome(event: SheetEvent) {
+    match event.outcome {
+        HostOutcome::Accepted => {}
+        HostOutcome::Rejected(error) => {
+            adam_web_ui::diagnostics::report_error(&format!("{error:?}"));
+            if matches!(
+                event.sheet.inspect(|_, _| ()),
+                Err(BindingError::Unavailable)
+            ) && let Err(error) = event.sheet.restore_accepted()
+            {
+                adam_web_ui::diagnostics::report_error(&error.render(&Renderer::styled()));
+            }
+        }
+        HostOutcome::Fatal(error) => adam_web_ui::diagnostics::report_error(&format!("{error:?}")),
+        HostOutcome::RecordingFailed(error) => {
+            adam_web_ui::diagnostics::report_error(&format!("{error:?}"))
+        }
+    }
 }
 
 /// Lets mounted-app tests observe state transitions without changing app behavior.
@@ -59,19 +95,19 @@ fn install_loaded_source(
     mut initial_error: Signal<Option<String>>,
     mut active_source: Signal<ActiveSource>,
     mut displayed_source: Signal<ActiveSource>,
-    sheet_labels: Option<(ParsedSheet, Labels)>,
+    sheet_labels: Option<SheetOwner>,
     candidate: ActiveSource,
 ) {
-    if let Some((sheet, metadata)) = sheet_labels {
+    if let Some(owner) = sheet_labels {
         if let Some(current) = model.peek().as_ref().copied() {
-            let mut parsed = current.parsed;
-            let mut labels = current.labels;
-            parsed.set(sheet);
-            labels.set(metadata);
+            if let Err(error) = current.sheet.install(owner) {
+                adam_web_ui::diagnostics::report_error(&error.to_string());
+                active_source.set(candidate);
+                return;
+            }
         } else {
             model.set(Some(LiveSheet {
-                parsed: Signal::new(sheet),
-                labels: Signal::new(metadata),
+                sheet: SheetHandle::from_owner(owner, EventHandler::new(sheet_outcome)),
             }));
         }
         initial_error.set(None);
@@ -146,9 +182,8 @@ pub fn App() -> Element {
 fn AppWithExample(initial_name: String) -> Element {
     let (model, active_source, displayed_source, initial_error) = use_hook(|| {
         let (sheet, source, error) = load_example(&initial_name);
-        let model = sheet.map(|(parsed, labels)| LiveSheet {
-            parsed: Signal::new(parsed),
-            labels: Signal::new(labels),
+        let model = sheet.map(|owner| LiveSheet {
+            sheet: SheetHandle::from_owner(owner, EventHandler::new(sheet_outcome)),
         });
         (
             Signal::new(model),
@@ -221,8 +256,8 @@ fn AppWithExample(initial_name: String) -> Element {
                             continue;
                         }
                     };
-                    let (sheet_labels, error) = match build_sheet(&source, &current.file_name()) {
-                        Ok(built) => (Some((built.parsed, built.labels)), None),
+                    let (sheet_labels, error) = match build_owner(&source, &current.file_name()) {
+                        Ok(owner) => (Some(owner), None),
                         Err(error) => (None, Some(error.render(&Renderer::styled()))),
                     };
                     if let Some(message) = error.as_ref()
@@ -299,8 +334,7 @@ fn LiveApp(
     example_names: Signal<Vec<String>>,
     reload_tx: Option<Signal<futures_channel::mpsc::UnboundedSender<()>>>,
 ) -> Element {
-    let parsed = model.parsed;
-    let labels = model.labels;
+    let sheet = model.sheet;
 
     #[cfg(feature = "desktop")]
     let reload_tx = reload_tx.expect("desktop AppWithExample creates a reload sender");
@@ -352,7 +386,8 @@ fn LiveApp(
         })
     };
 
-    let graph_data = use_memo(move || to_graph_data(&parsed.read(), &labels.read()));
+    let graph_data =
+        use_memo(move || sheet.inspect(|parsed, labels| to_graph_data(parsed, labels)));
     // Identifies which source the current graph_data snapshot belongs to —
     // stable across a hot-reload of the *same* file (so an in-place edit
     // keeps the graph's live layout), but distinct whenever a different example
@@ -363,8 +398,6 @@ fn LiveApp(
     // carry over its stale layout position (and previously, its stale box
     // width — see the graph.js fix this follows).
     let source_id = use_memo(move || displayed_source.read().file_name());
-    let source_text = use_memo(move || displayed_source.read().text.clone());
-    let source_name = use_memo(move || displayed_source.read().file_name());
     let graph_id = use_signal(|| "graph-container".to_string());
 
     // Drives graph.js's show/hide-inactive-branches mode via
@@ -489,14 +522,31 @@ fn LiveApp(
                     // `GraphView`, so the book's live graphs render without it.
                     div {
                         style: "flex: 1; position: relative; display: flex; min-height: 0; overflow: hidden;",
-                        GraphView { graph_id, data: graph_data, source_id }
-                        GraphLegend {}
+                        if let Ok(snapshot) = graph_data.read().as_ref() {
+                            AcceptedGraph { graph_id, snapshot: snapshot.clone(), source_id }
+                            GraphLegend {}
+                        } else {
+                            p { role: "alert", "Graph unavailable: no accepted live model." }
+                        }
                     }
-                    SheetInspector { parsed, labels, source_text, source_name }
+                    SheetInspector { sheet }
                 }
             }
         }
     }
+}
+
+/// Adapts an accepted graph snapshot to the graph renderer's reactive input.
+///
+/// - Complexity: O(graph size) snapshot transfer per accepted graph update.
+#[component]
+fn AcceptedGraph(
+    graph_id: Signal<String>,
+    snapshot: adam_web_ui::GraphData,
+    source_id: Memo<String>,
+) -> Element {
+    let data = use_memo(use_reactive((&snapshot,), |(snapshot,)| snapshot));
+    rsx! { GraphView { graph_id, data, source_id } }
 }
 
 /// Renders an initial construction diagnostic without mounting model controls.
@@ -519,17 +569,17 @@ fn InitialBuildFailure(error: String) -> Element {
 ///
 /// - Complexity: O(n) in the length of the example's source, plus the cost
 ///   of one `build_sheet` parse/propagate.
-fn load_example(name: &str) -> (Option<(ParsedSheet, Labels)>, ActiveSource, Option<String>) {
+fn load_example(name: &str) -> (Option<SheetOwner>, ActiveSource, Option<String>) {
     match load_example_source(name) {
         Ok(source) => {
-            let result = build_sheet(&source, &format!("begin/examples/{name}.adm2"));
             let active_source = ActiveSource {
                 name: name.to_string(),
                 text: source,
                 origin: SourceOrigin::Example,
             };
+            let result = build_owner(&active_source.text, &active_source.file_name());
             match result {
-                Ok(built) => (Some((built.parsed, built.labels)), active_source, None),
+                Ok(owner) => (Some(owner), active_source, None),
                 Err(error) => {
                     let message = error.render(&Renderer::styled());
                     adam_web_ui::diagnostics::report_error(&message);
@@ -569,7 +619,7 @@ fn load_example(name: &str) -> (Option<(ParsedSheet, Labels)>, ActiveSource, Opt
 /// - Complexity: O(n) in the size of the file at `path`, plus the cost of
 ///   one `build_sheet` parse/propagate.
 #[cfg(feature = "desktop")]
-fn load_opened(path: std::path::PathBuf) -> (Option<(ParsedSheet, Labels)>, ActiveSource) {
+fn load_opened(path: std::path::PathBuf) -> (Option<SheetOwner>, ActiveSource) {
     let file_name = path.display().to_string();
     let name = path
         .file_name()
@@ -577,8 +627,8 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(ParsedSheet, Labels)>, Acti
         .unwrap_or_else(|| file_name.clone());
     match crate::open_file::read_opened_file(&path) {
         Ok(source) => {
-            let sheet_labels = match build_sheet(&source, &file_name) {
-                Ok(built) => Some((built.parsed, built.labels)),
+            let sheet_labels = match build_owner(&source, &file_name) {
+                Ok(owner) => Some(owner),
                 Err(error) => {
                     eprintln!("{}", error.render(&Renderer::styled()));
                     None
@@ -674,9 +724,9 @@ fn OpenFileControls(
 #[cfg(not(feature = "desktop"))]
 fn load_from_payload(
     payload: crate::open_file::OpenedFilePayload,
-) -> (Option<(ParsedSheet, Labels)>, ActiveSource) {
-    let sheet_labels = match build_sheet(&payload.text, &payload.name) {
-        Ok(built) => Some((built.parsed, built.labels)),
+) -> (Option<SheetOwner>, ActiveSource) {
+    let sheet_labels = match build_owner(&payload.text, &payload.name) {
+        Ok(owner) => Some(owner),
         Err(error) => {
             adam_web_ui::diagnostics::report_error(&error.render(&Renderer::styled()));
             None
@@ -907,11 +957,10 @@ mod tests {
         /// Exercises the production load transition with real parsed sheets and labels.
         fn host() -> Element {
             let (initial_sheet, initial_source, _) = load_example("diamond");
-            let (initial, initial_labels) = initial_sheet.expect("diamond builds successfully");
+            let initial = initial_sheet.expect("diamond builds successfully");
             let model = use_signal(|| {
                 Some(LiveSheet {
-                    parsed: Signal::new(initial),
-                    labels: Signal::new(initial_labels),
+                    sheet: SheetHandle::from_owner(initial, EventHandler::new(sheet_outcome)),
                 })
             });
             let initial_error = use_signal(|| None);
@@ -934,7 +983,7 @@ mod tests {
             assert_eq!(displayed.read().file_name(), original);
             assert_eq!(active.read().name, "broken");
             let repaired_sheet =
-                build_sheet("sheet repaired { cell x: i64; }", "broken.adm2").unwrap();
+                build_owner("sheet repaired { cell x: i64; }", "broken.adm2").unwrap();
             let repaired = ActiveSource {
                 text: "sheet repaired { cell x: i64; }".to_string(),
                 ..broken
@@ -944,18 +993,17 @@ mod tests {
                 initial_error,
                 active,
                 displayed,
-                Some((repaired_sheet.parsed, repaired_sheet.labels)),
+                Some(repaired_sheet),
                 repaired,
             );
             assert_eq!(displayed.read().name, "broken");
             assert_eq!(displayed.read().text, "sheet repaired { cell x: i64; }");
-            assert!(
-                model.read().as_ref().is_some_and(|model| model
-                    .parsed
-                    .read()
-                    .cell_names
-                    .contains_key("x"))
-            );
+            assert!(model.read().as_ref().is_some_and(|model| {
+                model
+                    .sheet
+                    .inspect(|parsed, _| parsed.cell_names.contains_key("x"))
+                    .unwrap()
+            }));
             rsx! {}
         }
         VirtualDom::new(host).rebuild_in_place();

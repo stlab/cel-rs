@@ -434,8 +434,9 @@ generated component subdirectories and shared theme assets. Modify
   performs checked lookup. Unknown names render/report configuration errors,
   never panic or disappear silently.
 - `SheetHandle::restore_accepted(&self) -> Result<(), BuildError>` and
-  `with_accepted_state<R>(&self, f: impl FnOnce(&RecoveryState) -> R) -> R`
+  `with_accepted_state<R>(&self, f: impl FnOnce(&RecoveryState) -> R) -> Result<R, BindingError>`
   expose host recovery without copying the full journal on each publication.
+  Checked reentrant access returns `ReentrantMutation` without invoking the callback.
 - `SheetHandle::inspect<R>(&self, f: impl FnOnce(&ParsedSheet, &Labels) -> R)
   -> Result<R, BindingError>` tracks accepted-model reads for the host's
   application-specific derived views, including graph projection.
