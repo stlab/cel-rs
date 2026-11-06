@@ -480,6 +480,118 @@ fn conditional_relevance_survives_binding_edits() {
     }
 }
 
+/// False output requirements reach the host without publishing rejected candidate views.
+#[test]
+fn output_requirement_rejection_preserves_accepted_views_and_authored_diagnostics() {
+    /// Mounts an editable contributor and an output with named and unnamed requirements.
+    fn app() -> Element {
+        let observed: Rc<RefCell<Observed>> = consume_context();
+        let callbacks = observed.clone();
+        let sheet = use_sheet(
+            Rc::new(|| {
+                crate::build_sheet(
+                    "sheet validation {
+                        cell amount: i32 = 1;
+                        out total := amount require {
+                            @positive total > 0;
+                            total != 0;
+                        };
+                    }",
+                    "authored-requirements.adm2",
+                )
+            }),
+            "validation/v1".into(),
+            EventHandler::new(move |event: SheetEvent| {
+                if matches!(event.outcome, HostOutcome::Rejected(_)) {
+                    assert_eq!(
+                        event.sheet.inspect(|_, _| panic!("rejected model exposed")),
+                        Err(BindingError::Unavailable)
+                    );
+                }
+                callbacks.borrow_mut().outcomes.push(event.outcome);
+            }),
+        )
+        .unwrap();
+        observed.borrow_mut().sheet = Some(sheet);
+        let amount = sheet.cell("amount");
+        rsx! {
+            button { id: "reject-output".to_string(),
+                onclick: move |_| amount.submit("0".into()), "Reject"
+            }
+            SheetInspector { sheet }
+        }
+    }
+
+    let observed = Rc::new(RefCell::new(Observed::default()));
+    let mut dom = VirtualDom::new(app);
+    dom.provide_root_context(observed.clone());
+    let edits = dom.rebuild_to_vec();
+    let sheet = observed.borrow().sheet.unwrap();
+    sheet.cell("amount").submit("2".into());
+    dom.render_immediate_to_vec();
+    let accepted = sheet.views().unwrap();
+    let old_amount = sheet.cell("amount");
+    let old_total = sheet.cell("total");
+    assert_eq!(old_amount.view().unwrap().text, "2");
+    assert_eq!(old_total.view().unwrap().text, "2");
+    assert!(old_total.view().unwrap().flags.readonly);
+    assert!(
+        accepted
+            .iter()
+            .all(|v| !v.flags.invalid && v.issues.is_empty())
+    );
+    dispatch(&mut dom, "click", named(&edits, "reject-output"), "");
+    let state = observed.borrow();
+    let HostOutcome::Rejected(HostRejection::Validation(issues)) = &state.outcomes[1] else {
+        panic!("false requirements must report typed validation rejection");
+    };
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].key, "total");
+    assert_eq!(issues[0].requirement.as_deref(), Some("positive"));
+    assert_eq!(issues[1].key, "total");
+    assert_eq!(issues[1].requirement, None);
+    assert!(issues[0].message.contains("positive"));
+    for issue in issues {
+        assert_eq!(issue.labels.len(), 1);
+        assert!(!issue.labels[0].label.is_empty());
+        let location = issue.labels[0].location.as_ref().unwrap();
+        assert!(location.source.text().contains("@positive total > 0"));
+        assert!(location.source.text().contains("total != 0"));
+    }
+    drop(state);
+    assert_eq!(sheet.views(), Err(BindingError::Unavailable));
+    assert_eq!(
+        sheet.with_accepted_state(|s| s.transactions.len()).unwrap(),
+        1
+    );
+    assert!(matches!(
+        old_amount.view(),
+        Err(BindingError::RetiredInstance)
+    ));
+    assert!(dioxus_ssr::render(&dom).contains("role=\"alert\""));
+    assert!(accepted.iter().all(|v| v.text == "2" && !v.flags.invalid));
+    sheet.restore_accepted().unwrap();
+    dom.render_immediate_to_vec();
+    let restored = sheet.views().unwrap();
+    assert!(
+        accepted
+            .iter()
+            .zip(&restored)
+            .all(|(a, b)| Rc::ptr_eq(a, b))
+    );
+    assert_eq!(sheet.cell("amount").view().unwrap().text, "2");
+    assert_eq!(sheet.cell("total").view().unwrap().text, "2");
+    assert!(
+        restored
+            .iter()
+            .all(|v| !v.flags.invalid && v.issues.is_empty())
+    );
+    assert_eq!(
+        sheet.with_accepted_state(|s| s.transactions.len()).unwrap(),
+        1
+    );
+}
+
 /// Replacing a model remounts standalone numeric controls, not just Inspector rows.
 #[test]
 fn replacement_retires_standalone_numeric_instances() {

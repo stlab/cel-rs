@@ -12,6 +12,29 @@ type Errors = Rc<RefCell<Vec<BindingError>>>;
 /// Records each host outcome together with callback-time model availability.
 type Outcomes = Rc<RefCell<Vec<(HostOutcome, Result<(), BindingError>)>>>;
 
+/// Initial false output requirements reject ownership before any publication.
+#[test]
+fn owner_rejects_initial_false_output_requirement() {
+    let result = SheetOwner::new(
+        Rc::new(|| {
+            crate::build_sheet(
+                "sheet s { cell amount: i32 = 0;
+                    out total := amount require { @positive total > 0; }; }",
+                "initial-output.adm2",
+            )
+        }),
+        "validation/v1".into(),
+    );
+    let Err(crate::BuildError::Validation { issues, .. }) = result else {
+        panic!("initial requirement failure must return validation without an owner");
+    };
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].key, "total");
+    assert_eq!(issues[0].requirement.as_deref(), Some("positive"));
+    let location = issues[0].labels[0].location.as_ref().unwrap();
+    assert!(location.source.text().contains("@positive total > 0"));
+}
+
 /// Builds an editable value and a validation boundary.
 fn factory() -> ModelFactory {
     Rc::new(|| {
