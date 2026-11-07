@@ -9,6 +9,7 @@ use ::dioxus::prelude::*;
 use adam_lang::ParsedSheet;
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     rc::Rc,
 };
 
@@ -29,11 +30,23 @@ fn next_instance() -> u64 {
     })
 }
 
-/// Owns the sole mutable model and its host callback outside reactive publication.
+/// Owns the model, callback, and ordered outcomes awaiting a safe delivery boundary.
 struct HandleState {
     owner: RefCell<SheetOwner>,
     instance: Cell<u64>,
     on_outcome: EventHandler<SheetEvent>,
+    pending_outcomes: RefCell<VecDeque<HostOutcome>>,
+    draining_outcomes: Cell<bool>,
+}
+
+/// Clears the outcome-drain guard if host callback delivery unwinds.
+struct OutcomeDrainGuard<'a>(&'a Cell<bool>);
+
+impl Drop for OutcomeDrainGuard<'_> {
+    /// Marks the event queue available for a later drain.
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
 }
 
 /// Shares a scope-owned model; copying a handle does not copy its model or journal.
@@ -49,7 +62,7 @@ pub struct SheetHandle {
     revision: Signal<u64>,
 }
 
-/// Delivers a structured outcome after releasing the model borrow.
+/// Delivers a structured outcome after all enclosing model borrows end.
 ///
 /// # Examples
 /// ```
@@ -137,6 +150,8 @@ impl SheetHandle {
                 owner: RefCell::new(owner),
                 instance: Cell::new(next_instance()),
                 on_outcome,
+                pending_outcomes: RefCell::new(VecDeque::new()),
+                draining_outcomes: Cell::new(false),
             })),
             revision: Signal::new(0),
         }
@@ -153,12 +168,40 @@ impl SheetHandle {
         revision += 1;
     }
 
-    /// Forwards an outcome without choosing host recovery policy.
+    /// Queues an outcome and delivers queued events when no model borrow is active.
+    ///
+    /// - Complexity: O(q) callback work for q queued outcomes.
     fn emit(&self, outcome: HostOutcome) {
-        self.state().on_outcome.call(SheetEvent {
-            sheet: *self,
-            outcome,
-        });
+        let state = self.state();
+        state.pending_outcomes.borrow_mut().push_back(outcome);
+        self.drain_outcomes();
+    }
+
+    /// Delivers pending outcomes in order without holding model or queue borrows.
+    ///
+    /// - Complexity: O(q) callback work and O(q) queue space for q outcomes.
+    fn drain_outcomes(&self) {
+        let state = self.state();
+        if state.draining_outcomes.replace(true) {
+            return;
+        }
+        let _guard = OutcomeDrainGuard(&state.draining_outcomes);
+        loop {
+            let outcome = {
+                let Ok(owner) = state.owner.try_borrow_mut() else {
+                    break;
+                };
+                drop(owner);
+                state.pending_outcomes.borrow_mut().pop_front()
+            };
+            let Some(outcome) = outcome else {
+                break;
+            };
+            state.on_outcome.call(SheetEvent {
+                sheet: *self,
+                outcome,
+            });
+        }
     }
 
     /// Returns the reactive instance identity used to key replacement controls.
@@ -186,12 +229,14 @@ impl SheetHandle {
         }
     }
 
-    /// Submits an ordered group and forwards every structured outcome to the host.
+    /// Submits an ordered group and delivers each structured outcome to the host.
     ///
     /// Reentrant access rejects without invoking the transaction. Rejections that
     /// discard a candidate retire its bindings; recovery installs a new instance.
+    /// Reentrant outcomes wait until every enclosing owner borrow ends, then drain
+    /// in submission order without recursive callback invocation.
     ///
-    /// - Complexity: Transaction/publication cost plus O(1) notification.
+    /// - Complexity: Transaction/publication cost plus queued callback work.
     ///
     /// # Examples
     /// See [`SheetOwner`] for `CellEdit` groups; call `sheet.apply(&edits, UpdateOrigin::User)`.
@@ -218,20 +263,28 @@ impl SheetHandle {
     /// # Errors
     /// Returns typed reconstruction, fatal retirement, or reentrancy errors.
     ///
-    /// - Complexity: Factory, journal replay, and publication cost.
+    /// - Complexity: Factory, journal replay, publication, and queued callback cost.
     ///
     /// # Examples
     /// See [`SheetEvent`] for explicit host recovery.
     pub fn restore_accepted(&self) -> Result<(), BuildError> {
         let state = self.state();
-        let result = {
-            let mut owner = state.owner.try_borrow_mut().map_err(|_| build_busy())?;
-            let result = owner.restore_accepted();
-            state.instance.set(next_instance());
-            result
+        let result = match state.owner.try_borrow_mut() {
+            Ok(mut owner) => {
+                let result = owner.restore_accepted();
+                state.instance.set(next_instance());
+                Some(result)
+            }
+            Err(_) => None,
         };
-        self.publish();
-        result
+        if let Some(result) = result {
+            self.publish();
+            self.drain_outcomes();
+            result
+        } else {
+            self.drain_outcomes();
+            Err(build_busy())
+        }
     }
 
     /// Borrows the single accepted journal, including after rejection or retirement.
@@ -239,8 +292,10 @@ impl SheetHandle {
     /// # Errors
     /// Returns `ReentrantMutation` without invoking `f` while a mutation owns it.
     /// Writes attempted inside `f` likewise reject without changing the journal.
+    /// Outcomes submitted inside `f` reach the host after `f` returns.
     ///
-    /// - Complexity: O(1) plus callback cost; does not copy history.
+    /// - Complexity: O(1) plus callback and queued outcome delivery cost; does not
+    ///   copy history.
     ///
     /// # Examples
     /// See [`use_sheet`]; `sheet.with_accepted_state(|s| s.transactions.len())`
@@ -250,19 +305,25 @@ impl SheetHandle {
         f: impl FnOnce(&RecoveryState) -> R,
     ) -> Result<R, BindingError> {
         let state = self.state();
-        let owner = state
-            .owner
-            .try_borrow()
-            .map_err(|_| BindingError::ReentrantMutation)?;
-        Ok(f(owner.accepted_state()))
+        let result = match state.owner.try_borrow() {
+            Ok(owner) => {
+                let result = f(owner.accepted_state());
+                drop(owner);
+                Ok(result)
+            }
+            Err(_) => Err(BindingError::ReentrantMutation),
+        };
+        self.drain_outcomes();
+        result
     }
 
     /// Tracks a read of an accepted live model without exposing mutable ownership.
     ///
     /// # Errors
     /// Returns unavailable, retired, or reentrant diagnostics without calling `f`.
+    /// Outcomes submitted inside `f` reach the host after `f` returns.
     ///
-    /// - Complexity: O(1) plus callback cost.
+    /// - Complexity: O(1) plus callback and queued outcome delivery cost.
     ///
     /// # Examples
     /// See [`use_sheet`]; `sheet.inspect(|parsed, _| parsed.cell_names.len())`
@@ -273,11 +334,16 @@ impl SheetHandle {
     ) -> Result<R, BindingError> {
         let _ = self.revision.read();
         let state = self.state();
-        let owner = state
-            .owner
-            .try_borrow()
-            .map_err(|_| BindingError::ReentrantMutation)?;
-        owner.inspect(f)
+        let result = match state.owner.try_borrow() {
+            Ok(owner) => {
+                let result = owner.inspect(f);
+                drop(owner);
+                result
+            }
+            Err(_) => Err(BindingError::ReentrantMutation),
+        };
+        self.drain_outcomes();
+        result
     }
 
     /// Captures exact effective sources from the accepted live model.
@@ -285,14 +351,19 @@ impl SheetHandle {
     /// # Errors
     /// Returns capture capability, encoding, availability, or reentrancy failures.
     ///
-    /// - Complexity: Source analysis and encoded bytes.
+    /// - Complexity: Source analysis, encoded bytes, and queued callback cost.
     ///
     /// # Examples
     /// See [`use_sheet`]; `sheet.capture(&["x"])` selects the named result.
     pub fn capture(&self, result_keys: &[&str]) -> Result<Recording, CaptureError> {
         let state = self.state();
-        let owner = state.owner.try_borrow().map_err(|_| capture_busy())?;
-        owner.capture(result_keys)
+        let result = state
+            .owner
+            .try_borrow()
+            .map_err(|_| capture_busy())
+            .and_then(|owner| owner.capture(result_keys));
+        self.drain_outcomes();
+        result
     }
 
     /// Enables capture for subsequent accepted user actions without cloning history.
@@ -300,19 +371,24 @@ impl SheetHandle {
     /// # Errors
     /// Returns capture validation, availability, or reentrancy errors.
     ///
-    /// - Complexity: Capture cost plus selected-key bytes.
+    /// - Complexity: Capture cost, selected-key bytes, and queued callback cost.
     ///
     /// # Examples
     /// See [`use_sheet`]; `sheet.start_recording(&["x"])` starts action capture.
     pub fn start_recording(&self, result_keys: &[&str]) -> Result<(), CaptureError> {
         let state = self.state();
-        let mut owner = state.owner.try_borrow_mut().map_err(|_| capture_busy())?;
-        owner.start_recording(result_keys)
+        let result = state
+            .owner
+            .try_borrow_mut()
+            .map_err(|_| capture_busy())
+            .and_then(|mut owner| owner.start_recording(result_keys));
+        self.drain_outcomes();
+        result
     }
 
     /// Stops recording, reporting contention through the host outcome boundary.
     ///
-    /// - Complexity: O(selected-key bytes) destruction.
+    /// - Complexity: O(selected-key bytes) destruction plus queued callback cost.
     ///
     /// # Examples
     /// See [`Self::start_recording`]; call `sheet.stop_recording()` to stop capture.
@@ -328,11 +404,14 @@ impl SheetHandle {
         if let Err(error) = result {
             self.emit(HostOutcome::Rejected(HostRejection::Binding(error)));
         }
+        self.drain_outcomes();
     }
 
     /// Returns the latest immutable recording without copying its values.
     ///
     /// Contention reports a structured host outcome and returns no recording.
+    ///
+    /// - Complexity: O(1) plus queued callback cost.
     ///
     /// # Examples
     /// See [`Self::start_recording`]; before an action `sheet.last_recording().is_none()`.
@@ -343,7 +422,7 @@ impl SheetHandle {
             .owner
             .try_borrow()
             .map(|owner| owner.recordings().last().cloned());
-        match result {
+        let recording = match result {
             Ok(recording) => recording,
             Err(_) => {
                 self.emit(HostOutcome::Rejected(HostRejection::Binding(
@@ -351,7 +430,9 @@ impl SheetHandle {
                 )));
                 None
             }
-        }
+        };
+        self.drain_outcomes();
+        recording
     }
 
     /// Installs a fully validated replacement and retires all prior bindings on success.
@@ -360,21 +441,34 @@ impl SheetHandle {
     /// Returns construction or reentrancy errors, preserving the prior owner.
     /// A fatal owner rejects replacement without invoking the factory.
     ///
-    /// - Complexity: Factory/publication cost and old-model destruction.
+    /// - Complexity: Factory/publication cost, old-model destruction, and queued
+    ///   callback cost.
     ///
     /// # Examples
     /// See [`use_sheet`]; `sheet.replace(factory, "s/v2".into())` replaces explicitly.
     pub fn replace(&self, factory: ModelFactory, schema_key: String) -> Result<(), BuildError> {
         let state = self.state();
-        {
-            let mut owner = state.owner.try_borrow_mut().map_err(|_| build_busy())?;
-            replacement_allowed(&owner)
-                .map_err(|error| BuildError::Recovery(Box::new(HostRejection::Binding(error))))?;
-            *owner = SheetOwner::new(factory, schema_key)?;
-            state.instance.set(next_instance());
+        let result = match state.owner.try_borrow_mut() {
+            Ok(mut owner) => match replacement_allowed(&owner) {
+                Ok(()) => match SheetOwner::new(factory, schema_key) {
+                    Ok(replacement) => {
+                        *owner = replacement;
+                        state.instance.set(next_instance());
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(BuildError::Recovery(Box::new(HostRejection::Binding(
+                    error,
+                )))),
+            },
+            Err(_) => Err(build_busy()),
+        };
+        if result.is_ok() {
+            self.publish();
         }
-        self.publish();
-        Ok(())
+        self.drain_outcomes();
+        result
     }
 
     /// Adopts a prevalidated replacement and retires the preceding installation.
@@ -385,24 +479,32 @@ impl SheetHandle {
     /// Returns candidate availability, fatal retirement, or reentrancy errors
     /// without replacing the current owner.
     ///
-    /// - Complexity: Old model/history destruction; O(1) transfer of the new owner.
+    /// - Complexity: Old model/history destruction, O(1) owner transfer, and queued
+    ///   callback cost.
     ///
     /// # Examples
     /// See [`Self::from_owner`]; `sheet.install(owner)` installs a validated load.
     pub fn install(&self, candidate: SheetOwner) -> Result<(), BindingError> {
-        candidate.inspect(|_, _| ())?;
         let state = self.state();
-        {
-            let mut owner = state
-                .owner
-                .try_borrow_mut()
-                .map_err(|_| BindingError::ReentrantMutation)?;
-            replacement_allowed(&owner)?;
-            *owner = candidate;
-            state.instance.set(next_instance());
+        let result = match candidate.inspect(|_, _| ()) {
+            Ok(()) => match state.owner.try_borrow_mut() {
+                Ok(mut owner) => match replacement_allowed(&owner) {
+                    Ok(()) => {
+                        *owner = candidate;
+                        state.instance.set(next_instance());
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(_) => Err(BindingError::ReentrantMutation),
+            },
+            Err(error) => Err(error),
+        };
+        if result.is_ok() {
+            self.publish();
         }
-        self.publish();
-        Ok(())
+        self.drain_outcomes();
+        result
     }
 
     /// Installs a fresh successfully replayed owner without recording playback as a user edit.
@@ -412,7 +514,8 @@ impl SheetHandle {
     /// failed replay leaves the prior owner installed. A retired owner never
     /// invokes the factory.
     ///
-    /// - Complexity: Factory, replay, publication and old-model destruction cost.
+    /// - Complexity: Factory, replay, publication, old-model destruction, and queued
+    ///   callback cost.
     ///
     /// # Examples
     /// See [`Self::capture`]; pass its recording to
@@ -424,18 +527,25 @@ impl SheetHandle {
         recording: &Recording,
     ) -> Result<(), PlaybackError> {
         let state = self.state();
-        {
-            let mut owner = state
-                .owner
-                .try_borrow_mut()
-                .map_err(|_| PlaybackError::Capture(capture_busy()))?;
-            replacement_allowed(&owner)
-                .map_err(|error| PlaybackError::Capture(CaptureError::Unavailable(error)))?;
-            *owner = SheetOwner::playback(factory, schema_key, recording)?;
-            state.instance.set(next_instance());
+        let result = match state.owner.try_borrow_mut() {
+            Ok(mut owner) => match replacement_allowed(&owner) {
+                Ok(()) => match SheetOwner::playback(factory, schema_key, recording) {
+                    Ok(playback) => {
+                        *owner = playback;
+                        state.instance.set(next_instance());
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(PlaybackError::Capture(CaptureError::Unavailable(error))),
+            },
+            Err(_) => Err(PlaybackError::Capture(capture_busy())),
+        };
+        if result.is_ok() {
+            self.publish();
         }
-        self.publish();
-        Ok(())
+        self.drain_outcomes();
+        result
     }
 
     /// Copies shared view references, never the accepted history.
@@ -443,19 +553,20 @@ impl SheetHandle {
     /// # Errors
     /// Returns an owner-state or reentrancy error without inspecting a failed model.
     ///
-    /// - Complexity: O(named cells) time and space.
+    /// - Complexity: O(named cells) time and space plus queued callback cost.
     ///
     /// # Examples
     /// See [`use_sheet`]; `sheet.views()` enumerates accepted published cells.
     pub fn views(&self) -> Result<Vec<Rc<CellView>>, BindingError> {
         let _ = self.revision.read();
         let state = self.state();
-        let owner = state
+        let result = state
             .owner
             .try_borrow()
-            .map_err(|_| BindingError::ReentrantMutation)?;
-        owner.inspect(|_, _| ())?;
-        Ok(owner.views().to_vec())
+            .map_err(|_| BindingError::ReentrantMutation)
+            .and_then(|owner| owner.inspect(|_, _| ()).map(|()| owner.views().to_vec()));
+        self.drain_outcomes();
+        result
     }
 }
 
@@ -476,26 +587,31 @@ impl CellBinding {
     /// # Errors
     /// Returns unknown key, unavailable, retired-instance, or reentrancy errors.
     ///
-    /// - Complexity: O(named cells + key bytes).
+    /// - Complexity: O(named cells + key bytes) plus queued callback cost.
     ///
     /// # Examples
     /// See [`use_sheet`]; `sheet.cell("x").view()` reads its exact effective value.
     pub fn view(&self) -> Result<Rc<CellView>, BindingError> {
-        if self.instance != self.sheet.instance() {
-            return Err(BindingError::RetiredInstance);
-        }
-        let state = self.sheet.state();
-        let owner = state
-            .owner
-            .try_borrow()
-            .map_err(|_| BindingError::ReentrantMutation)?;
-        owner.inspect(|_, _| ())?;
-        owner
-            .views()
-            .iter()
-            .find(|view| view.key == self.key.as_ref())
-            .cloned()
-            .ok_or_else(|| BindingError::UnknownKey(self.key.to_string()))
+        let result = if self.instance != self.sheet.instance() {
+            Err(BindingError::RetiredInstance)
+        } else {
+            let state = self.sheet.state();
+            state
+                .owner
+                .try_borrow()
+                .map_err(|_| BindingError::ReentrantMutation)
+                .and_then(|owner| {
+                    owner.inspect(|_, _| ())?;
+                    owner
+                        .views()
+                        .iter()
+                        .find(|view| view.key == self.key.as_ref())
+                        .cloned()
+                        .ok_or_else(|| BindingError::UnknownKey(self.key.to_string()))
+                })
+        };
+        self.sheet.drain_outcomes();
+        result
     }
 
     /// Submits canonical user input only to the originating instance.

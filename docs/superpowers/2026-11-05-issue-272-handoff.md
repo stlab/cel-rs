@@ -1,7 +1,7 @@
 # Issue #272 binding plan handoff
 
-**Snapshot:** 2026-11-06
-**Scope:** Task 11 cleanup and integration gate
+**Snapshot:** 2026-11-07
+**Scope:** Task 11 cleanup, integration gate, and final-review fix wave
 **Worktree:** `.claude/worktrees/issue-272`
 **Base:** `f1aebff9a940da34b7e483daefd42cb14e385435`
 
@@ -17,13 +17,39 @@ The Task 10 independent approval remains the baseline. The controller owns the
 independent final whole-branch review; this handoff does not claim that review
 or approval. No issue was closed, and no PR, push, or merge was performed.
 
+## Final-review fix wave
+
+The final review found that reentrant `SheetHandle::apply` outcomes could call
+the host while an enclosing owner borrow remained active. `HandleState` now
+queues outcomes and drains them synchronously, in order, only after an exclusive
+owner borrow can be acquired and released. Reentrant callbacks do not recurse;
+they append outcomes for the active drain. Replacement, restoration, playback,
+accepted-state/read callbacks, recording access, and widget error reporting all
+use the same delivery boundary. Checked errors, accepted mutations, publication,
+explicit recovery, and fatal retirement remain unchanged.
+
+Contract tests cover `with_accepted_state`, successful and failed replacement,
+restoration, playback, `stop_recording`, `last_recording`, and `CellBinding::report`.
+They verify callback-time model/history access, queue order, and one delivery per
+outcome. The focused binding tests and full Rust workspace gate pass. The plain
+build and test output contains no workspace-source compiler warnings; Cargo
+continues to report the existing future-incompatibility notice for `block
+v0.1.6`. Exact red/green and full-gate output is retained at
+`/Users/sean-parent/.copilot/session-state/ce98aff5-e017-4847-9219-df574e984ddc/files/issue272-final-fix/`.
+
+The exact finding and fix evidence are recorded in
+`.superpowers/sdd/2026-11-05-dioxus-sheet-bindings-and-recording/final-fix-report.md`.
+The controller's scoped re-review of this fix remains pending; this update does
+not claim the final review passed.
+
 ## Scope and preserved contracts
 
 - Begin, EZ, and `adam-web-ui` no longer provide a Spectrum compatibility
   layer or require a JavaScript bundle. `Theme` and shared controls retain their
   official CSS, Lightning CSS compilation, and document-owned stylesheet
   delivery.
-- The binding APIs, ownership contracts, and error behavior remain unchanged.
+- Binding signatures and error categories remain unchanged. Host outcomes now
+  wait until all enclosing owner borrows end before delivery.
 - The obsolete numeric input bridge and its Spectrum-only tests are removed.
   `numeric_events.js` remains the authoritative composition channel, and the
   locale JavaScript, graph/file scripts, and their tests remain.
@@ -74,6 +100,6 @@ WKWebView evidence in Task 10; Task 11 preserves that delivery.
   the exact audit output, base comparison, dependency paths, and advisory
   identifiers.
 
-Resume with the final independent branch review. Keep these issue boundaries
+Resume with the controller's scoped re-review. Keep these issue boundaries
 explicit; do not repeat broad rendering solely to duplicate the retained Task
 5–10 evidence.

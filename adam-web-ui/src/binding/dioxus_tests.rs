@@ -1,7 +1,10 @@
 //! Exercises checked reactive ownership through public handle contracts.
 use super::*;
 use ::dioxus::prelude::*;
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 /// Exposes a scope-owned handle to deterministic event-loop tests.
 type Slot = Rc<RefCell<Option<SheetHandle>>>;
@@ -11,6 +14,68 @@ type Errors = Rc<RefCell<Vec<BindingError>>>;
 
 /// Records each host outcome together with callback-time model availability.
 type Outcomes = Rc<RefCell<Vec<(HostOutcome, Result<(), BindingError>)>>>;
+
+/// Records each callback outcome with its observed value and accepted history length.
+type Deliveries = Rc<
+    RefCell<
+        Vec<(
+            HostOutcome,
+            Result<String, BindingError>,
+            Result<usize, BindingError>,
+        )>,
+    >,
+>;
+
+/// Mounts a handle that records callback-time reads for reentrancy tests.
+fn observing_host() -> Element {
+    let slot: Slot = consume_context();
+    let factory: ModelFactory = consume_context();
+    let deliveries: Deliveries = consume_context();
+    let sheet = use_sheet(
+        factory,
+        "s/v1".into(),
+        EventHandler::new(move |event: SheetEvent| {
+            let value = event.sheet.cell("x").view().map(|view| view.text.clone());
+            let history = event
+                .sheet
+                .with_accepted_state(|state| state.transactions.len());
+            deliveries
+                .borrow_mut()
+                .push((event.outcome, value, history));
+        }),
+    )
+    .unwrap();
+    *slot.borrow_mut() = Some(sheet);
+    rsx! {}
+}
+
+/// Returns a mounted handle and its callback observations.
+fn mounted_observing(factory: ModelFactory, slot: Slot) -> (VirtualDom, SheetHandle, Deliveries) {
+    let deliveries: Deliveries = Rc::new(RefCell::new(Vec::new()));
+    let mut dom = VirtualDom::new(observing_host);
+    dom.provide_root_context(slot.clone());
+    dom.provide_root_context(factory);
+    dom.provide_root_context(deliveries.clone());
+    dom.rebuild_in_place();
+    let sheet = slot.borrow().unwrap();
+    (dom, sheet, deliveries)
+}
+
+/// Reenters the retained handle whenever a later factory call rebuilds a model.
+fn reentrant_factory(slot: Slot) -> ModelFactory {
+    Rc::new(move || {
+        if let Some(sheet) = *slot.borrow() {
+            sheet.apply(
+                &[CellEdit {
+                    key: "x".into(),
+                    canonical: "9".into(),
+                }],
+                UpdateOrigin::User,
+            );
+        }
+        factory()()
+    })
+}
 
 /// Initial false output requirements reject ownership before any publication.
 #[test]
@@ -114,6 +179,250 @@ fn accepted_history_access_is_checked_and_not_copied() {
         .unwrap();
     assert_eq!(sheet.cell("x").view().unwrap().text, "4");
     assert_eq!(*errors.borrow(), [BindingError::ReentrantMutation]);
+}
+
+/// Defers nested outcomes until accepted-state borrows end and drains them in order.
+#[test]
+fn accepted_state_reentrant_outcomes_are_delivered_after_the_borrow() {
+    /// Mounts a handle whose host callback reenters after a queued rejection.
+    fn app() -> Element {
+        let slot: Slot = consume_context();
+        let deliveries: Deliveries = consume_context();
+        let reentered = Rc::new(Cell::new(false));
+        let nested_reentry = reentered.clone();
+        let sheet = use_sheet(
+            factory(),
+            "s/v1".into(),
+            EventHandler::new(move |event: SheetEvent| {
+                let value = event.sheet.cell("x").view().map(|view| view.text.clone());
+                let history = event
+                    .sheet
+                    .with_accepted_state(|state| state.transactions.len());
+                let is_reentrant = matches!(
+                    &event.outcome,
+                    HostOutcome::Rejected(HostRejection::Binding(BindingError::ReentrantMutation))
+                );
+                deliveries
+                    .borrow_mut()
+                    .push((event.outcome, value, history));
+                if is_reentrant && !nested_reentry.replace(true) {
+                    event.sheet.apply(
+                        &[CellEdit {
+                            key: "x".into(),
+                            canonical: "6".into(),
+                        }],
+                        UpdateOrigin::User,
+                    );
+                }
+            }),
+        )
+        .unwrap();
+        *slot.borrow_mut() = Some(sheet);
+        rsx! {}
+    }
+
+    let slot: Slot = Rc::new(RefCell::new(None));
+    let deliveries: Deliveries = Rc::new(RefCell::new(Vec::new()));
+    let mut dom = VirtualDom::new(app);
+    dom.provide_root_context(slot.clone());
+    dom.provide_root_context(deliveries.clone());
+    dom.rebuild_in_place();
+    let sheet = slot.borrow().unwrap();
+    sheet.apply(
+        &[CellEdit {
+            key: "x".into(),
+            canonical: "4".into(),
+        }],
+        UpdateOrigin::User,
+    );
+    sheet
+        .with_accepted_state(|state| {
+            assert_eq!(state.transactions.len(), 1);
+            sheet.apply(
+                &[CellEdit {
+                    key: "x".into(),
+                    canonical: "5".into(),
+                }],
+                UpdateOrigin::User,
+            );
+            assert_eq!(state.transactions.len(), 1);
+        })
+        .unwrap();
+
+    let deliveries = deliveries.borrow();
+    assert_eq!(deliveries.len(), 3);
+    assert!(matches!(deliveries[0].0, HostOutcome::Accepted));
+    assert_eq!(deliveries[0].1, Ok("4".into()));
+    assert_eq!(deliveries[0].2, Ok(1));
+    assert!(matches!(
+        deliveries[1].0,
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::ReentrantMutation))
+    ));
+    assert_eq!(deliveries[1].1, Ok("4".into()));
+    assert_eq!(deliveries[1].2, Ok(1));
+    assert!(
+        matches!(deliveries[2].0, HostOutcome::Accepted),
+        "{deliveries:#?}"
+    );
+    assert_eq!(deliveries[2].1, Ok("6".into()));
+    assert_eq!(deliveries[2].2, Ok(2));
+    assert_eq!(sheet.cell("x").view().unwrap().text, "6");
+    assert_eq!(
+        sheet.with_accepted_state(|state| state.transactions.len()),
+        Ok(2)
+    );
+}
+
+/// Delivers factory reentrancy outcomes only after a successful replacement is visible.
+#[test]
+fn replacement_factory_outcomes_follow_replacement_publication() {
+    let slot: Slot = Rc::new(RefCell::new(None));
+    let (_dom, sheet, deliveries) = mounted_observing(factory(), slot.clone());
+
+    sheet
+        .replace(reentrant_factory(slot), "s/v2".into())
+        .unwrap();
+
+    let deliveries = deliveries.borrow();
+    assert_eq!(deliveries.len(), 1);
+    assert!(matches!(
+        deliveries[0].0,
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::ReentrantMutation))
+    ));
+    assert_eq!(deliveries[0].1, Ok("1".into()));
+    assert_eq!(deliveries[0].2, Ok(0));
+}
+
+/// Preserves recording and widget errors queued while a factory owns the model.
+#[test]
+fn factory_recording_and_widget_outcomes_keep_order_after_release() {
+    let slot: Slot = Rc::new(RefCell::new(None));
+    let (_dom, sheet, deliveries) = mounted_observing(factory(), slot.clone());
+    let retained = slot;
+    let reentrant_factory: ModelFactory = Rc::new(move || {
+        if let Some(sheet) = *retained.borrow() {
+            sheet.stop_recording();
+            assert!(sheet.last_recording().is_none());
+            sheet
+                .cell("x")
+                .report(HostRejection::Binding(BindingError::Unavailable));
+        }
+        factory()()
+    });
+
+    sheet.replace(reentrant_factory, "s/v2".into()).unwrap();
+
+    let deliveries = deliveries.borrow();
+    assert_eq!(deliveries.len(), 3);
+    assert!(matches!(
+        deliveries[0].0,
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::ReentrantMutation))
+    ));
+    assert!(matches!(
+        deliveries[1].0,
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::ReentrantMutation))
+    ));
+    assert!(matches!(
+        deliveries[2].0,
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::Unavailable))
+    ));
+    for (_, value, history) in deliveries.iter() {
+        assert_eq!(value, &Ok("1".into()));
+        assert_eq!(history, &Ok(0));
+    }
+}
+
+/// Delivers restoration factory outcomes after replay restores accepted history.
+#[test]
+fn restoration_factory_outcomes_follow_replayed_state() {
+    let slot: Slot = Rc::new(RefCell::new(None));
+    let (_dom, sheet, deliveries) = mounted_observing(reentrant_factory(slot.clone()), slot);
+    sheet.apply(
+        &[CellEdit {
+            key: "x".into(),
+            canonical: "4".into(),
+        }],
+        UpdateOrigin::User,
+    );
+    sheet.apply(
+        &[CellEdit {
+            key: "x".into(),
+            canonical: "-1".into(),
+        }],
+        UpdateOrigin::User,
+    );
+    deliveries.borrow_mut().clear();
+
+    sheet.restore_accepted().unwrap();
+
+    let deliveries = deliveries.borrow();
+    assert_eq!(deliveries.len(), 1);
+    assert!(matches!(
+        deliveries[0].0,
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::ReentrantMutation))
+    ));
+    assert_eq!(deliveries[0].1, Ok("4".into()));
+    assert_eq!(deliveries[0].2, Ok(1));
+}
+
+/// Delivers playback factory outcomes after the recording has been installed.
+#[test]
+fn playback_factory_outcomes_follow_replayed_publication() {
+    let slot: Slot = Rc::new(RefCell::new(None));
+    let (_dom, sheet, deliveries) = mounted_observing(factory(), slot.clone());
+    sheet.apply(
+        &[CellEdit {
+            key: "x".into(),
+            canonical: "4".into(),
+        }],
+        UpdateOrigin::User,
+    );
+    let recording = sheet.capture(&["result"]).unwrap();
+    deliveries.borrow_mut().clear();
+
+    sheet
+        .playback(reentrant_factory(slot), "s/v1".into(), &recording)
+        .unwrap();
+
+    let deliveries = deliveries.borrow();
+    assert_eq!(deliveries.len(), 1);
+    assert!(matches!(
+        deliveries[0].0,
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::ReentrantMutation))
+    ));
+    assert_eq!(deliveries[0].1, Ok("4".into()));
+    assert_eq!(deliveries[0].2, Ok(1));
+}
+
+/// Delivers queued factory outcomes after a failed replacement releases its borrow.
+#[test]
+fn failed_replacement_factory_delivers_queued_outcomes() {
+    let slot: Slot = Rc::new(RefCell::new(None));
+    let (_dom, sheet, deliveries) = mounted_observing(factory(), slot.clone());
+    let retained = slot;
+    let failing_factory: ModelFactory = Rc::new(move || {
+        if let Some(sheet) = *retained.borrow() {
+            sheet.apply(
+                &[CellEdit {
+                    key: "x".into(),
+                    canonical: "9".into(),
+                }],
+                UpdateOrigin::User,
+            );
+        }
+        crate::build_sheet("sheet s { cell }", "invalid.adm2")
+    });
+
+    assert!(sheet.replace(failing_factory, "s/v2".into()).is_err());
+
+    let deliveries = deliveries.borrow();
+    assert_eq!(deliveries.len(), 1);
+    assert!(matches!(
+        deliveries[0].0,
+        HostOutcome::Rejected(HostRejection::Binding(BindingError::ReentrantMutation))
+    ));
+    assert_eq!(deliveries[0].1, Ok("1".into()));
+    assert_eq!(deliveries[0].2, Ok(0));
 }
 
 /// A factory can retain a handle and observe structured contention during restoration.

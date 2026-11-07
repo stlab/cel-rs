@@ -260,8 +260,9 @@ thread, a second mutation or journal access during a held mutation borrow report
 
 `inspect` borrows only a live accepted model for a read-only projection.
 `with_accepted_state` borrows history even after rejection or fatal retirement.
-Do not mutate from either borrow callback. Host outcome callbacks run after
-the transaction borrow ends, so they can explicitly restore recoverable state.
+Do not mutate from either borrow callback. Outcomes raised during a borrow wait
+until all enclosing owner borrows end, then reach the host in order. Host outcome
+callbacks can read or mutate the handle and explicitly restore recoverable state.
 
 Successful replacement, restoration, and playback retire prior installation
 bindings. Reacquire `sheet.cell(...)` during rendering rather than retaining
