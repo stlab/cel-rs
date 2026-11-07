@@ -1791,6 +1791,11 @@ impl<C: ParserContext> Parser<C> {
     /// integer indices — see the `Token::Literal(CelLiteral::Float(..))` arm below.
     /// Named members consume their optional argument list as one operation, not a call
     /// of a previously evaluated scalar result.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed selector conversion errors at the original selector token,
+    /// including a single maximally munched float token containing chained indices.
     fn is_postfix_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
         if !self.is_primary_expression()? {
@@ -1832,7 +1837,10 @@ impl<C: ParserContext> Parser<C> {
                         }
                         self.advance();
                         let index = integer.base10_parse::<usize>().map_err(|e| {
-                            self.error_at(&format!("invalid tuple index `{integer}`: {e}"))
+                            ParseError::new(
+                                format!("invalid tuple index `{integer}`: {e}"),
+                                integer.span(),
+                            )
                         })?;
                         self.apply_tuple_index(
                             index,
@@ -1860,10 +1868,16 @@ impl<C: ParserContext> Parser<C> {
                         };
                         self.advance();
                         let first_index = first.parse::<usize>().map_err(|e| {
-                            self.error_at(&format!("invalid tuple index `{first}`: {e}"))
+                            ParseError::new(
+                                format!("invalid tuple index `{first}`: {e}"),
+                                float.span(),
+                            )
                         })?;
                         let second_index = second.parse::<usize>().map_err(|e| {
-                            self.error_at(&format!("invalid tuple index `{second}`: {e}"))
+                            ParseError::new(
+                                format!("invalid tuple index `{second}`: {e}"),
+                                float.span(),
+                            )
                         })?;
                         let idx_start = start_span.expect("production has token at start");
                         self.apply_tuple_index(first_index, idx_start)?;
@@ -3169,6 +3183,29 @@ mod tests {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("(1i32, 2i32).1e2");
         assert!(result.is_err());
+    }
+
+    /// Retains malformed selector intervals even after the token has been consumed.
+    #[test]
+    fn invalid_tuple_selector_conversion_retains_its_token_span() {
+        let mut parser = CELParser::new(OpLookup::new());
+        for (source, expected) in [
+            ("(1.0f64,).184467440737095516160", 10..31),
+            ("(1.0f64,).0.1e0", 10..15),
+            ("(1.0f64,).184467440737095516160, host", 10..31),
+            ("(1.0f64,).0.1e0, host", 10..15),
+        ] {
+            let error = parser.parse_str(source).err().expect("invalid selector");
+            assert_eq!(
+                SourceSpan::from_proc_macro2_range(
+                    error.span(),
+                    error.end_span().unwrap_or(error.span())
+                )
+                .to_byte_range(source),
+                expected,
+                "{source}"
+            );
+        }
     }
 
     #[test]
