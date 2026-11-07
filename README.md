@@ -239,31 +239,16 @@ See [CLAUDE.md](CLAUDE.md) for the full command reference (build, test, lint,
 sanitizers) and repository conventions, including the requirement to work in a
 separate git worktree for any change.
 
-### begin: Spectrum Web Components bundle
+### Run begin's JavaScript tests
 
-`begin/assets/swc.js` is a single bundle (elements + Spectrum 2 theme tokens + the
-zoom-control icons) produced by esbuild from real npm packages. It's committed like
-every other vendored asset, so cloning and building `begin` needs no Node/npm setup.
-
-Node.js + npm are only needed if you're updating the Spectrum version or otherwise
-need to regenerate `begin/assets/swc.js`:
-
-```bash
-cargo xtask build-js
-```
-
-or directly:
+The `begin` Rust build doesn't require Node.js or npm. Use Node.js and npm only to
+run its JavaScript tests. From the repository root, run:
 
 ```bash
 cd begin
 npm ci
-npm run build
+npm test
 ```
-
-Commit the regenerated `begin/assets/swc.js` along with any `begin/package.json`/
-`begin/package-lock.json` changes. See
-[docs/superpowers/specs/2026-07-11-begin-spectrum2-theme-tokens-design.md](docs/superpowers/specs/2026-07-11-begin-spectrum2-theme-tokens-design.md)
-for why this needs to be one compiled bundle rather than separate vendored/live files.
 
 ### adam-lang: VS Code extension
 

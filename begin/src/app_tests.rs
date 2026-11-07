@@ -214,6 +214,7 @@ fn app_renders_all_main_adapters() {
     let mut dom = VirtualDom::new(App);
     dom.rebuild_in_place();
     let html = dioxus_ssr::render(&dom);
+    assert!(!html.contains("<sp-"), "Spectrum control markup remains");
     for expected in ["adam-theme", "Examples", "Cells", "graph-legend", "Open…"] {
         assert!(html.contains(expected), "missing {expected}");
     }

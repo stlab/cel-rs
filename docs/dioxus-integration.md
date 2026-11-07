@@ -10,13 +10,12 @@ You need Rust and your platform's Dioxus desktop prerequisites. On macOS, instal
 Apple's command-line developer tools. On Windows, install the Visual C++ build
 tools and WebView2 runtime. On Linux, install the WebKitGTK dependencies required
 by Dioxus desktop. The example uses Dioxus 0.7.10 and the library's pinned official
-Dioxus controls and `Theme`; it needs neither Node.js nor Begin's Spectrum bundle.
+Dioxus controls and `Theme`; it needs neither Node.js nor a JavaScript bundle.
 
-Plain Cargo loads the shared theme and numeric layout, but does not process
-CSS-module assets into the per-control styles produced by the Dioxus CLI.
-Controls therefore use minimal native styling in this command; the slider track
-is not styled. [Issue #281](https://github.com/stlab/cel-rs/issues/281) tracks the
-standalone asset-processing path. You can exercise the range filter through the
+The library compiles its official theme and control stylesheets with Lightning
+CSS, then installs the self-contained stylesheet through Dioxus's document API.
+Plain Cargo therefore shows the official control styles without a JavaScript
+bundle or the Dioxus asset bundler. You can exercise the range filter through the
 slider's numeric entry.
 
 1. From the repository root, launch the desktop example:

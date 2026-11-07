@@ -73,25 +73,3 @@ pub fn SheetInspector(sheet: SheetHandle) -> Element {
         }
     } }
 }
-
-/// Builds the legacy Spectrum draft reader required until the EZ migration.
-///
-/// The script sends `1|value` for focused hosts and `0|value` otherwise. It
-/// preserves localized blanks/partial drafts; it is not the bound numeric adapter.
-///
-/// - Complexity: O(field ID bytes) construction and O(draft bytes) normalization.
-///
-/// # Examples
-/// ```
-/// let script = adam_web_ui::numeric_input_script("width", false);
-/// assert!(script.contains("readNumericInput"));
-/// ```
-pub fn numeric_input_script(field_id: &str, slider: bool) -> String {
-    format!(
-        r#"{bridge}
-        const host = document.getElementById({field_id:?});
-        dioxus.send(readNumericInput(host, {slider}, document.activeElement === host));
-        "#,
-        bridge = include_str!("numeric_input.js"),
-    )
-}

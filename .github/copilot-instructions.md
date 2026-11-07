@@ -52,7 +52,7 @@ a separate git worktree and never commit directly to `main`.
 - `begin` is the desktop-first Dioxus property-model environment, with graph visualization and
   an Inspector. `editors/vscode-adam-lang` supplies `.adm2` syntax highlighting, formatting,
   and diagnostics via `adam-lsp`. `xtask` owns repository maintenance commands such as
-  `cargo xtask fetch-assets` and `cargo xtask build-js`.
+  `cargo xtask fetch-assets`.
 
 Read `docs/VISION.md` for roadmap, rationale, or cross-crate design direction. Dated feature
 designs live under `docs/superpowers/specs/`.
@@ -94,10 +94,7 @@ budget figures in user-facing messages.
 - Changes to `begin` UI require rendered verification, not only Cargo checks. Use the
   `verifying-begin-ui` skill to serve the web build and inspect a screenshot/DOM; the normal
   desktop WebView2 window is not headless-browser attachable.
-- `begin/assets/swc.js` is a committed bundle. Regenerate it only when updating Spectrum or its
-  bundle inputs with `cargo xtask build-js` (or `npm ci && npm run build` in `begin`), and commit
-  the resulting bundle with the package manifest/lockfile changes. Node is otherwise unnecessary
-  for building `begin`.
+- `begin`'s JavaScript tests use Vitest. Run `npm ci` and `npm test` from `begin/`.
 - For the VS Code extension, run its Node commands from `editors/vscode-adam-lang`; use
   `npm run compile` and `npm test` for extension changes. Build `adam-lsp` with
   `cargo build -p adam-lsp` before exercising its diagnostics.

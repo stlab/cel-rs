@@ -54,7 +54,7 @@ jobs:
         cargo install wasm-pack --locked
         cd adam-lang-book-live && wasm-pack build --target web --release
 
-    - name: Prepare live-book assets (manifest + Spectrum bundle + wasm/js output)
+    - name: Prepare live-book assets (manifest + wasm/js output)
       run: cargo run -p xtask -- prepare-live-book-assets
 
     - name: Set up Node for Adam slides

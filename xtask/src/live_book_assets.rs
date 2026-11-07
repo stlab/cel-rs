@@ -273,11 +273,12 @@ mod tests {
         root
     }
 
-    /// Verifies the manifest and runtime assets reach an independent destination.
+    /// Verifies live assets stage without a Spectrum bundle.
     #[test]
-    fn prepare_live_assets_stages_manifest_and_runtime() {
+    fn prepare_live_assets_stages_manifest_and_runtime_without_swc() {
         let root = staging_fixture();
         let destination = root.join("slides/theme");
+        assert!(!root.join("begin/assets/swc.js").exists());
         prepare_live_assets(&root, &destination).unwrap();
         let manifest: BTreeMap<String, String> = serde_json::from_str(
             &fs::read_to_string(destination.join("adam-live-examples.json")).unwrap(),
