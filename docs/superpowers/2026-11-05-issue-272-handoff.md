@@ -68,10 +68,11 @@ WKWebView evidence in Task 10; Task 11 preserves that delivery.
   WKWebView rendering. The issue remains open and is not closed here.
 - **#282:** The requirement-lifecycle fix is included, and the unfiltered
   workspace suite passes. The issue remains open and is not closed here.
-- **#283:** Tracks the Begin npm audit findings. The four affected lockfile
-  package versions match the base and are all development-only; no upgrade was
-  made. The Task 11 report records the exact audit output, base comparison,
-  dependency paths, and advisory identifiers.
+- **[#283](https://github.com/stlab/cel-rs/issues/283):** Tracks the Begin npm
+  audit findings. The four affected lockfile package versions match the base
+  and are all development-only; no upgrade was made. The Task 11 report records
+  the exact audit output, base comparison, dependency paths, and advisory
+  identifiers.
 
 Resume with the final independent branch review. Keep these issue boundaries
 explicit; do not repeat broad rendering solely to duplicate the retained Task
