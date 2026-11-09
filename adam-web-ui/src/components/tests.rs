@@ -1074,3 +1074,30 @@ async fn accessibility_and_validation_follow_controlled_state() {
     );
     assert!(html.contains("Increase Amount") && html.contains("Decrease Amount"));
 }
+
+/// Every embedded `rem` length scales with the host-settable `--adam-rem` custom property.
+///
+/// Outside the documented `var(--adam-rem, 1rem)` fallback, no ASCII digit or `.` in
+/// `CONTROL_CSS` is immediately followed by the literal `rem`, confirming `build.rs` rewrote
+/// every bare `<n>rem` literal into `calc(<n> * var(--adam-rem, 1rem))`.
+#[test]
+fn embedded_lengths_scale_with_adam_rem() {
+    const FALLBACK: &str = "var(--adam-rem, 1rem)";
+    assert!(
+        CONTROL_CSS.contains(FALLBACK),
+        "expected CONTROL_CSS to contain the documented --adam-rem fallback"
+    );
+    let scrubbed = CONTROL_CSS.replace(FALLBACK, "");
+    let bytes = scrubbed.as_bytes();
+    for (index, window) in bytes.windows(3).enumerate() {
+        if window != b"rem" || index == 0 {
+            continue;
+        }
+        let preceding = bytes[index - 1];
+        assert!(
+            !preceding.is_ascii_digit() && preceding != b'.',
+            "found a bare rem length in CONTROL_CSS near: {:?}",
+            String::from_utf8_lossy(&bytes[index.saturating_sub(10)..(index + 3).min(bytes.len())])
+        );
+    }
+}

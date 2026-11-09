@@ -5,6 +5,58 @@ use lightningcss::{
 };
 use std::{env, fmt::Write, fs, path::PathBuf};
 
+/// Rewrites every bare `<n>rem` length in `source` into `calc(<n> * var(--adam-rem, 1rem))`,
+/// letting a host scale every embedded control length by setting `--adam-rem` on or above
+/// `.adam-theme`.
+///
+/// A single forward scan copies through non-matching bytes and replaces each numeric literal
+/// (not preceded by an identifier character, since a preceding `-` or letter makes `rem` part
+/// of a longer identifier such as a custom property name) immediately followed by `rem` and a
+/// non-identifier character (so `rem` is a whole unit, not a prefix of a longer identifier).
+///
+/// - Complexity: O(b) time and space for source byte length `b`.
+fn scale_rem(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut output = String::with_capacity(source.len());
+    let mut copied_to = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let is_number_start = (byte.is_ascii_digit() || byte == b'.')
+            && !bytes
+                .get(index.wrapping_sub(1))
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
+        if is_number_start {
+            let number_start = index;
+            let mut cursor = index;
+            while bytes
+                .get(cursor)
+                .is_some_and(|b| b.is_ascii_digit() || *b == b'.')
+            {
+                cursor += 1;
+            }
+            let number_end = cursor;
+            let unit_end = cursor + 3;
+            let followed_by_rem = bytes.get(cursor..unit_end) == Some(b"rem");
+            let unit_is_whole_word = followed_by_rem
+                && !bytes
+                    .get(unit_end)
+                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
+            if unit_is_whole_word {
+                output.push_str(&source[copied_to..number_start]);
+                let literal = &source[number_start..number_end];
+                write!(output, "calc({literal} * var(--adam-rem, 1rem))").unwrap();
+                index = unit_end;
+                copied_to = unit_end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    output.push_str(&source[copied_to..]);
+    output
+}
+
 /// Transforms each official module and writes its class exports and combined stylesheet.
 ///
 /// - Complexity: O(b + k log k) time and O(b + k) storage for stylesheet/output
@@ -29,6 +81,7 @@ fn main() {
         };
         println!("cargo:rerun-if-changed={}", path.display());
         let source = fs::read_to_string(&path).expect("official stylesheet is readable");
+        let source = scale_rem(&source);
         let pattern = format!("adam_{name}_[local]");
         let sheet = StyleSheet::parse(
             &source,

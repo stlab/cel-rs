@@ -31,3 +31,11 @@ The installer deduplicates one immutable style element per document, independent
 of Dioxus root lifetimes and publication paths. Every standalone styled control
 also installs it; consumers do not need a Dioxus asset bundler.
 Numeric editor and slider composition are local code, not upstream components.
+
+`build.rs` additionally rewrites every embedded `<n>rem` length into
+`calc(<n> * var(--adam-rem, 1rem))` before parsing each module (`scale_rem`),
+so a host scales every control together by setting the `--adam-rem` custom
+property on `.adam-theme` or an ancestor; the `1rem` fallback applies when no
+host sets it. The theme stylesheet documents this near `.adam-theme` and does
+not declare `--adam-rem` itself, since `scale_rem` would otherwise rewrite
+that declaration's own `rem` value into a self-referential `calc()`.

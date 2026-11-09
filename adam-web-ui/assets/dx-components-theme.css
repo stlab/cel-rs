@@ -69,6 +69,13 @@
   --secondary-info-color: var(--dark, var(--primary-color-7)) var(--light, var(--secondary-color-3));
 }
 
+/* build.rs rewrites every embedded `<n>rem` length into `calc(<n> * var(--adam-rem, 1rem))`,
+ * so a host scales all controls together by setting `--adam-rem` on `.adam-theme` or an
+ * ancestor; the `1rem` fallback applies when no host sets it. This stylesheet must NOT
+ * declare `--adam-rem` itself: a declaration written in `rem` (e.g. `--adam-rem: 1rem;`)
+ * would be rewritten the same way, making `--adam-rem` reference itself through its own
+ * fallback and resolve to its invalid, cycle-broken initial value.
+ */
 .adam-theme {
   color: var(--secondary-color);
   background: var(--primary-color);
