@@ -16,6 +16,9 @@ pub mod graph;
 pub mod input;
 mod inspector;
 pub mod labels;
+#[cfg(test)]
+#[path = "../build/scale_rem.rs"]
+mod scale_rem;
 
 pub use build::{
     BuildError, BuiltSheet, RuntimeFailure, ValidationIssue, build_sheet, initialize_sheet,
