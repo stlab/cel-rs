@@ -116,44 +116,233 @@ fn slider_decisions_preserve_primitive_domains_and_aspirations() {
 fn step_decisions_respect_model_state_and_session_lifetime() {
     let mut state = state();
     assert_eq!(
-        step_effect(&state, NumberKind::Signed(32), "2", true, false, false),
+        step_effect(
+            &state,
+            NumberKind::Signed(32),
+            "2",
+            true,
+            false,
+            false,
+            None
+        ),
         UiEffect::Submit(Some("12".into()))
     );
     assert_eq!(
-        step_effect(&state, NumberKind::Signed(32), "2", false, false, false),
+        step_effect(
+            &state,
+            NumberKind::Signed(32),
+            "2",
+            false,
+            false,
+            false,
+            None
+        ),
         UiEffect::Submit(Some("8".into()))
     );
     assert_eq!(
-        step_effect(&state, NumberKind::Signed(32), "2", true, true, false),
+        step_effect(&state, NumberKind::Signed(32), "2", true, true, false, None),
         UiEffect::None
     );
     assert_eq!(
-        step_effect(&state, NumberKind::Signed(32), "2", true, false, true),
+        step_effect(&state, NumberKind::Signed(32), "2", true, false, true, None),
         UiEffect::None
     );
     state.event(DraftEvent::CompositionStart, NumberKind::Signed(32), false);
     assert_eq!(
-        step_effect(&state, NumberKind::Signed(32), "2", true, false, false),
+        step_effect(
+            &state,
+            NumberKind::Signed(32),
+            "2",
+            true,
+            false,
+            false,
+            None
+        ),
         UiEffect::None
     );
     let generation = state.generation;
     state.lose_locale();
     assert!(state.generation > generation);
     assert_eq!(
-        step_effect(&state, NumberKind::Signed(32), "2", true, false, false),
+        step_effect(
+            &state,
+            NumberKind::Signed(32),
+            "2",
+            true,
+            false,
+            false,
+            None
+        ),
         UiEffect::None
     );
     state.locale = Some(locale());
     state.sync("20", false, false, NumberKind::Signed(32));
     assert_eq!(
-        step_effect(&state, NumberKind::Signed(32), "2", true, false, false),
+        step_effect(
+            &state,
+            NumberKind::Signed(32),
+            "2",
+            true,
+            false,
+            false,
+            None
+        ),
         UiEffect::Submit(Some("22".into()))
     );
     state.retire();
     assert_eq!(
-        step_effect(&state, NumberKind::Signed(32), "2", true, false, false),
+        step_effect(
+            &state,
+            NumberKind::Signed(32),
+            "2",
+            true,
+            false,
+            false,
+            None
+        ),
         UiEffect::None
     );
+}
+
+/// Nudge bounds use inclusive endpoints and exact primitive comparisons.
+#[test]
+fn nudges_respect_exact_live_bounds() {
+    let range = NumericRange {
+        min: "-3.6".into(),
+        max: "3.6".into(),
+    };
+    assert_eq!(
+        bounded_step("3.45", NumberKind::F64, "1", true, Some(&range)),
+        Ok(None)
+    );
+    assert_eq!(
+        bounded_step("3.45", NumberKind::F64, "1", false, Some(&range)),
+        Ok(Some("3".into()))
+    );
+    assert_eq!(
+        bounded_step("-3.45", NumberKind::F64, "1", false, Some(&range)),
+        Ok(None)
+    );
+    assert_eq!(
+        bounded_step("-3.45", NumberKind::F64, "1", true, Some(&range)),
+        Ok(Some("-3".into()))
+    );
+    assert_eq!(
+        bounded_step("3.45", NumberKind::F64, "1", true, None),
+        Ok(Some("4".into()))
+    );
+
+    let signed = NumericRange {
+        min: "-170141183460469231731687303715884105728".into(),
+        max: "170141183460469231731687303715884105725".into(),
+    };
+    assert_eq!(
+        bounded_step(
+            "170141183460469231731687303715884105724",
+            NumberKind::Signed(128),
+            "1",
+            true,
+            Some(&signed)
+        ),
+        Ok(Some(signed.max.clone()))
+    );
+    assert_eq!(
+        bounded_step(
+            &signed.max,
+            NumberKind::Signed(128),
+            "1",
+            true,
+            Some(&signed)
+        ),
+        Ok(None)
+    );
+    let unsigned = NumericRange {
+        min: "0".into(),
+        max: "340282366920938463463374607431768211453".into(),
+    };
+    assert_eq!(
+        bounded_step(
+            &unsigned.max,
+            NumberKind::Unsigned(128),
+            "1",
+            true,
+            Some(&unsigned)
+        ),
+        Ok(None)
+    );
+    assert_eq!(
+        bounded_step(
+            &unsigned.max,
+            NumberKind::Unsigned(128),
+            "1",
+            false,
+            Some(&unsigned)
+        ),
+        Ok(Some("340282366920938463463374607431768211452".into()))
+    );
+    for kind in [
+        NumberKind::Signed(128),
+        NumberKind::Unsigned(128),
+        NumberKind::F64,
+    ] {
+        let limits = kind.range().unwrap();
+        assert_eq!(
+            bounded_step(&limits.max, kind, "1", true, Some(&limits)),
+            Ok(None)
+        );
+        assert_eq!(
+            bounded_step(&limits.min, kind, "1", false, Some(&limits)),
+            Ok(None)
+        );
+        assert!(bounded_step(&limits.max, kind, "0", true, Some(&limits)).is_err());
+    }
+    let mut state = state();
+    let live_range = NumericRange {
+        min: "0".into(),
+        max: "11".into(),
+    };
+    assert_eq!(
+        step_effect(
+            &state,
+            NumberKind::Signed(32),
+            "2",
+            true,
+            false,
+            false,
+            Some(&live_range)
+        ),
+        UiEffect::None
+    );
+    state.sync("9", false, false, NumberKind::Signed(32));
+    assert_eq!(
+        step_effect(
+            &state,
+            NumberKind::Signed(32),
+            "2",
+            true,
+            false,
+            false,
+            Some(&live_range)
+        ),
+        UiEffect::Submit(Some("10".into()))
+    );
+    for range in [
+        NumericRange {
+            min: "bad".into(),
+            max: "5".into(),
+        },
+        NumericRange {
+            min: "0".into(),
+            max: "NaN".into(),
+        },
+        NumericRange {
+            min: "6".into(),
+            max: "5".into(),
+        },
+    ] {
+        assert!(bounded_step("1", NumberKind::F64, "1", true, Some(&range)).is_err());
+    }
+    assert!(bounded_step("1", NumberKind::F64, "0", true, None).is_err());
 }
 
 /// Finite endpoints whose span overflows cannot produce a representable official slider.

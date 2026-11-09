@@ -167,6 +167,75 @@ fn localized_normalization_and_prefixes() {
     ));
 }
 
+/// Nudges to the strictly next or previous zero-anchored step.
+#[test]
+fn steps_to_next_zero_anchored_multiple() {
+    for (value, step, increment, expected) in [
+        ("3.45", "1", true, 4.0),
+        ("3.45", "1", false, 3.0),
+        ("3", "1", true, 4.0),
+        ("3", "1", false, 2.0),
+        ("-3.45", "1", true, -3.0),
+        ("-3.45", "1", false, -4.0),
+        ("0.3", "0.1", true, 0.4),
+        ("0.3", "0.1", false, 0.2),
+        ("0.33", "0.25", true, 0.5),
+        ("0.33", "0.25", false, 0.25),
+        ("0", "0.1", false, -0.1),
+    ] {
+        let actual = step_number(value, NumberKind::F64, step, increment).unwrap();
+        assert_eq!(
+            actual.parse::<f64>().unwrap(),
+            expected,
+            "{value} {step} {increment}"
+        );
+    }
+
+    for (value, increment, expected) in [
+        ("-7", true, "-6"),
+        ("-7", false, "-9"),
+        ("6", true, "9"),
+        ("6", false, "3"),
+    ] {
+        assert_eq!(
+            step_number(value, NumberKind::Signed(128), "3", increment).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        step_number(
+            "18446744073709551615",
+            NumberKind::Unsigned(128),
+            "10",
+            true
+        )
+        .unwrap(),
+        "18446744073709551620"
+    );
+    assert_eq!(
+        step_number("0.3", NumberKind::F32, "0.1", true)
+            .unwrap()
+            .parse::<f32>()
+            .unwrap(),
+        0.4
+    );
+    assert_eq!(
+        step_number("5e-324", NumberKind::F64, "5e-324", true)
+            .unwrap()
+            .parse::<f64>()
+            .unwrap(),
+        1e-323
+    );
+    assert!(matches!(
+        step_number("1e308", NumberKind::F64, "1", true),
+        Err(InputError::TypeRange { .. })
+    ));
+    assert!(matches!(
+        step_number("255", NumberKind::Unsigned(8), "10", true),
+        Err(InputError::TypeRange { .. })
+    ));
+}
+
 /// Catches typed overflow and imprecise wide-integer conversion or stepping.
 #[test]
 fn exact_ranges_and_checked_steps() {

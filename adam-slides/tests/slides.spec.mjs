@@ -278,6 +278,81 @@ test("dragging a bound slider updates the sheet without freezing", async ({ page
   await expect.poll(async () => Number(await a.inputValue()) === 2 * Number(await b.inputValue())).toBe(true);
 });
 
+/** Catches detached nudge controls and stepping that depends on displayed precision. */
+test("number field integrates nudges and steps to zero-anchored values", async ({ page }) => {
+  await page.goto(host("basic_relationship", true));
+  const input = page.getByRole("textbox", { name: "a", exact: true });
+  const up = page.getByRole("button", { name: "Increase a", exact: true });
+  const down = page.getByRole("button", { name: "Decrease a", exact: true });
+  await expect(up).toBeVisible();
+  await expect(down).toBeVisible();
+  const field = await input.boundingBox();
+  const upBox = await up.boundingBox();
+  const downBox = await down.boundingBox();
+  expect(Math.abs(field.x + field.width - upBox.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(upBox.x - downBox.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(upBox.y + upBox.height - downBox.y)).toBeLessThanOrEqual(1);
+
+  await input.fill("3.45");
+  await input.press("Tab");
+  await up.click();
+  await expect(input).toHaveValue("4");
+  await expect(page.getByRole("textbox", { name: "b", exact: true })).toHaveValue("2");
+  await input.fill("3.45");
+  await input.press("ArrowDown");
+  await expect(input).toHaveValue("3");
+  await down.click();
+  await expect(input).toHaveValue("2");
+});
+
+/** Verifies that an unfocused numeric frame paints above the input background. */
+test("number field keeps its frame when unfocused", async ({ page }) => {
+  await page.goto(host("basic_relationship", true));
+  const input = page.getByRole("textbox", { name: "a", exact: true });
+  await expect(input).toHaveValue("4");
+  await page.mouse.move(0, 0);
+  const controls = input.locator("xpath=..");
+  const png = await controls.screenshot({ scale: "css" });
+  const pixels = await page.evaluate(async (data) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${data}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    const middle = Math.floor(image.height / 2);
+    return [0, 4].map((x) => [...context.getImageData(x, middle, 1, 1).data]);
+  }, png.toString("base64"));
+  expect(pixels[0]).not.toEqual(pixels[1]);
+});
+
+/** Catches nudge controls that permit stepping past either live bound. */
+test("number field disables out-of-range nudges", async ({ page }) => {
+  await page.goto(host("basic_relationship", true));
+  const input = page.getByRole("textbox", { name: "a", exact: true });
+  const up = page.getByRole("button", { name: "Increase a", exact: true });
+  const down = page.getByRole("button", { name: "Decrease a", exact: true });
+  await input.fill("0");
+  await input.press("Tab");
+  await expect(down).toBeDisabled();
+  await expect(up).toBeEnabled();
+  await expect(down).toHaveCSS("opacity", "0.5");
+  await expect(up).toHaveCSS("opacity", "1");
+  await input.press("ArrowDown");
+  await expect(input).toHaveValue("0");
+  await input.fill("200");
+  await input.press("Tab");
+  await expect(up).toBeDisabled();
+  await expect(down).toBeEnabled();
+  await input.press("ArrowUp");
+  await expect(input).toHaveValue("200");
+  await down.click();
+  await expect(input).toHaveValue("199");
+  await expect(up).toBeEnabled();
+});
+
 /** Catches broken write/propagate bridging and uneditable computed outputs. */
 test("live output follows an input edit", async ({ page }) => {
   await page.goto("./");

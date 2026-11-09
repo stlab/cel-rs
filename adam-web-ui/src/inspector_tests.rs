@@ -277,7 +277,7 @@ fn independent_roots_isolate_controls_and_outcomes() {
     );
 }
 
-/// Numeric adapters submit exact aspirations once and never write on synchronization.
+/// Numeric adapters preserve exact values, typed validation, and bounded nudges.
 #[tokio::test]
 async fn bound_numeric_and_slider_keep_exact_types_and_host_filtering() {
     use crate::components::tests::{NodeDocument, arrow_up, input, settle};
@@ -325,9 +325,13 @@ async fn bound_numeric_and_slider_keep_exact_types_and_host_filtering() {
     settle(&mut dom).await;
     assert_eq!(
         sheet.with_accepted_state(|s| s.transactions.len()).unwrap(),
-        3
+        2
     );
-    assert_eq!(observed.borrow().outcomes.len(), 3);
+    assert_eq!(observed.borrow().outcomes.len(), 2);
+    assert_eq!(
+        sheet.cell("ranged").view().unwrap().text,
+        "9007199254740994"
+    );
 }
 
 /// Concise bindings use their stable cell names as accessible labels.

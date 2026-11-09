@@ -3,6 +3,8 @@
 //! Pass a resolved [`NumberLocale`] to [`normalize_draft`], then submit only
 //! [`NormalizedDraft::Complete`] values.
 use crate::input::{InputError, NumberKind};
+use num_bigint::BigInt;
+use num_integer::Integer;
 
 /// Builds an eval script that sends a resolved locale or explicit locale failure.
 ///
@@ -254,15 +256,17 @@ pub fn normalize_draft(
     Ok(NormalizedDraft::Complete(ascii))
 }
 
-/// Steps canonical text with checked arithmetic, without clamping aspirations.
+/// Steps canonical text to the next zero-anchored multiple without clamping.
 ///
-/// A step must be positive and representable by the bound primitive.
+/// A step must be positive and representable by the bound primitive. An aligned
+/// value advances by one step. Floating-point inputs use their shortest decimal
+/// representations, independently of localized display formatting.
 ///
 /// - Complexity: O(current bytes + step bytes) time and space.
 ///
 /// # Errors
 /// Returns `Lexical` for malformed canonical text or nonpositive steps,
-/// `TypeRange` for nonfinite values, overflow, or nonzero values rounded to zero,
+/// `TypeRange` for nonfinite values, overflow, or an unrepresentable transition,
 /// and `UnsupportedEditor` for unknown widths.
 ///
 /// # Examples
@@ -278,10 +282,7 @@ pub fn step_number(
 ) -> Result<String, InputError> {
     kind.validate()?;
     for text in [current, step] {
-        if !complete_syntax(text, kind)? {
-            return Err(lexical(text));
-        }
-        validate_number(text, kind)?;
+        validate_canonical_number(text, kind)?;
     }
     let result = match kind {
         NumberKind::Signed(_) => {
@@ -292,10 +293,11 @@ pub fn step_number(
             if step <= 0 {
                 return Err(lexical("step must be positive"));
             }
+            let remainder = value.rem_euclid(step);
             if increment {
-                value.checked_add(step)
+                value.checked_add(step - remainder)
             } else {
-                value.checked_sub(step)
+                value.checked_sub(if remainder == 0 { step } else { remainder })
             }
             .ok_or_else(|| range_error(current, kind))?
             .to_string()
@@ -308,10 +310,11 @@ pub fn step_number(
             if step == 0 {
                 return Err(lexical("step must be positive"));
             }
+            let remainder = value % step;
             if increment {
-                value.checked_add(step)
+                value.checked_add(step - remainder)
             } else {
-                value.checked_sub(step)
+                value.checked_sub(if remainder == 0 { step } else { remainder })
             }
             .ok_or_else(|| range_error(current, kind))?
             .to_string()
@@ -324,12 +327,13 @@ pub fn step_number(
             if step <= 0.0 {
                 return Err(lexical("step must be positive"));
             }
-            let result = if increment {
-                value + step
-            } else {
-                value - step
-            };
-            if !result.is_finite() {
+            let result = decimal_step(&value.to_string(), &step.to_string(), increment)
+                .parse::<f32>()
+                .map_err(|_| range_error(current, kind))?;
+            if !result.is_finite()
+                || (increment && result <= value)
+                || (!increment && result >= value)
+            {
                 return Err(range_error(current, kind));
             }
             result.to_string()
@@ -342,12 +346,13 @@ pub fn step_number(
             if step <= 0.0 {
                 return Err(lexical("step must be positive"));
             }
-            let result = if increment {
-                value + step
-            } else {
-                value - step
-            };
-            if !result.is_finite() {
+            let result = decimal_step(&value.to_string(), &step.to_string(), increment)
+                .parse::<f64>()
+                .map_err(|_| range_error(current, kind))?;
+            if !result.is_finite()
+                || (increment && result <= value)
+                || (!increment && result >= value)
+            {
                 return Err(range_error(current, kind));
             }
             result.to_string()
@@ -355,6 +360,53 @@ pub fn step_number(
     };
     validate_number(&result, kind)?;
     Ok(result)
+}
+
+/// Validates canonical numeric text against its concrete primitive.
+///
+/// - Complexity: O(text bytes) time and O(1) additional space.
+///
+/// # Errors
+/// Returns lexical, concrete-range, or unsupported-kind errors.
+pub(crate) fn validate_canonical_number(text: &str, kind: NumberKind) -> Result<(), InputError> {
+    kind.validate()?;
+    if !complete_syntax(text, kind)? {
+        return Err(lexical(text));
+    }
+    validate_number(text, kind)
+}
+
+/// Computes the next decimal multiple using normalized finite float strings.
+///
+/// - Precondition: `current` and positive `step` are finite float display strings.
+/// - Complexity: Arbitrary-precision division in the number of decimal digits.
+fn decimal_step(current: &str, step: &str, increment: bool) -> String {
+    /// Returns the integer coefficient and scale of a finite float display string.
+    fn coefficient(text: &str) -> (BigInt, u32) {
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+        let digits = format!("{whole}{fraction}");
+        let scale = u32::try_from(fraction.len()).expect("finite float scale fits u32");
+        (
+            digits.parse().expect("finite float has decimal digits"),
+            scale,
+        )
+    }
+
+    let (value, value_scale) = coefficient(current);
+    let (step, step_scale) = coefficient(step);
+    let scale = value_scale.max(step_scale);
+    let ten = BigInt::from(10);
+    let value = value * ten.pow(scale - value_scale);
+    let step = step * ten.pow(scale - step_scale);
+    let (quotient, remainder) = value.div_mod_floor(&step);
+    let next = if increment {
+        quotient + 1
+    } else if remainder == BigInt::from(0) {
+        quotient - 1
+    } else {
+        quotient
+    };
+    format!("{}e-{scale}", next * step)
 }
 
 /// Returns fixed-size token mappings; an empty grouping token is unused.

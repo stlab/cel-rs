@@ -3,7 +3,13 @@
 //! Pass canonical strings and handle aspirations in `on_value`; the host's
 //! validation remains authoritative. Wrap controls in [`super::Theme`].
 use super::numeric_events::{SourceChannel, SourceFrame};
-use super::{button::Button, input::Input, label::Label, number::*, slider::Slider};
+use super::{
+    button::{Button, ButtonVariant},
+    input::Input,
+    label::Label,
+    number::*,
+    slider::Slider,
+};
 use crate::input::{InputError, NumberKind, NumericRange};
 use dioxus::prelude::*;
 use std::{
@@ -30,7 +36,7 @@ fn next_generation() -> u64 {
 
 /// Supplies controlled canonical values and model-independent numeric callbacks.
 ///
-/// `range` guides the slider only; the host validates submitted aspirations.
+/// `range` guides the slider and limits nudges; the host validates typed aspirations.
 /// Required blanks remain local; optional blanks submit `None`. Locale and
 /// transport failures reach `on_error`. Programmatic updates never call `on_value`.
 ///
@@ -60,7 +66,7 @@ pub struct NumericEditorProps {
     pub value: ReadSignal<Option<String>>,
     /// Preserves the concrete primitive width.
     pub kind: NumberKind,
-    /// Supplies exact slider bounds without clamping typed aspirations.
+    /// Supplies inclusive slider and nudge bounds without clamping typed aspirations.
     pub range: ReadSignal<Option<NumericRange>>,
     /// Supplies a positive canonical step.
     pub step: String,
@@ -531,15 +537,28 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
     });
     let step_state = state.clone();
     let step = props.step.clone();
+    let range = props.range;
     let stepping = use_callback(move |increase: bool| {
+        if !*ready.peek() || *source_failed.peek() {
+            return;
+        }
+        let mut state = step_state.borrow_mut();
+        state.sync(
+            value.peek().as_deref().unwrap_or_default(),
+            *disabled.peek(),
+            *readonly.peek(),
+            kind,
+        );
         let effect = step_effect(
-            &step_state.borrow(),
+            &state,
             kind,
             &step,
             increase,
             *disabled.peek(),
             *readonly.peek(),
+            range.peek().as_ref(),
         );
+        drop(state);
         deliver(effect, error, on_value, on_error);
     });
     let receiving = source.clone();
@@ -633,6 +652,18 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
     let error_text = error.read().as_ref().map(error_message);
     let invalid = (props.invalid)() || error_text.is_some();
     let blocked = (props.disabled)() || (props.readonly)() || !ready() || source_failed();
+    let current = props.value.read();
+    let range = props.range.read();
+    let at_bound = |increase| {
+        current.as_deref().is_some_and(|current| {
+            matches!(
+                bounded_step(current, kind, &props.step, increase, range.as_ref()),
+                Ok(None)
+            )
+        })
+    };
+    let up_blocked = blocked || at_bound(true);
+    let down_blocked = blocked || at_bound(false);
     rsx! {
         div { class: "adam-numeric-editor",
             Label { html_for: props.id.clone(), "{props.label}" }
@@ -645,19 +676,21 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
                     "aria-invalid": "{invalid}",
                     "aria-describedby": "{props.id}-help {props.id}-error",
                 }
-                Button {
-                    r#type: "button", disabled: blocked,
-                    "aria-label": "Decrease {props.label}", onclick: move |_| stepping.call(false),
-                    "−"
-                }
-                Button {
-                    r#type: "button", disabled: blocked,
-                    "aria-label": "Increase {props.label}", onclick: move |_| stepping.call(true),
-                    "+"
+                div { class: "adam-numeric-stepper",
+                    Button {
+                        r#type: "button", variant: ButtonVariant::Ghost, disabled: up_blocked,
+                        "aria-label": "Increase {props.label}", onclick: move |_| stepping.call(true),
+                        "+"
+                    }
+                    Button {
+                        r#type: "button", variant: ButtonVariant::Ghost, disabled: down_blocked,
+                        "aria-label": "Decrease {props.label}", onclick: move |_| stepping.call(false),
+                        "−"
+                    }
                 }
             }
             small { id: "{props.id}-help",
-                "Enter a number. Arrow Up and Arrow Down change it by {props.step}."
+                "Enter a number. Arrow Up and Arrow Down move to the next multiple of {props.step}."
             }
             small { id: "{props.id}-error", role: "status",
                 if let Some(message) = error_text { "{message}" }
@@ -669,8 +702,8 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
 
 /// Computes checked stepping without submitting nonfinite or blocked values.
 ///
-/// Model filters, not this function, decide whether to accept the aspiration.
-/// - Complexity: O(value + step bytes) time and space.
+/// The inclusive range blocks nudges, while model filters validate submissions.
+/// - Complexity: O(value + step + range bytes) time and space.
 fn step_effect(
     state: &EditorState,
     kind: NumberKind,
@@ -678,6 +711,7 @@ fn step_effect(
     increase: bool,
     disabled: bool,
     readonly: bool,
+    range: Option<&NumericRange>,
 ) -> UiEffect {
     if state.retired || disabled || readonly || state.composing {
         return UiEffect::None;
@@ -685,9 +719,73 @@ fn step_effect(
     if state.locale.is_none() {
         return UiEffect::None;
     }
-    match step_number(state.draft.canonical(), kind, step, increase) {
-        Ok(value) => UiEffect::Submit(Some(value)),
+    match bounded_step(state.draft.canonical(), kind, step, increase, range) {
+        Ok(Some(value)) => UiEffect::Submit(Some(value)),
+        Ok(None) => UiEffect::None,
         Err(failure) => UiEffect::Report(failure),
+    }
+}
+
+/// Computes the next step if it lies within the inclusive range.
+///
+/// - Complexity: O(value + step + range bytes) time and space.
+///
+/// # Errors
+/// Returns numeric input errors for invalid steps, transitions, or bounds.
+fn bounded_step(
+    current: &str,
+    kind: NumberKind,
+    step: &str,
+    increase: bool,
+    range: Option<&NumericRange>,
+) -> Result<Option<String>, InputError> {
+    let Some(range) = range else {
+        return step_number(current, kind, step, increase).map(Some);
+    };
+    validate_canonical_number(&range.min, kind)?;
+    validate_canonical_number(&range.max, kind)?;
+    let stepped = step_number(current, kind, step, increase);
+    if matches!(stepped, Err(InputError::TypeRange { .. })) {
+        validate_canonical_number(current, kind)?;
+        step_number("0", kind, step, true)?;
+    }
+    let text = stepped.as_deref().unwrap_or(current);
+    macro_rules! compare {
+        ($ty:ty) => {{
+            let parse = |text: &str| -> Result<$ty, InputError> {
+                text.parse::<$ty>().map_err(|_| InputError::TypeRange {
+                    kind,
+                    value: text.into(),
+                })
+            };
+            let min = parse(&range.min)?;
+            let max = parse(&range.max)?;
+            if min > max {
+                return Err(InputError::Lexical(
+                    "numeric range minimum exceeds maximum".into(),
+                ));
+            }
+            let value = parse(text)?;
+            (
+                value >= min && value <= max,
+                if increase { value >= max } else { value <= min },
+            )
+        }};
+    }
+    let (inside, at_limit) = match kind {
+        NumberKind::Signed(_) => compare!(i128),
+        NumberKind::Unsigned(_) => compare!(u128),
+        NumberKind::F32 => compare!(f32),
+        NumberKind::F64 => compare!(f64),
+    };
+    match stepped {
+        Ok(candidate) => Ok(inside.then_some(candidate)),
+        Err(InputError::TypeRange { .. })
+            if matches!(kind, NumberKind::Signed(_) | NumberKind::Unsigned(_)) || at_limit =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
     }
 }
 

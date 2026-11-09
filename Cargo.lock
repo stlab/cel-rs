@@ -108,6 +108,8 @@ dependencies = [
  "indexmap",
  "keyboard-types",
  "lightningcss",
+ "num-bigint",
+ "num-integer",
  "serde",
  "serde_json",
  "slotmap",
