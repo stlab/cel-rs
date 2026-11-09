@@ -26,6 +26,7 @@ fn main() {
         "slider",
         "label",
         "separator",
+        "card",
     ] {
         let path = if name == "theme" {
             PathBuf::from("assets/dx-components-theme.css")

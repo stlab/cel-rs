@@ -1101,3 +1101,23 @@ fn embedded_lengths_scale_with_adam_rem() {
         );
     }
 }
+
+/// `Card` and `CardContent` render the upstream `data-slot` attributes, the scoped class
+/// exported for the official `.dx-card` selector, and caller-supplied inline style untouched.
+#[test]
+fn card_renders_upstream_slots() {
+    fn app() -> Element {
+        rsx! {
+            Card { style: "max-width: 24rem",
+                CardContent { "x" }
+            }
+        }
+    }
+    let mut dom = VirtualDom::new(app);
+    dom.rebuild_to_vec();
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("data-slot=\"card\""), "{html}");
+    assert!(html.contains("data-slot=\"card-content\""), "{html}");
+    assert!(html.contains("adam_card_dx-card"), "{html}");
+    assert!(html.contains("style=\"max-width: 24rem\""), "{html}");
+}

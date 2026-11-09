@@ -5,6 +5,7 @@
 //! `Document` context. Missing context reports a delivery failure on the platform
 //! diagnostic channel; the library does not assume an alternate stylesheet.
 pub mod button;
+pub mod card;
 pub mod checkbox;
 pub mod input;
 pub mod label;
@@ -18,6 +19,7 @@ pub mod switch;
 mod theme;
 
 pub use button::{Button, ButtonProps, ButtonSize, ButtonVariant};
+pub use card::{Card, CardAction, CardContent, CardDescription, CardFooter, CardHeader, CardTitle};
 pub use checkbox::Checkbox;
 /// Provides the checked state accepted by [`Checkbox`].
 ///
