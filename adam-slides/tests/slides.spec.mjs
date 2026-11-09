@@ -247,6 +247,37 @@ async function graphDirection(frame, name) {
   }, name);
 }
 
+/** Catches reactive feedback during real pointer interaction with a bound slider. */
+test("dragging a bound slider updates the sheet without freezing", async ({ page }) => {
+  await page.goto(host("basic_relationship", true));
+  const slider = page.getByRole("slider", { name: "a", exact: true });
+  await expect(slider).toHaveAttribute("aria-valuenow", "4");
+  const box = await slider.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 40, box.y + box.height / 2, { steps: 4 });
+  await page.mouse.up();
+  const a = page.getByRole("textbox", { name: "a", exact: true });
+  const b = page.getByRole("textbox", { name: "b", exact: true });
+  await expect(a).not.toHaveValue("4");
+  await expect.poll(async () => Number(await a.inputValue()) === 2 * Number(await b.inputValue())).toBe(true);
+  const dragged = await a.inputValue();
+  await expect(slider).toHaveAttribute("aria-valuenow", dragged);
+  await expect(page.locator("#graph svg").getByText(dragged, { exact: true })).toBeVisible();
+  await expect.poll(() => graphDirection(page, "a")).toBe("source");
+
+  await slider.press("ArrowRight");
+  await expect(a).toHaveValue(String(Number(dragged) + 1));
+  await expect.poll(async () => Number(await a.inputValue()) === 2 * Number(await b.inputValue())).toBe(true);
+
+  const track = slider.locator("xpath=..");
+  const trackBox = await track.boundingBox();
+  await page.mouse.click(trackBox.x + trackBox.width * 0.75, trackBox.y + trackBox.height / 2);
+  await expect(a).not.toHaveValue(String(Number(dragged) + 1));
+  await expect(slider).toHaveAttribute("aria-valuenow", await a.inputValue());
+  await expect.poll(async () => Number(await a.inputValue()) === 2 * Number(await b.inputValue())).toBe(true);
+});
+
 /** Catches broken write/propagate bridging and uneditable computed outputs. */
 test("live output follows an input edit", async ({ page }) => {
   await page.goto("./");

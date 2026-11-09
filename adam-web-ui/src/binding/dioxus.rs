@@ -623,7 +623,8 @@ impl CellBinding {
     /// # Examples
     /// See [`use_sheet`]; `sheet.cell("x").submit("2".into())` submits an aspiration.
     pub fn submit(&self, canonical: String) {
-        if self.instance != self.sheet.instance() {
+        // A reactive caller must not subscribe to the revision this edit publishes.
+        if self.instance != self.sheet.state().instance.get() {
             self.report(HostRejection::Binding(BindingError::RetiredInstance));
             return;
         }
@@ -638,7 +639,7 @@ impl CellBinding {
 
     /// Reports widget input/configuration failures without mutating the model.
     pub(super) fn report(&self, rejection: HostRejection) {
-        let rejection = if self.instance == self.sheet.instance() {
+        let rejection = if self.instance == self.sheet.state().instance.get() {
             rejection
         } else {
             HostRejection::Binding(BindingError::RetiredInstance)
