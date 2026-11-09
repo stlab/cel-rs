@@ -5,14 +5,27 @@ use lightningcss::{
 };
 use std::{env, fmt::Write, fs, path::PathBuf};
 
+/// Returns whether `byte` can continue a CSS identifier (a letter, digit, `_`, or `-`),
+/// distinguishing identifier continuation from a leading numeric sign.
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
 /// Rewrites every bare `<n>rem` length in `source` into `calc(<n> * var(--adam-rem, 1rem))`,
 /// letting a host scale every embedded control length by setting `--adam-rem` on or above
 /// `.adam-theme`.
 ///
 /// A single forward scan copies through non-matching bytes and replaces each numeric literal
-/// (not preceded by an identifier character, since a preceding `-` or letter makes `rem` part
-/// of a longer identifier such as a custom property name) immediately followed by `rem` and a
-/// non-identifier character (so `rem` is a whole unit, not a prefix of a longer identifier).
+/// immediately followed by `rem` and a non-identifier character (so `rem` is a whole unit, not
+/// a prefix of a longer identifier). A digit or `.` does not start a literal when it continues
+/// an identifier (preceded by a letter, digit, `_`, or `-`); a leading `-` or `+` sign is part
+/// of the literal only when that sign itself is not continuing an identifier (i.e. the
+/// character before the sign is absent or not an identifier character), so `--adam-rem: 1rem`
+/// is left alone but a bare length like `-0.5rem` becomes
+/// `calc(-0.5 * var(--adam-rem, 1rem))`. The scan does not special-case existing `calc(...)`
+/// wrappers, so a length already inside one (e.g. `calc(1.15rem - 2px)`) nests into
+/// `calc(calc(1.15 * var(--adam-rem, 1rem)) - 2px)`; Lightning CSS accepts and minifies nested
+/// `calc()`, so this remains valid CSS.
 ///
 /// - Complexity: O(b) time and space for source byte length `b`.
 fn scale_rem(source: &str) -> String {
@@ -22,33 +35,40 @@ fn scale_rem(source: &str) -> String {
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        let is_number_start = (byte.is_ascii_digit() || byte == b'.')
-            && !bytes
-                .get(index.wrapping_sub(1))
-                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
-        if is_number_start {
-            let number_start = index;
-            let mut cursor = index;
-            while bytes
-                .get(cursor)
-                .is_some_and(|b| b.is_ascii_digit() || *b == b'.')
-            {
-                cursor += 1;
-            }
-            let number_end = cursor;
-            let unit_end = cursor + 3;
-            let followed_by_rem = bytes.get(cursor..unit_end) == Some(b"rem");
-            let unit_is_whole_word = followed_by_rem
-                && !bytes
-                    .get(unit_end)
-                    .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
-            if unit_is_whole_word {
-                output.push_str(&source[copied_to..number_start]);
-                let literal = &source[number_start..number_end];
-                write!(output, "calc({literal} * var(--adam-rem, 1rem))").unwrap();
-                index = unit_end;
-                copied_to = unit_end;
-                continue;
+        if byte.is_ascii_digit() || byte == b'.' {
+            let preceding = bytes.get(index.wrapping_sub(1)).copied();
+            let number_start = match preceding {
+                Some(b'-') | Some(b'+')
+                    if !bytes
+                        .get(index.wrapping_sub(2))
+                        .is_some_and(|b| is_identifier_byte(*b)) =>
+                {
+                    Some(index - 1)
+                }
+                Some(b) if is_identifier_byte(b) => None,
+                _ => Some(index),
+            };
+            if let Some(number_start) = number_start {
+                let mut cursor = index;
+                while bytes
+                    .get(cursor)
+                    .is_some_and(|b| b.is_ascii_digit() || *b == b'.')
+                {
+                    cursor += 1;
+                }
+                let number_end = cursor;
+                let unit_end = cursor + 3;
+                let followed_by_rem = bytes.get(cursor..unit_end) == Some(b"rem");
+                let unit_is_whole_word =
+                    followed_by_rem && !bytes.get(unit_end).is_some_and(|b| is_identifier_byte(*b));
+                if unit_is_whole_word {
+                    output.push_str(&source[copied_to..number_start]);
+                    let literal = &source[number_start..number_end];
+                    write!(output, "calc({literal} * var(--adam-rem, 1rem))").unwrap();
+                    index = unit_end;
+                    copied_to = unit_end;
+                    continue;
+                }
             }
         }
         index += 1;
