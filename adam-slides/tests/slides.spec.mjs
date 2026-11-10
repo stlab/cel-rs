@@ -603,3 +603,32 @@ test("inspector is a centered card", async ({ page }) => {
     expect(Math.abs(delta - (boxes[index - 1].height + 24))).toBeLessThanOrEqual(1);
   }
 });
+
+/** Read-only outputs display a frameless value without nudges, unlike editable fields. */
+test("read-only output field has no frame or nudges", async ({ page }) => {
+  await page.goto(host("basic_output", true));
+  const area = page.locator("#inspector input[readonly]");
+  await expect(area).toHaveCount(1);
+  const editable = page.locator("#inspector input:not([readonly])").first();
+  await expect(editable).toBeVisible();
+  const frame = (input) =>
+    input.evaluate((element) => {
+      const controls = element.parentElement;
+      return {
+        after: getComputedStyle(controls, "::after").boxShadow,
+        input: getComputedStyle(element).boxShadow,
+        background: getComputedStyle(element).backgroundColor,
+        buttons: controls.querySelectorAll("button").length,
+        height: element.getBoundingClientRect().height,
+      };
+    });
+  const editableFrame = await frame(editable);
+  expect(editableFrame.after).not.toBe("none");
+  expect(editableFrame.buttons).toBe(2);
+  const readonlyFrame = await frame(area);
+  expect(readonlyFrame.after).toBe("none");
+  expect(readonlyFrame.input).toBe("none");
+  expect(readonlyFrame.background).toBe("rgba(0, 0, 0, 0)");
+  expect(readonlyFrame.buttons).toBe(0);
+  expect(Math.abs(readonlyFrame.height - editableFrame.height)).toBeLessThanOrEqual(1);
+});

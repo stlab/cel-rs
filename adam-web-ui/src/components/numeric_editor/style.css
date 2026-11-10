@@ -49,6 +49,30 @@
   box-shadow: inset 0 0 0 1px var(--primary-error-color);
 }
 
+/* Read-only display, after Spectrum's read-only number field: the value keeps
+ * its line height but drops the frame, fill, and inset; keyboard focus still
+ * shows a ring. */
+.readonly::after {
+  box-shadow: none;
+}
+
+.readonly:focus-within {
+  outline: none;
+}
+
+.readonly:has(> input:focus-visible) {
+  outline: 2px solid var(--secondary-color-2);
+  outline-offset: 1px;
+}
+
+.readonly > input,
+.readonly > input:hover,
+.readonly > input:focus-visible {
+  padding-inline: 0;
+  background: none;
+  box-shadow: none;
+}
+
 .stepper {
   display: flex;
   flex-direction: column;

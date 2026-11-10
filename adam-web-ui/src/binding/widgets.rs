@@ -82,7 +82,8 @@ pub fn EditNumber(
 
 /// Binds slider and exact numeric entry without clamping aspirations in the widget.
 ///
-/// Range changes display the model value, not a locally clamped value.
+/// Range changes display the model value, not a locally clamped value. A
+/// read-only cell renders as a read-only number field without a slider.
 ///
 /// - Complexity: Publication lookup plus numeric/slider transition costs.
 ///
@@ -168,7 +169,7 @@ fn NumericBinding(
     let on_error =
         EventHandler::new(move |error: InputError| errors.report(HostRejection::Input(error)));
     rsx! { div { class, style,
-        if slider {
+        if slider && !readonly() {
             NumericSlider { id, label, value, range, kind, step, disabled, readonly, invalid,
                 locale, optional: false, on_value, on_error }
         } else {

@@ -74,7 +74,8 @@ pub struct NumericEditorProps {
     pub step: String,
     /// Disables every editing affordance.
     pub disabled: ReadSignal<bool>,
-    /// Prevents edits while preserving readable content.
+    /// Prevents edits while preserving readable, selectable content; the editor
+    /// then renders a frameless value without nudges or stepping help.
     pub readonly: ReadSignal<bool>,
     /// Exposes model validation independently of lexical input errors.
     pub invalid: ReadSignal<bool>,
@@ -667,19 +668,30 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
     };
     let up_blocked = blocked || at_bound(true);
     let down_blocked = blocked || at_bound(false);
+    let readonly = (props.readonly)();
+    let controls = if readonly {
+        format!("{} {}", Styles::controls, Styles::readonly)
+    } else {
+        Styles::controls.to_string()
+    };
+    let described_by = if readonly {
+        format!("{}-error", props.id)
+    } else {
+        format!("{0}-help {0}-error", props.id)
+    };
     rsx! {
         div { class: Styles::editor,
             Label { html_for: props.id.clone(), "{props.label}" }
-            div { class: Styles::controls,
+            div { class: controls,
                 Input {
                     id: props.id.clone(), r#type: "text", inputmode: "decimal",
                     // The native source owns text; volatile value attributes overwrite local drafts.
-                    disabled: (props.disabled)() || !ready() || source_failed(), readonly: (props.readonly)(),
+                    disabled: (props.disabled)() || !ready() || source_failed(), readonly,
                     "data-adam-number-source": "{source_token}",
                     "aria-invalid": "{invalid}",
-                    "aria-describedby": "{props.id}-help {props.id}-error",
+                    "aria-describedby": described_by,
                 }
-                div { class: Styles::stepper,
+                if !readonly { div { class: Styles::stepper,
                     Button {
                         r#type: "button", variant: ButtonVariant::Ghost, disabled: up_blocked,
                         "aria-label": "Increase {props.label}", onclick: move |_| stepping.call(true),
@@ -690,10 +702,12 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
                         "aria-label": "Decrease {props.label}", onclick: move |_| stepping.call(false),
                         "−"
                     }
-                }
+                } }
             }
-            small { id: "{props.id}-help", class: Styles::visually_hidden,
-                "Enter a number. Arrow Up and Arrow Down move to the next multiple of {props.step}."
+            if !readonly {
+                small { id: "{props.id}-help", class: Styles::visually_hidden,
+                    "Enter a number. Arrow Up and Arrow Down move to the next multiple of {props.step}."
+                }
             }
             small { id: "{props.id}-error", role: "status",
                 if let Some(message) = error_text { "{message}" }

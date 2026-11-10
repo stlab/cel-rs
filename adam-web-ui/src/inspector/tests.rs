@@ -666,3 +666,51 @@ fn panel_presentation_keeps_header() {
     assert!(html.contains("Cells"), "{html}");
     assert!(!html.contains("data-slot=\"card\""), "{html}");
 }
+
+/// Read-only numeric outputs render a bare value: no nudges, slider, or stepping help.
+#[test]
+fn readonly_numeric_output_renders_without_nudges_or_slider() {
+    /// Mounts an editable ranged cell feeding a ranged explicit output.
+    fn app() -> Element {
+        let sheet = use_sheet(
+            Rc::new(|| {
+                crate::build_sheet(
+                    "sheet s { cell width: i32 = 50 filter 0..=100;
+                        out area := width filter 0..=100; }",
+                    "readonly.adm2",
+                )
+            }),
+            "readonly/v1".into(),
+            EventHandler::new(|_| {}),
+        )
+        .unwrap();
+        rsx! { SheetInspector { sheet } }
+    }
+
+    /// Returns the rendered markup of the inspector row whose label is `label`.
+    ///
+    /// - Complexity: O(rendered HTML) time and O(1) space.
+    fn row_for<'a>(html: &'a str, label: &str) -> &'a str {
+        let marker = format!(">{label}</label>");
+        let start = html[..html.find(&marker).unwrap()]
+            .rfind("adam-cell-row")
+            .unwrap();
+        let rest = &html[start..];
+        rest[1..]
+            .find("adam-cell-row")
+            .map_or(rest, |end| &rest[..=end])
+    }
+
+    let mut dom = VirtualDom::new(app);
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    let width = row_for(&html, "width");
+    assert!(width.contains("aria-label=\"Increase width\""), "{width}");
+    assert!(width.contains("data-orientation"), "{width}");
+    let area = row_for(&html, "area");
+    assert!(area.contains("readonly"), "{area}");
+    assert!(!area.contains("Increase area"), "{area}");
+    assert!(!area.contains("Decrease area"), "{area}");
+    assert!(!area.contains("data-orientation"), "{area}");
+    assert!(!area.contains("Arrow Up"), "{area}");
+}

@@ -1051,7 +1051,8 @@ async fn input_submits_and_acknowledgment_preserves_spelling() {
     assert_display(id, "13");
 }
 
-/// Label, instructions, validation and blocked flags remain associated with the input.
+/// Label, instructions, validation and blocked flags remain associated with the input;
+/// read-only display drops the nudges and stepping instructions.
 #[tokio::test]
 async fn accessibility_and_validation_follow_controlled_state() {
     let (mut dom, observed, _) = mount(false);
@@ -1062,7 +1063,6 @@ async fn accessibility_and_validation_follow_controlled_state() {
         ..
     } = observed.borrow().controls.unwrap();
     invalid.set(true);
-    readonly.set(true);
     settle(&mut dom).await;
     let html = dioxus_ssr::render(&dom);
     assert!(html.contains("for=\"amount\""));
@@ -1072,11 +1072,18 @@ async fn accessibility_and_validation_follow_controlled_state() {
         html.contains("id=\"amount-help\" class=\"adam_numeric_editor_visually_hidden\""),
         "help element should carry the visually hidden module class: {html}"
     );
+    assert!(html.contains("aria-invalid=\"true\""), "{html}");
+    assert!(html.contains("Increase Amount") && html.contains("Decrease Amount"));
+    readonly.set(true);
+    settle(&mut dom).await;
+    let html = dioxus_ssr::render(&dom);
     assert!(
-        html.contains("aria-invalid=\"true\"") && html.contains("readonly"),
+        html.contains("readonly") && html.contains("aria-invalid=\"true\""),
         "{html}"
     );
-    assert!(html.contains("Increase Amount") && html.contains("Decrease Amount"));
+    assert!(html.contains("aria-describedby=\"amount-error\""), "{html}");
+    assert!(!html.contains("id=\"amount-help\""), "{html}");
+    assert!(!html.contains("Increase Amount") && !html.contains("Decrease Amount"));
 }
 
 /// Every embedded `rem` length scales with the host-settable `--adam-rem` custom property.
