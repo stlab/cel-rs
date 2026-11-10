@@ -514,12 +514,6 @@ fn publish(
             let text = if meta.codec_supported {
                 (meta.capture)(sheet).map_err(HostRejection::Input)?
             } else {
-                issues.push(ValidationIssue {
-                    key: key.clone(),
-                    requirement: None,
-                    labels: Vec::new(),
-                    message: format!("unsupported scalar codec for `{key}`"),
-                });
                 (meta.display)(sheet)
             };
             if let Some(violation) = sheet.filter_violation(id) {

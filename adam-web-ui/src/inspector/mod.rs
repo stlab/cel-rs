@@ -10,11 +10,13 @@
 //! column with a 1.5rem gap. The layout classes (`panel`, `card`, `cells`) live in
 //! `style.css` and are compiled into scoped `adam_inspector_<local>` names by the
 //! crate's build script.
+use crate::components::Label;
 use crate::{
     binding::*,
     components::{Card, CardContent, Separator, Theme},
 };
 use dioxus::prelude::*;
+use std::rc::Rc;
 
 include!(concat!(env!("OUT_DIR"), "/inspector-styles.rs"));
 
@@ -84,7 +86,7 @@ pub fn SheetInspector(
                     "data-relevant": view.flags.relevant.to_string(),
                     "data-forced": view.flags.forced.to_string(),
                     if !view.codec_supported {
-                        p { "{view.key}: {view.text}" }
+                        DisplayOnly { id: "adam-display-{instance}:{view.key}", view: view.clone() }
                     } else if view.is_bool {
                         CheckBox { bind: sheet.cell(&view.key), label: view.key.clone() }
                     } else if view.number_kind.is_some() {
@@ -119,4 +121,23 @@ pub fn SheetInspector(
             },
         }
     } }
+}
+
+/// Renders a cell without an editing codec as a labeled, read-only value.
+///
+/// Explicit outputs show only the value; other cells add a "Display only" note
+/// because a user might otherwise expect to edit them.
+///
+/// - Complexity: O(label + value bytes).
+#[component]
+fn DisplayOnly(id: String, view: Rc<CellView>) -> Element {
+    rsx! {
+        div { class: Styles::display,
+            Label { html_for: id.clone(), "{view.key}" }
+            output { id, class: Styles::value, "{view.text}" }
+            if !view.flags.readonly {
+                small { class: Styles::note, "Display only" }
+            }
+        }
+    }
 }

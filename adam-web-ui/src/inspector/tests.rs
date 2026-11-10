@@ -654,7 +654,7 @@ fn card_presentation_omits_header() {
     for key in ["text", "a", "b", "ranged", "unused"] {
         assert!(html.contains(&format!(">{key}</label>")), "{key}: {html}");
     }
-    assert!(html.contains("result:"), "result: {html}");
+    assert!(html.contains(">result</label>"), "result: {html}");
 }
 
 /// The default panel presentation keeps the "Cells" header and renders no card.
@@ -713,4 +713,66 @@ fn readonly_numeric_output_renders_without_nudges_or_slider() {
     assert!(!area.contains("Decrease area"), "{area}");
     assert!(!area.contains("data-orientation"), "{area}");
     assert!(!area.contains("Arrow Up"), "{area}");
+}
+
+/// Cells without an editing codec display a labeled value and stay valid; only
+/// non-output cells carry a "Display only" note.
+#[test]
+fn display_only_cells_render_as_values_without_capability_issues() {
+    /// Mounts a tuple source beside a tuple output.
+    fn app() -> Element {
+        let observed: Rc<RefCell<Observed>> = consume_context();
+        let sheet = use_sheet(
+            Rc::new(|| {
+                crate::build_sheet(
+                    "sheet s { cell pair: (i32, bool) = (1, true);
+                        out result := pair; }",
+                    "display.adm2",
+                )
+            }),
+            "display/v1".into(),
+            EventHandler::new(|_| {}),
+        )
+        .unwrap();
+        observed.borrow_mut().sheet = Some(sheet);
+        rsx! { SheetInspector { sheet } }
+    }
+
+    /// Returns the rendered markup from `label`'s row up to the next row.
+    ///
+    /// - Complexity: O(rendered HTML) time and O(1) space.
+    fn row_for<'a>(html: &'a str, label: &str) -> &'a str {
+        let marker = format!(">{label}</label>");
+        let start = html[..html.find(&marker).unwrap()]
+            .rfind("adam-cell-row")
+            .unwrap();
+        let rest = &html[start..];
+        rest[1..]
+            .find("adam-cell-row")
+            .map_or(rest, |end| &rest[..=end])
+    }
+
+    let observed = Rc::new(RefCell::new(Observed::default()));
+    let mut dom = VirtualDom::new(app);
+    dom.provide_root_context(observed.clone());
+    dom.rebuild_in_place();
+    let sheet = observed.borrow().sheet.unwrap();
+    for key in ["pair", "result"] {
+        let view = sheet.cell(key).view().unwrap();
+        assert!(!view.codec_supported, "{key}");
+        assert!(view.issues.is_empty(), "{key}: {:?}", view.issues);
+        assert!(!view.flags.invalid, "{key}");
+    }
+    let html = dioxus_ssr::render(&dom);
+    assert!(!html.contains("codec"), "{html}");
+    assert!(!html.contains("role=\"alert\""), "{html}");
+    let result = row_for(&html, "result");
+    assert!(result.contains("<output"), "{result}");
+    assert!(result.contains("(1, true)"), "{result}");
+    assert!(!result.contains("Display only"), "{result}");
+    let pair = row_for(&html, "pair");
+    assert!(
+        pair.contains("<output") && pair.contains("Display only"),
+        "{pair}"
+    );
 }

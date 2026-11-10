@@ -680,7 +680,8 @@ fn unknown_and_unsupported_keys_are_explicit() {
     .unwrap();
     assert_eq!(owner.views().len(), 1);
     assert_eq!(owner.views()[0].text, "(1, true)");
-    assert!(!owner.views()[0].issues.is_empty());
+    assert!(!owner.views()[0].codec_supported);
+    assert!(owner.views()[0].issues.is_empty());
     assert!(matches!(
         owner.apply(&[edit("absent", "1")], UpdateOrigin::User),
         HostOutcome::Rejected(HostRejection::Binding(BindingError::UnknownKey(_)))
@@ -864,7 +865,7 @@ fn published_flags_follow_model_capabilities() {
     ));
 }
 
-/// Unknown scalar types stay in schema order and expose explicit capability diagnostics.
+/// Unknown scalar types stay in schema order as valid display-only views without a codec.
 #[test]
 fn unsupported_named_scalar_is_not_omitted() {
     /// Represents a host-defined scalar without a registered codec.
@@ -888,8 +889,8 @@ fn unsupported_named_scalar_is_not_omitted() {
     let owner = SheetOwner::new(factory, "opaque/v1".into()).unwrap();
     let view = owner.views().last().unwrap();
     assert_eq!(view.key, "opaque");
-    assert!(view.flags.invalid);
-    assert!(view.issues[0].message.contains("unsupported"));
+    assert!(!view.codec_supported);
+    assert!(!view.flags.invalid && view.issues.is_empty());
     assert!(
         owner
             .inspect(|p, labels| (labels.cells[&p.cell_names["opaque"].0].capture)(p).is_err())

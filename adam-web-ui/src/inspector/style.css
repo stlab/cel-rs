@@ -23,3 +23,26 @@
   flex-direction: column;
   gap: 1.5rem;
 }
+
+/* Display-only rows match the numeric editor's label spacing and its read-only
+ * value: no frame, the input's text size, and the input's 8px block padding. */
+.display {
+  display: grid;
+}
+
+.display > label {
+  margin-bottom: 0.5rem;
+}
+
+.value {
+  padding-block: 8px;
+  font-size: 0.8333rem;
+  line-height: normal;
+  overflow-wrap: anywhere;
+  color: var(--secondary-color-4);
+}
+
+.note {
+  font-size: 0.75rem;
+  color: var(--secondary-color-5);
+}

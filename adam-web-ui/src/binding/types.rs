@@ -84,7 +84,7 @@ pub struct CellFlags {
     pub readonly: bool,
     /// Contributes to an output, requirement, or selector, or no outputs restrict relevance.
     pub relevant: bool,
-    /// Has a capability or filter diagnostic, or contributes to a filter failure.
+    /// Has a filter diagnostic, or contributes to a filter failure.
     pub invalid: bool,
     /// Has no alternative relationship direction.
     pub forced: bool,
@@ -93,7 +93,8 @@ pub struct CellFlags {
 /// Publishes one accepted effective value and its editor capabilities.
 ///
 /// Supported scalars use exact codec text, independently of Inspector rounding.
-/// Unsupported named cells remain visible with a capability issue.
+/// Unsupported named cells remain visible as display text; a missing codec is a
+/// capability (`codec_supported`), not a validation issue, and never sets `invalid`.
 ///
 /// # Examples
 /// See [`super::SheetOwner::views`] for reading shared immutable views.
@@ -115,7 +116,7 @@ pub struct CellView {
     pub codec_supported: bool,
     /// Exact current filter endpoints, when a range filter exists.
     pub range: Option<NumericRange>,
-    /// Nonfatal filter or unsupported-capability diagnostics.
+    /// Nonfatal filter diagnostics.
     pub issues: Vec<ValidationIssue>,
 }
 
