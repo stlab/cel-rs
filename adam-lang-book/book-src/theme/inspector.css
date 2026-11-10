@@ -3,14 +3,6 @@
     margin-block: 0.75rem;
 }
 
-/* mdBook sets html { font-size: 62.5% } (1rem == 10px), shrinking controls sized for a 16px
- * root. Scale embedded control lengths back to their upstream 16px-root sizing by setting
- * --adam-rem to 1.6rem (1.6 * 10px == 16px) on .adam-theme.
- */
-.adam-theme {
-    --adam-rem: 1.6rem;
-}
-
 .adam-live-error {
     color: #a31919;
     white-space: pre-wrap;

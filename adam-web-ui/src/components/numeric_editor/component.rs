@@ -921,7 +921,6 @@ fn slider_effect(value: f64, kind: NumberKind, blocked: bool) -> UiEffect {
 /// ```
 #[component]
 pub fn NumericSlider(props: NumericEditorProps) -> Element {
-    crate::components::styles::use_control_styles();
     let domain = {
         let value = props.value.read();
         let range = props.range.read();

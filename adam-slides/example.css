@@ -36,15 +36,6 @@ body.with-graph #inspector {
   display: block;
 }
 
-/* theme/inspector.css sets `--adam-rem: 1.6rem` to restore the upstream 16px control sizing
- * under mdBook's `html { font-size: 62.5% }` (10px) root. This slides host keeps the default
- * 16px root, so that compensation would scale every embedded `rem` length 1.6x too large and
- * crowd the ranged slider out of the 236px inspector column. Pin `--adam-rem` to `1rem` here
- * so controls render at their native dioxus-components sizes in the deck. */
-#inspector .adam-theme {
-  --adam-rem: 1rem;
-}
-
 #graph:not([hidden]) {
   flex: 1;
   min-height: 0;

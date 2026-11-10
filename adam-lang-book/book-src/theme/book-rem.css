@@ -1,0 +1,14 @@
+/* mdBook-only control scaling. This file is listed in book.toml `additional-css`
+ * but is NOT part of the shared theme assets staged by `cargo xtask
+ * prepare-live-book-assets` or copied into the slides deck by adam-slides/build.mjs,
+ * so only the 10px-rooted mdBook host applies the rule below.
+ *
+ * mdBook sets html { font-size: 62.5% } (1rem == 10px), shrinking controls sized
+ * for a 16px root. Scale embedded control lengths back to their upstream 16px-root
+ * sizing by setting --adam-rem to 1.6rem (1.6 * 10px == 16px) on .adam-theme. Hosts
+ * with a native 16px root (the slides deck) leave --adam-rem at its 1rem default and
+ * therefore must not load this file.
+ */
+.adam-theme {
+    --adam-rem: 1.6rem;
+}

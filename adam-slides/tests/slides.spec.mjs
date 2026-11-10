@@ -402,6 +402,11 @@ test("controls match dioxus-components sizes", async ({ page }) => {
   expect(Math.abs(field.font - 13.333)).toBeLessThan(0.5);
   expect(field.pt).toBe("8px");
   expect(field.pl).toBe("12px");
+  // The framed number input matches the upstream dioxus-components 31px height at a 16px
+  // effective rem; scale the expectation by the host-resolved rem so the check holds under
+  // any `--adam-rem`.
+  const inputHeight = await input.evaluate((element) => element.getBoundingClientRect().height);
+  expect(Math.abs(inputHeight - 31 * (rem / 16))).toBeLessThanOrEqual(1);
   const inputBox = await input.boundingBox();
   const labelBox = await label.boundingBox();
   const gap = inputBox.y - (labelBox.y + labelBox.height);
