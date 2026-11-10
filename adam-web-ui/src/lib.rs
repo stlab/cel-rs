@@ -27,7 +27,7 @@ pub use graph::{
     GraphData, GraphDrive, GraphView, LinkData, LinkKind, NodeData, NodeKind, graph_drive_script,
     to_graph_data,
 };
-pub use inspector::SheetInspector;
+pub use inspector::{InspectorPresentation, SheetInspector};
 pub use labels::{
     CaptureFn, CellMeta, ExactRangeFn, Labels, PrepareFn, PreparedWrite, Renderer, ScalarCodec,
     format_adam_error, format_module_diagnostic, format_parse_error, format_rounded,

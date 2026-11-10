@@ -574,3 +574,32 @@ test("the authored deck mounts every selected example", async ({ page }) => {
     }
   }
 });
+
+/** Catches the inspector losing its headerless, centered card presentation. */
+test("inspector is a centered card", async ({ page }) => {
+  await page.goto(host("basic_relationship", true));
+  const card = page.locator('[data-slot="card"]');
+  await expect(card).toHaveCount(1);
+  expect(await page.locator("#inspector h2").count()).toBe(0);
+  const cardBox = await card.boundingBox();
+  expect(cardBox.width).toBeLessThanOrEqual(384);
+  const contentCenter = await page.locator("#inspector").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const left = rect.left + parseFloat(style.paddingLeft);
+    const right = rect.right - parseFloat(style.paddingRight);
+    return (left + right) / 2;
+  });
+  expect(Math.abs(cardBox.x + cardBox.width / 2 - contentCenter)).toBeLessThanOrEqual(2);
+  const rows = page.locator("#inspector .adam-cell-row");
+  const count = await rows.count();
+  expect(count).toBeGreaterThan(1);
+  const boxes = [];
+  for (let index = 0; index < count; index++) {
+    boxes.push(await rows.nth(index).boundingBox());
+  }
+  for (let index = 1; index < boxes.length; index++) {
+    const delta = boxes[index].y - boxes[index - 1].y;
+    expect(Math.abs(delta - (boxes[index - 1].height + 24))).toBeLessThanOrEqual(1);
+  }
+});

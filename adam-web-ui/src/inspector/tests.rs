@@ -1,5 +1,5 @@
 //! Exercises bound controls and host boundaries with actual Dioxus event dispatch.
-use crate::{SheetInspector, binding::*, components::Theme};
+use crate::{InspectorPresentation, SheetInspector, binding::*, components::Theme};
 use dioxus::{
     core::{ElementId, Mutation},
     prelude::*,
@@ -449,7 +449,7 @@ fn conditional_relevance_survives_binding_edits() {
         let sheet = use_sheet(
             Rc::new(|| {
                 crate::build_sheet(
-                    include_str!("../../begin/examples/image_resize.adm2"),
+                    include_str!("../../../begin/examples/image_resize.adm2"),
                     "image_resize.adm2",
                 )
             }),
@@ -628,4 +628,41 @@ fn replacement_retires_standalone_numeric_instances() {
         old_source, new_source,
         "standalone numeric source must retire on replacement"
     );
+}
+
+/// Renders the inspector in card presentation for server-side assertions.
+fn card_host() -> Element {
+    let sheet = use_sheet(factory(), "controls/v1".into(), EventHandler::new(|_| {})).unwrap();
+    rsx! { SheetInspector { sheet, presentation: InspectorPresentation::Card } }
+}
+
+/// Renders the inspector in the default panel presentation for server-side assertions.
+fn panel_host() -> Element {
+    let sheet = use_sheet(factory(), "controls/v1".into(), EventHandler::new(|_| {})).unwrap();
+    rsx! { SheetInspector { sheet } }
+}
+
+/// The card presentation wraps the rows in a card and drops the "Cells" header.
+#[test]
+fn card_presentation_omits_header() {
+    let mut dom = VirtualDom::new(card_host);
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("data-slot=\"card\""), "{html}");
+    assert!(!html.contains("<h2"), "{html}");
+    assert!(html.contains("aria-label=\"flag\""), "{html}");
+    for key in ["text", "a", "b", "ranged", "unused"] {
+        assert!(html.contains(&format!(">{key}</label>")), "{key}: {html}");
+    }
+    assert!(html.contains("result:"), "result: {html}");
+}
+
+/// The default panel presentation keeps the "Cells" header and renders no card.
+#[test]
+fn panel_presentation_keeps_header() {
+    let mut dom = VirtualDom::new(panel_host);
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom);
+    assert!(html.contains("Cells"), "{html}");
+    assert!(!html.contains("data-slot=\"card\""), "{html}");
 }

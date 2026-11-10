@@ -1,8 +1,4 @@
 /* Publishing-host layout; official controls install their embedded scoped styles. */
-.adam-sheet-inspector .adam-cell-row {
-    margin-block: 0.75rem;
-}
-
 .adam-live-error {
     color: #a31919;
     white-space: pre-wrap;

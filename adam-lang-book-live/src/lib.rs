@@ -8,7 +8,9 @@ use adam_web_ui::binding::{
     BindingError, HostOutcome, ModelFactory, RecoveryState, SheetEvent, SheetHandle, use_sheet,
 };
 use adam_web_ui::components::Theme;
-use adam_web_ui::{GraphView, Renderer, SheetInspector, build_sheet, to_graph_data};
+use adam_web_ui::{
+    GraphView, InspectorPresentation, Renderer, SheetInspector, build_sheet, to_graph_data,
+};
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
 
@@ -444,7 +446,7 @@ fn Root(props: RootProps) -> Element {
         match initialized {
             Ok(sheet) => {
                 rsx! {
-                    SheetInspector { sheet }
+                    SheetInspector { sheet, presentation: InspectorPresentation::Card }
                     for id in &props.graph_ids {
                         BookGraph {
                             key: "{id}",

@@ -17,23 +17,20 @@ fn main() {
     println!("cargo:rerun-if-changed=build/scale_rem.rs");
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR"));
     let mut combined = String::new();
-    for name in [
-        "theme",
-        "button",
-        "input",
-        "checkbox",
-        "switch",
-        "slider",
-        "label",
-        "separator",
-        "card",
-        "numeric_editor",
+    for (name, path) in [
+        ("theme", "assets/dx-components-theme.css"),
+        ("button", "src/components/button/style.css"),
+        ("input", "src/components/input/style.css"),
+        ("checkbox", "src/components/checkbox/style.css"),
+        ("switch", "src/components/switch/style.css"),
+        ("slider", "src/components/slider/style.css"),
+        ("label", "src/components/label/style.css"),
+        ("separator", "src/components/separator/style.css"),
+        ("card", "src/components/card/style.css"),
+        ("numeric_editor", "src/components/numeric_editor/style.css"),
+        ("inspector", "src/inspector/style.css"),
     ] {
-        let path = if name == "theme" {
-            PathBuf::from("assets/dx-components-theme.css")
-        } else {
-            PathBuf::from(format!("src/components/{name}/style.css"))
-        };
+        let path = PathBuf::from(path);
         println!("cargo:rerun-if-changed={}", path.display());
         let source = fs::read_to_string(&path).expect("official stylesheet is readable");
         let source = scale_rem(&source);
