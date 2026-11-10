@@ -27,6 +27,7 @@ fn main() {
         "label",
         "separator",
         "card",
+        "numeric_editor",
     ] {
         let path = if name == "theme" {
             PathBuf::from("assets/dx-components-theme.css")

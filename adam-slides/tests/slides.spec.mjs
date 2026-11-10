@@ -353,6 +353,69 @@ test("number field disables out-of-range nudges", async ({ page }) => {
   await expect(up).toBeEnabled();
 });
 
+/** Catches a ranged cell stacking its slider above or beside the wrong field edge. */
+test("ranged slider sits left of its number field", async ({ page }) => {
+  await page.goto(host("basic_relationship", true));
+  const thumb = page.getByRole("slider", { name: "a", exact: true });
+  await expect(thumb).toBeVisible();
+  const track = thumb.locator('xpath=ancestor-or-self::*[@data-orientation][1]');
+  const input = page.getByRole("textbox", { name: "a", exact: true });
+  const inputId = await input.getAttribute("id");
+  const label = page.locator(`label[for="${inputId}"]`);
+  const trackBox = await track.boundingBox();
+  const inputBox = await input.boundingBox();
+  const labelBox = await label.boundingBox();
+  expect(trackBox.x + trackBox.width).toBeLessThanOrEqual(inputBox.x);
+  const trackCenter = trackBox.y + trackBox.height / 2;
+  const inputCenter = inputBox.y + inputBox.height / 2;
+  expect(Math.abs(trackCenter - inputCenter)).toBeLessThan(4);
+  expect(labelBox.y + labelBox.height).toBeLessThanOrEqual(Math.min(trackBox.y, inputBox.y));
+});
+
+/** Catches control sizing, help leakage, and inspector overflow drifting from dioxus-components. */
+test("controls match dioxus-components sizes", async ({ page }) => {
+  await page.goto(host("basic_relationship", true));
+  const input = page.getByRole("textbox", { name: "a", exact: true });
+  await expect(input).toBeVisible();
+  const inputId = await input.getAttribute("id");
+  const label = page.locator(`label[for="${inputId}"]`);
+  // The publishing host scales every embedded `rem` length by `--adam-rem`, so assert the
+  // upstream dioxus-components sizes (label 0.8rem, label-to-field gap 0.5rem) relative to the
+  // host-resolved rem rather than a fixed 16px root. Absolute, px-based sizes (input height)
+  // stay fixed regardless of the scale.
+  const rem = await label.evaluate((element) => {
+    const probe = document.createElement("div");
+    probe.style.cssText = "position:absolute;width:var(--adam-rem,1rem)";
+    element.appendChild(probe);
+    const width = probe.getBoundingClientRect().width;
+    probe.remove();
+    return width;
+  });
+  const fontSize = await label.evaluate((element) => parseFloat(getComputedStyle(element).fontSize));
+  expect(Math.abs(fontSize - 0.8 * rem)).toBeLessThan(0.5);
+  // The native field keeps its upstream, px-based text size and padding regardless of the host
+  // rem scale (dioxus-components native input: ~13.33px text, 8px/12px padding).
+  const field = await input.evaluate((element) => {
+    const cs = getComputedStyle(element);
+    return { font: parseFloat(cs.fontSize), pt: cs.paddingTop, pl: cs.paddingLeft };
+  });
+  expect(Math.abs(field.font - 13.333)).toBeLessThan(0.5);
+  expect(field.pt).toBe("8px");
+  expect(field.pl).toBe("12px");
+  const inputBox = await input.boundingBox();
+  const labelBox = await label.boundingBox();
+  const gap = inputBox.y - (labelBox.y + labelBox.height);
+  expect(Math.abs(gap - 0.5 * rem)).toBeLessThanOrEqual(1);
+  const help = page.locator(`[id="${inputId}-help"]`);
+  const helpBox = await help.boundingBox();
+  expect(helpBox.width).toBeLessThanOrEqual(1);
+  expect(helpBox.height).toBeLessThanOrEqual(1);
+  const overflow = await page.locator(".adam-sheet-inspector").evaluate(
+    (element) => element.scrollWidth - element.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
 /** Catches broken write/propagate bridging and uneditable computed outputs. */
 test("live output follows an input edit", async ({ page }) => {
   await page.goto("./");

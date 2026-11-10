@@ -1,9 +1,9 @@
 //! Controlled numeric controls without model ownership.
 //!
 //! Pass canonical strings and handle aspirations in `on_value`; the host's
-//! validation remains authoritative. Wrap controls in [`super::Theme`].
-use super::numeric_events::{SourceChannel, SourceFrame};
-use super::{
+//! validation remains authoritative. Wrap controls in [`crate::components::Theme`].
+use crate::components::numeric_events::{SourceChannel, SourceFrame};
+use crate::components::{
     button::{Button, ButtonVariant},
     input::Input,
     label::Label,
@@ -16,6 +16,8 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
+
+include!(concat!(env!("OUT_DIR"), "/numeric_editor-styles.rs"));
 
 thread_local! {
     /// Allocates distinct increasing identities across roots on the UI thread.
@@ -366,6 +368,7 @@ fn format_model(
 /// - Complexity: O(value + draft + locale bytes) per transition.
 #[component]
 fn EditorInstance(props: NumericEditorProps) -> Element {
+    crate::components::styles::use_control_styles();
     let (value, disabled, readonly, kind, optional, on_value, on_error) = (
         props.value,
         props.disabled,
@@ -665,9 +668,9 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
     let up_blocked = blocked || at_bound(true);
     let down_blocked = blocked || at_bound(false);
     rsx! {
-        div { class: "adam-numeric-editor",
+        div { class: Styles::editor,
             Label { html_for: props.id.clone(), "{props.label}" }
-            div { class: "adam-numeric-controls",
+            div { class: Styles::controls,
                 Input {
                     id: props.id.clone(), r#type: "text", inputmode: "decimal",
                     // The native source owns text; volatile value attributes overwrite local drafts.
@@ -676,7 +679,7 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
                     "aria-invalid": "{invalid}",
                     "aria-describedby": "{props.id}-help {props.id}-error",
                 }
-                div { class: "adam-numeric-stepper",
+                div { class: Styles::stepper,
                     Button {
                         r#type: "button", variant: ButtonVariant::Ghost, disabled: up_blocked,
                         "aria-label": "Increase {props.label}", onclick: move |_| stepping.call(true),
@@ -689,7 +692,7 @@ fn EditorInstance(props: NumericEditorProps) -> Element {
                     }
                 }
             }
-            small { id: "{props.id}-help",
+            small { id: "{props.id}-help", class: Styles::visually_hidden,
                 "Enter a number. Arrow Up and Arrow Down move to the next multiple of {props.step}."
             }
             small { id: "{props.id}-error", role: "status",
@@ -918,6 +921,7 @@ fn slider_effect(value: f64, kind: NumberKind, blocked: bool) -> UiEffect {
 /// ```
 #[component]
 pub fn NumericSlider(props: NumericEditorProps) -> Element {
+    crate::components::styles::use_control_styles();
     let domain = {
         let value = props.value.read();
         let range = props.range.read();
@@ -931,7 +935,7 @@ pub fn NumericSlider(props: NumericEditorProps) -> Element {
         props.on_error,
     );
     rsx! {
-        div { class: "adam-numeric-slider",
+        div { class: Styles::slider,
             if let Some(domain) = domain {
                 Slider {
                     value: Some(domain.value), min: domain.min, max: domain.max, step: domain.step,
@@ -953,5 +957,5 @@ pub fn NumericSlider(props: NumericEditorProps) -> Element {
 }
 
 #[cfg(test)]
-#[path = "numeric_editor_tests.rs"]
+#[path = "tests.rs"]
 mod tests;

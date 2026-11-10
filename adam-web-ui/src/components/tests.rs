@@ -1069,6 +1069,10 @@ async fn accessibility_and_validation_follow_controlled_state() {
     assert!(html.contains("aria-describedby=\"amount-help amount-error\""));
     assert!(html.contains("id=\"amount-help\"") && html.contains("id=\"amount-error\""));
     assert!(
+        html.contains("id=\"amount-help\" class=\"adam_numeric_editor_visually_hidden\""),
+        "help element should carry the visually hidden module class: {html}"
+    );
+    assert!(
         html.contains("aria-invalid=\"true\"") && html.contains("readonly"),
         "{html}"
     );
