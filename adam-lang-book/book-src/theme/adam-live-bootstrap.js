@@ -1,16 +1,43 @@
 // Mounts live inspectors and their graph containers from the generated example manifest.
-// Resolve assets against the page, not this classic script's additional-js copy.
-const themeBase = new URL("theme/", document.baseURI);
+(() => {
+const script = document.currentScript;
+const scope = script?.dataset.liveScope
+  ? document.querySelector(script.dataset.liveScope)
+  : document;
+const sequence = globalThis.adamLiveSequence || 0;
+globalThis.adamLiveSequence = sequence + 1;
+const prefix = sequence ? `${sequence}-` : "";
+// mdBook's public path_to_root identifies its publication root for nested chapters.
+// Explicit embed bases remain page-relative; script copies may live under book-src/theme.
+const publicationBase = typeof path_to_root === "string"
+  ? new URL(path_to_root, document.baseURI)
+  : document.baseURI;
+const themeBase = script?.dataset.assetBase
+  ? new URL(script.dataset.assetBase, document.baseURI)
+  : new URL("theme/", publicationBase);
 const moduleUrl = new URL("adam_lang_book_live.js", themeBase).href;
 const manifestUrl = new URL("adam-live-examples.json", themeBase).href;
-const swcUrl = new URL("swc.js", themeBase).href;
 const d3Url = new URL("d3.v7.min.js", themeBase).href;
 const graphJsUrl = new URL("graph.js", themeBase).href;
+const runtimes = globalThis.adamLiveRuntimes ||= new Map();
+const scripts = globalThis.adamLiveScripts ||= new Map();
+
+// Initializes each module once per document, including concurrent scoped bootstraps.
+function liveRuntime() {
+  if (!runtimes.has(moduleUrl)) {
+    runtimes.set(moduleUrl, import(moduleUrl).then(async runtime => {
+      await runtime.default();
+      return runtime;
+    }));
+  }
+  return runtimes.get(moduleUrl);
+}
 
 // Loads a page-level <script> from `url`, resolving when it has loaded. Pass `{ module: true }`
-// for an ES module (e.g. swc.js); classic scripts (d3, graph.js) omit it.
+// for an ES module; classic scripts (d3, graph.js) omit it.
 function loadScript(url, { module = false } = {}) {
-  return new Promise((resolve, reject) => {
+  if (scripts.has(url)) return scripts.get(url);
+  const loaded = new Promise((resolve, reject) => {
     const script = document.createElement("script");
     if (module) script.type = "module";
     script.src = url;
@@ -18,11 +45,13 @@ function loadScript(url, { module = false } = {}) {
     script.onerror = () => reject(new Error(`adam-live: failed to load ${url}`));
     document.head.appendChild(script);
   });
+  scripts.set(url, loaded);
+  return loaded;
 }
 
-// Creates independent script descriptors; graph-free pages need only Spectrum components.
+// Creates independent graph descriptors; graph-free roots fetch no graph or Spectrum scripts.
 function dependencyScripts(hasGraphs) {
-  const scripts = [{ url: swcUrl, module: true }];
+  const scripts = [];
   if (hasGraphs) {
     scripts.push({ url: d3Url, module: false }, { url: graphJsUrl, module: false });
   }
@@ -30,37 +59,47 @@ function dependencyScripts(hasGraphs) {
 }
 
 // Creates independent mount instructions from immutable example names and source strings.
-// Throws for malformed manifest entries, orphan graphs, or duplicate inspector names.
-// Each inspector name must be unique: live roots use it to namespace DOM controls,
-// even on graph-free pages. One inspector may own several graphs.
+// Throws for malformed entries, orphan graphs, or ambiguous graph associations.
+// Diagnostic names may repeat; explicit root selectors associate their graphs.
 // Time and space: O(i + g + e), for i inspectors, g graphs and e inspector-graph links.
-function createMountPlan(inspectors, graphs, manifest) {
+function createMountPlan(inspectors, graphs, manifest, namespace = "") {
   if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
     throw new Error("adam-live: invalid example manifest");
   }
-  if (!inspectors.every((name) => typeof name === "string" && name.length > 0)) {
+  const entries = inspectors.map((item) => typeof item === "string" ? {name:item} : item);
+  if (!entries.every((item) => item && typeof item.name === "string" && item.name.length > 0)) {
     throw new Error("adam-live: inspector has no example name");
   }
-  const names = new Set();
-  inspectors.forEach((name) => {
-    if (names.has(name)) throw new Error(`adam-live: ambiguous inspector name "${name}"`);
-    names.add(name);
+  const names = new Map();
+  const roots = new Map();
+  entries.forEach((item, index) => {
+    if (!names.has(item.name)) names.set(item.name, []);
+    names.get(item.name).push(index);
+    if (item.root) {
+      if (roots.has(item.root)) throw new Error(`adam-live: duplicate root "${item.root}"`);
+      roots.set(item.root, index);
+    }
   });
   const graphIds = new Map();
-  graphs.forEach((name, index) => {
-    if (!names.has(name)) throw new Error(`adam-live: graph has no inspector for "${name}"`);
-    if (!graphIds.has(name)) graphIds.set(name, []);
-    graphIds.get(name).push(`adam-live-graph-${index}`);
+  graphs.forEach((graph, index) => {
+    const item = typeof graph === "string" ? {name:graph} : graph;
+    const matches = names.get(item?.name) || [];
+    const owner = item?.root ? roots.get(item.root) : matches.length === 1 ? matches[0] : undefined;
+    if (owner === undefined || entries[owner].name !== item.name) {
+      throw new Error(`adam-live: ambiguous inspector name "${item?.name}" or graph has no inspector`);
+    }
+    if (!graphIds.has(owner)) graphIds.set(owner, []);
+    graphIds.get(owner).push(`adam-live-graph-${namespace}${index}`);
   });
-  return inspectors.map((name, index) => {
+  return entries.map(({name}, index) => {
     if (!Object.hasOwn(manifest, name) || typeof manifest[name] !== "string") {
       throw new Error(`adam-live: no embedded source for "${name}"`);
     }
     return {
-      id: `adam-live-${index}`,
+      id: `adam-live-${namespace}${index}`,
       name,
       source: manifest[name],
-      graphIds: [...(graphIds.get(name) || [])],
+      graphIds: [...(graphIds.get(index) || [])],
     };
   });
 }
@@ -84,41 +123,71 @@ function showLoadFailure(mounts, error) {
 }
 
 // Loads page dependencies once, then mounts every validated inspector and its graphs.
-// A rejected dependency or mount operation leaves a visible diagnostic in every mount.
+// A dependency failure affects its scoped mounts; a mount failure affects only its root.
 // Time and space add DOM selection, dependency loading, and live-module mounting
 // to createMountPlan's O(i + g + e) bounds.
 async function mountLiveExamples() {
-  const inspectorMounts = document.querySelectorAll(".adam-live");
-  const graphMounts = document.querySelectorAll(".adam-live-graph");
+  if (!scope) throw new Error("adam-live: missing script scope");
+  const inspectorMounts = scope.querySelectorAll(".adam-live:not([data-live-mounted])");
+  const graphMounts = scope.querySelectorAll(".adam-live-graph:not([data-live-mounted])");
   if (inspectorMounts.length === 0 && graphMounts.length === 0) {
     return;
   }
+  [...inspectorMounts, ...graphMounts].forEach(div => div.setAttribute("data-live-mounted", ""));
 
   try {
+    const graphDependencies = Promise.all(
+      dependencyScripts(graphMounts.length > 0).map(({url,module})=>loadScript(url,{module}))
+    ).then(()=>null,error=>error);
     const loaders = [
-      import(moduleUrl),
+      liveRuntime(),
       readManifest(fetch, manifestUrl),
-      ...dependencyScripts(graphMounts.length > 0).map(({ url, module }) => loadScript(url, { module })),
     ];
-    const [{ default: init, mount }, manifest] = await Promise.all(loaders);
+    const [{ mount }, manifest] = await Promise.all(loaders);
+    const roots = Array.from(inspectorMounts, (div, index) => ({
+      name: div.dataset.example,
+      root: div.dataset.liveRoot || div.id || `root-${index}`,
+    }));
     const plan = createMountPlan(
-      Array.from(inspectorMounts, (div) => div.dataset.example),
-      Array.from(graphMounts, (div) => div.dataset.example),
+      roots,
+      Array.from(graphMounts, (div) => {
+        let owner;
+        if (!div.dataset.liveRoot && div.compareDocumentPosition) {
+          inspectorMounts.forEach((inspector, index) => {
+            if (inspector.dataset.example === div.dataset.example
+                && (div.compareDocumentPosition(inspector) & 2)) owner = roots[index].root;
+          });
+        }
+        return { name: div.dataset.example, root: div.dataset.liveRoot || owner };
+      }),
       manifest,
+      prefix,
     );
-    await init();
     graphMounts.forEach((div, index) => {
-      div.id = `adam-live-graph-${index}`;
+      div.id = `adam-live-graph-${prefix}${index}`;
+      div.setAttribute("data-live-mounted", "");
     });
-    inspectorMounts.forEach((div, index) => {
+    await Promise.all(Array.from(inspectorMounts, async (div, index) => {
       const item = plan[index];
       div.id = item.id;
-      mount(item.id, item.source, item.name, item.graphIds);
-    });
+      div.setAttribute("data-live-mounted", "");
+      try {
+        if (item.graphIds.length) {
+          const error = await graphDependencies;
+          if (error) throw error;
+        }
+        mount(item.id, item.source, item.name, item.graphIds);
+      } catch (error) {
+        showLoadFailure([div, ...Array.from(graphMounts).filter(graph => item.graphIds.includes(graph.id))], error);
+        console.error(error);
+      }
+    }));
   } catch (error) {
     showLoadFailure([...inspectorMounts, ...graphMounts], error);
     console.error(error);
   }
 }
 
-mountLiveExamples();
+globalThis.adamLiveBootstrap = {createMountPlan, readManifest, showLoadFailure, dependencyScripts, loadScript, ready: mountLiveExamples()};
+return globalThis.adamLiveBootstrap.ready;
+})();

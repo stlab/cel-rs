@@ -18,8 +18,9 @@ command = "mdbook-live-examples"
 before = ["links"]
 
 [output.html]
+# Shared official controls embed their CSS; publication paths need no Dioxus asset prefix.
 git-repository-url = "https://github.com/stlab/cel-rs"
 edit-url-template = "https://github.com/stlab/cel-rs/edit/main/adam-lang-book/{path}"
-additional-css = ["book-src/theme/adam-live.css", "book-src/theme/inspector.css", "book-src/theme/graph.css"]
+additional-css = ["book-src/theme/adam-live.css", "book-src/theme/inspector.css", "book-src/theme/graph.css", "book-src/theme/book-rem.css"]
 additional-js = ["book-src/theme/adam-live-bootstrap.js"]
 mathjax-support = true

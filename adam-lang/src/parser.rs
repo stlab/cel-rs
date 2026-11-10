@@ -84,6 +84,8 @@ pub struct ParsedSheet {
     /// Lookup takes expected O(1) time. Iterate the sheet's requirement IDs, not this map,
     /// to preserve attachment or violation order.
     pub requirement_names: HashMap<RequirementId, String>,
+    /// Requirement IDs mapped to their authored source labels.
+    pub requirement_labels: HashMap<RequirementId, crate::SourceLabel>,
     /// `(RelationshipId, method index)` → the source span of a root-local binding.
     /// Lets a caller translate an `adam_rs::Error`'s
     /// `ErrorSite::Method` (raised well after parsing, e.g. from `Sheet::propagate`) back
@@ -289,6 +291,7 @@ impl ParsedSheet {
             cell_names: IndexMap::new(),
             output_names: IndexMap::new(),
             requirement_names: HashMap::new(),
+            requirement_labels: HashMap::new(),
             method_spans: HashMap::new(),
             relationship_spans: HashMap::new(),
             cell_spans: HashMap::new(),
@@ -494,12 +497,13 @@ impl ParsedSheet {
     /// Resolves native error sites to owning labels and actual invocation context.
     ///
     /// Definition labels precede root-to-child invocation context. Inner CEL spans
-    /// resolve only against the failed method's definition owner. Native definitions
-    /// retain labels without locations; unknown sites are skipped.
+    /// resolve against the failed method, conditional, or requirement definition.
+    /// Native definitions retain labels without locations; unknown sites are skipped.
     ///
-    /// - Complexity: O(o + m + c + q × a + l²) time and O(o + m + c + l)
-    ///   space for occurrences o, methods m, public cells c, visited occurrence/ancestor
-    ///   records q, local authored items a and returned labels l.
+    /// - Complexity: O(o + m + c + k + p × a + q × a + l²) time and
+    ///   O(o + m + c + k + l) space for occurrences o, methods m, public cells c,
+    ///   conditionals k, candidate cell origins p, visited occurrence/ancestor records q,
+    ///   local authored items a and returned labels l.
     ///
     /// # Examples
     ///
@@ -524,6 +528,25 @@ impl ParsedSheet {
     /// ```
     pub fn locate_error(&self, e: &adam_rs::Error) -> Vec<crate::SourceLabel> {
         crate::error_labels::locate_error(self, e)
+    }
+
+    /// Copies source and provenance metadata without retaining the live sheet.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use adam_lang::{AdamParser, TypeRegistry};
+    /// let parsed = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new())
+    ///     .parse_str("sheet s { cell x: i32 = 1; }")?;
+    /// let diagnostics = parsed.diagnostics();
+    /// assert!(diagnostics.sources().iter().any(|source| source.text().contains("cell x")));
+    /// # Ok::<(), cel_parser::ParseError>(())
+    /// ```
+    ///
+    /// - Complexity: O(m) time and space for retained metadata size m; immutable
+    ///   source owners and authored item slices are shared.
+    pub fn diagnostics(&self) -> crate::SheetDiagnostics {
+        crate::SheetDiagnostics::from_parsed(self)
     }
 
     /// Borrows the anonymous frontend source whose display name the caller supplies.
@@ -1541,6 +1564,29 @@ mod tests {
             rel_spans >= 2,
             "expected >=2 spans, got {rel_spans}: {located:?}"
         );
+    }
+
+    /// Resolves an error from retained metadata after the failed model is dropped.
+    #[test]
+    fn diagnostics_survive_dropping_the_model() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str("sheet s { cell x: i32 = 0; cell y: i32; relationship { y := 10i32 / x; } }")
+            .unwrap();
+        let diagnostics = parsed.diagnostics();
+        let error = parsed.propagate().unwrap_err();
+        let before_drop = diagnostics.locate_error(&error);
+        assert!(!before_drop.is_empty());
+
+        drop(parsed);
+
+        assert_eq!(diagnostics.locate_error(&error), before_drop);
+        assert!(before_drop.iter().any(|label| {
+            label
+                .location
+                .as_ref()
+                .is_some_and(|location| location.source.text().contains("10i32 / x"))
+        }));
     }
 
     /// Labels both bindings that produce the same output set.

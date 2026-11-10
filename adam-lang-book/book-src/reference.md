@@ -166,6 +166,10 @@ See [sheets, cells, and types](cells.md) and [the type registry](#the-type-regis
 
 ## The type registry
 
+For a complete Dioxus consumer with application type/operation registration,
+explicit root selection, bound controls, recording, and host recovery policy, see
+the [Dioxus integration guide](https://github.com/stlab/cel-rs/blob/main/docs/dioxus-integration.md).
+
 | Type name | Default |
 |---|---|
 | `i8` `i16` `i32` `i64` `i128` `isize` | `0` |

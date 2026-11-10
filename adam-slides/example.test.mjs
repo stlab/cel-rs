@@ -30,7 +30,6 @@ test("asset URLs preserve a nested static hosting path", () => {
   assert.deepEqual(Object.fromEntries(Object.entries(urls).map(([key, value]) => [key, value.href])), {
     module: "https://example.test/project/docs/adam-slides/theme/adam_lang_book_live.js",
     manifest: "https://example.test/project/docs/adam-slides/theme/adam-live-examples.json",
-    spectrum: "https://example.test/project/docs/adam-slides/theme/swc.js",
     d3: "https://example.test/project/docs/adam-slides/theme/d3.v7.min.js",
     graph: "https://example.test/project/docs/adam-slides/theme/graph.js",
   });

@@ -1,23 +1,35 @@
-//! Reusable Dioxus UI for browsing and editing a live `adam_rs::Sheet`, built on Spectrum Web
-//! Components. Named for the web rendering stack it targets — Dioxus + Spectrum Web
-//! Components render as DOM whether hosted in a real browser or an embedded webview — not
-//! tied to any one Dioxus renderer feature, so it's usable from a desktop app (`begin`), a
-//! `dioxus/web` app, or a plain `wasm-bindgen` embed with no full app shell around it.
+//! Reusable Dioxus controls and UI for browsing and editing a live `adam_rs::Sheet`.
+//!
+//! [`components`] supplies model-independent official Dioxus controls and numeric
+//! editors. Wrap each root in [`components::Theme`]. [`binding::use_sheet`] owns
+//! one reactive model and supplies bindings to controls and [`SheetInspector`].
+//!
+//! Components render as DOM in a browser or embedded webview. The library does
+//! not select a Dioxus renderer: use it from a desktop app (`begin`), a `dioxus/web`
+//! app, or a `wasm-bindgen` embed without a full application shell.
 
+pub mod binding;
 pub mod build;
+pub mod components;
 pub mod diagnostics;
 pub mod graph;
+pub mod input;
 mod inspector;
 pub mod labels;
-pub mod spectrum;
+#[cfg(test)]
+#[path = "../build/scale_rem.rs"]
+mod scale_rem;
 
-pub use build::{BuildOutcome, build_sheet};
+pub use build::{
+    BuildError, BuiltSheet, RuntimeFailure, ValidationIssue, build_sheet, initialize_sheet,
+};
 pub use graph::{
     GraphData, GraphDrive, GraphView, LinkData, LinkKind, NodeData, NodeKind, graph_drive_script,
     to_graph_data,
 };
-pub use inspector::{SheetInspector, numeric_input_script};
+pub use inspector::{InspectorPresentation, SheetInspector};
 pub use labels::{
-    CellMeta, Labels, Renderer, WriteStrFn, format_adam_error, format_module_diagnostic,
-    format_parse_error, format_rounded, labels_from_cell_names,
+    CaptureFn, CellMeta, ExactRangeFn, Labels, PrepareFn, PreparedWrite, Renderer, ScalarCodec,
+    format_adam_error, format_module_diagnostic, format_parse_error, format_rounded,
+    labels_from_cell_names,
 };

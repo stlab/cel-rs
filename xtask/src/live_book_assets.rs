@@ -1,6 +1,6 @@
 //! Stages shared live-example assets for mdBook and standalone slides.
 //!
-//! Both commands assemble the example-source manifest, Spectrum bundle,
+//! Both commands assemble the example-source manifest, shared control stylesheet,
 //! inspector/graph assets and existing `adam-lang-book-live/pkg/` WASM/JS output.
 //! The book command writes `adam-lang-book/book-src/theme/`; the slides command
 //! accepts an output directory and defaults to `adam-slides/dist/theme`.
@@ -100,7 +100,7 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Generates `adam-live-examples.json` and stages the Spectrum CSS/JS bundle and the compiled
+/// Generates `adam-live-examples.json` and stages shared control styles and the compiled
 /// `adam-lang-book-live` wasm/js output into `adam-lang-book/book-src/theme/`, so a subsequent
 /// `mdbook build adam-lang-book` has everything the live examples need.
 ///
@@ -111,7 +111,7 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> io::Result<()> {
 ///
 /// # Errors
 /// Returns `Err` if the examples directory can't be walked, the manifest can't be serialized
-/// or written, `begin/assets/swc.js`/`inspector.css` are missing, or `adam-lang-book-live/pkg/`
+/// or written, inspector or graph assets are missing, or `adam-lang-book-live/pkg/`
 /// doesn't exist.
 ///
 /// # Examples
@@ -164,13 +164,11 @@ fn prepare_live_assets(root: &Path, destination: &Path) -> Result<(), Box<dyn st
         .join("book-src")
         .join("examples");
     let begin_assets = root.join("begin").join("assets");
-    let asset_names = [
-        "swc.js",
-        "inspector.css",
-        "graph.js",
-        "graph.css",
-        "d3.v7.min.js",
-    ];
+    let asset_names = ["graph.js", "graph.css", "d3.v7.min.js"];
+    let inspector = root.join("adam-lang-book/book-src/theme/inspector.css");
+    if !inspector.is_file() {
+        return Err(format!("Required live asset missing: {}", inspector.display()).into());
+    }
     for name in asset_names {
         if !begin_assets.join(name).is_file() {
             return Err(format!(
@@ -199,6 +197,13 @@ fn prepare_live_assets(root: &Path, destination: &Path) -> Result<(), Box<dyn st
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     fs::create_dir_all(destination)?;
     fs::write(&manifest_path, manifest_json)?;
+    fs::write(
+        destination.join("adam-controls.css"),
+        adam_web_ui::components::CONTROL_CSS,
+    )?;
+    if inspector != destination.join("inspector.css") {
+        fs::copy(&inspector, destination.join("inspector.css"))?;
+    }
     println!(
         "  -> {} ({} examples)",
         manifest_path.display(),
@@ -242,15 +247,16 @@ mod tests {
         write_example(&examples, "expressions", "no_standard_library", "excluded");
         let assets = root.join("begin/assets");
         fs::create_dir_all(&assets).unwrap();
-        for name in [
-            "swc.js",
-            "inspector.css",
-            "graph.js",
-            "graph.css",
-            "d3.v7.min.js",
-        ] {
+        for name in ["graph.js", "graph.css", "d3.v7.min.js"] {
             fs::write(assets.join(name), name).unwrap();
         }
+        let theme = root.join("adam-lang-book/book-src/theme");
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(
+            theme.join("inspector.css"),
+            ".adam-sheet-inspector { padding: 12px; }",
+        )
+        .unwrap();
         let pkg = root.join("adam-lang-book-live/pkg");
         fs::create_dir_all(pkg.join("snippets/example")).unwrap();
         fs::write(pkg.join("adam_lang_book_live.js"), "export {};").unwrap();
@@ -267,11 +273,12 @@ mod tests {
         root
     }
 
-    /// Verifies the manifest and runtime assets reach an independent destination.
+    /// Verifies live assets stage without a Spectrum bundle.
     #[test]
-    fn prepare_live_assets_stages_manifest_and_runtime() {
+    fn prepare_live_assets_stages_manifest_and_runtime_without_swc() {
         let root = staging_fixture();
         let destination = root.join("slides/theme");
+        assert!(!root.join("begin/assets/swc.js").exists());
         prepare_live_assets(&root, &destination).unwrap();
         let manifest: BTreeMap<String, String> = serde_json::from_str(
             &fs::read_to_string(destination.join("adam-live-examples.json")).unwrap(),
@@ -279,15 +286,18 @@ mod tests {
         .unwrap();
         assert_eq!(manifest.len(), 1);
         assert_eq!(manifest["tutorial/first_sheet"], "sheet hello {}");
-        for name in [
-            "swc.js",
-            "inspector.css",
-            "graph.js",
-            "graph.css",
-            "d3.v7.min.js",
-        ] {
+        for name in ["graph.js", "graph.css", "d3.v7.min.js"] {
             assert_eq!(fs::read_to_string(destination.join(name)).unwrap(), name);
         }
+        assert!(!destination.join("swc.js").exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("adam-controls.css")).unwrap(),
+            adam_web_ui::components::CONTROL_CSS
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("inspector.css")).unwrap(),
+            ".adam-sheet-inspector { padding: 12px; }"
+        );
         assert_eq!(
             fs::read(destination.join("adam_lang_book_live_bg.wasm")).unwrap(),
             [0, 97, 115, 109, 255]
@@ -304,7 +314,7 @@ mod tests {
     fn prepare_live_assets_rejects_missing_inputs_even_with_stale_output() {
         for missing in [
             "adam-lang-book/book-src/examples",
-            "begin/assets/swc.js",
+            "adam-lang-book/book-src/theme/inspector.css",
             "adam-lang-book-live/pkg",
         ] {
             let root = staging_fixture();
@@ -347,7 +357,12 @@ mod tests {
     /// Reports destination file and nested-directory conflicts as staging errors.
     #[test]
     fn prepare_live_assets_reports_destination_conflicts() {
-        for conflict in ["", "adam-live-examples.json", "swc.js", "snippets"] {
+        for conflict in [
+            "",
+            "adam-live-examples.json",
+            "adam-controls.css",
+            "snippets",
+        ] {
             let root = staging_fixture();
             let destination = root.join("output");
             if conflict.is_empty() {
@@ -374,7 +389,7 @@ mod tests {
         let root = staging_fixture();
         let destination = root.join("output");
         prepare_live_assets(&root, &destination).unwrap();
-        fs::write(root.join("begin/assets/swc.js"), "updated bundle").unwrap();
+        fs::write(root.join("begin/assets/graph.js"), "updated graph").unwrap();
         write_example(
             &root.join("adam-lang-book/book-src/examples"),
             "tutorial",
@@ -383,8 +398,8 @@ mod tests {
         );
         prepare_live_assets(&root, &destination).unwrap();
         assert_eq!(
-            fs::read_to_string(destination.join("swc.js")).unwrap(),
-            "updated bundle"
+            fs::read_to_string(destination.join("graph.js")).unwrap(),
+            "updated graph"
         );
         let manifest: BTreeMap<String, String> = serde_json::from_str(
             &fs::read_to_string(destination.join("adam-live-examples.json")).unwrap(),

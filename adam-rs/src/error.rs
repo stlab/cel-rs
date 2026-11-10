@@ -34,7 +34,7 @@ pub enum ErrorSite {
     Method(RelationshipId, usize),
     /// A relationship as a whole (no single method within it is implicated).
     Relationship(RelationshipId),
-    /// A single cell.
+    /// A single cell, including the cell governed by a failing requirement.
     Cell(CellId),
     /// The live conditional whose match expression failed.
     Conditional(crate::ConditionalId),
@@ -169,9 +169,7 @@ pub enum Error {
     /// `InvalidCellKind`.)
     InvalidFilter,
 
-    /// An `add_requirement` call has an invalid input signature, or (on a
-    /// `Cell`/`Source` kind cell)
-    /// evaluating the requirement against current values returns `Ok(false)`.
+    /// An `add_requirement` call has an invalid input signature.
     InvalidRequirement,
 
     /// A filter's argument, or a conditional's match subject, depends on a cell that

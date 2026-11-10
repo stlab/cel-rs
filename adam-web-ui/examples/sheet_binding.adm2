@@ -1,0 +1,33 @@
+sheet unselected {
+    cell width: f64 = 999.0;
+}
+
+sheet demo {
+    cell width: f64 = 4.0 require { @positive_width width > 0.0; };
+    source height: f64 = 3.0;
+    cell area: f64 = 12.0 require { @area_limit area <= 100.0; };
+    source rectangle: bool = true;
+    source ceiling: i32 = 10;
+    cell limited: i32 = 5 filter 0..=ceiling;
+    source badge: Badge;
+    source divisor: i32 = 1;
+
+    conditional rectangle {
+        true => {
+            relationship {
+                area := width * height;
+                width := area / height;
+            }
+        }
+        false => {
+            relationship {
+                area := width + height;
+                width := area - height;
+            }
+        }
+    }
+
+    out badge_number := badge.badge_number();
+    out health := 1 / divisor;
+    out result := area + (limited as f64) + (badge_number as f64) + (health as f64);
+}

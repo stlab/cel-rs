@@ -12,7 +12,8 @@ body {
 main {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
 }
 
 body.with-graph main {
@@ -21,11 +22,17 @@ body.with-graph main {
 }
 
 #inspector {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 12px;
 }
 
-#inspector sp-theme {
+body.with-graph #inspector {
+  max-height: 60%;
+}
+
+#inspector .adam-theme {
   display: block;
 }
 

@@ -376,9 +376,9 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
 mod tests {
     use super::*;
 
-    /// Evaluation failure leaves every branch's activity explicitly unknown.
+    /// Evaluation failure retains source diagnostics after the candidate is dropped.
     #[test]
-    fn conditional_evaluation_error_does_not_activate_default() {
+    fn conditional_evaluation_failure_retains_owned_diagnostics() {
         let source = r#"sheet s {
             source divisor: i64 = 1i64;
             cell a: i64;
@@ -388,20 +388,14 @@ mod tests {
                 _ => { relationship { b := a; } }
             }
         }"#;
-        let outcome = crate::build_sheet(source, "s.adm2", &crate::Renderer::plain());
-        assert!(outcome.error.is_none(), "{:?}", outcome.error);
-        let (mut sheet, labels) = outcome.sheet_labels.unwrap();
+        let built = crate::build_sheet(source, "s.adm2").unwrap();
+        let mut sheet = built.parsed;
         let divisor = sheet.cell_names["divisor"].0;
         sheet.write(divisor, 0i64).unwrap();
-        assert!(sheet.propagate().is_err());
-        let data = to_graph_data(&sheet, &labels);
-        let controls = data
-            .links
-            .iter()
-            .filter(|link| link.kind == LinkKind::Control)
-            .collect::<Vec<_>>();
-        assert_eq!(controls.len(), 2);
-        assert!(controls.iter().all(|link| link.branch_active.is_none()));
+        let diagnostics = sheet.diagnostics();
+        let error = sheet.propagate().unwrap_err();
+        drop(sheet);
+        assert!(!diagnostics.locate_error(&error).is_empty());
     }
     use adam_rs::{MatchExpr, Method};
 

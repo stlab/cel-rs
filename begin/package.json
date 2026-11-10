@@ -1,8 +1,8 @@
 {
-  "name": "begin-js-assets",
+  "name": "begin-js-tests",
   "private": true,
   "version": "1.0.0",
-  "description": "Builds begin's vendored Spectrum Web Components bundle (assets/swc.js) via esbuild.",
+  "description": "Runs begin's JavaScript tests with Vitest.",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },
@@ -10,14 +10,9 @@
     "vite": "7.3.6"
   },
   "scripts": {
-    "build": "esbuild js/spectrum-entry.js --bundle --format=esm --outfile=assets/swc.js --loader:.css=css",
     "test": "vitest run"
   },
   "devDependencies": {
-    "esbuild": "0.25.12",
-    "@spectrum-web-components/bundle": "1.12.2",
-    "@spectrum-web-components/theme": "1.12.2",
-    "@spectrum-web-components/icons-workflow": "1.12.2",
     "vitest": "4.1.11"
   }
 }

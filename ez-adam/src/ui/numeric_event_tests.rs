@@ -1,222 +1,439 @@
-//! Exercises production clamp input events against controlled asynchronous document evaluations.
+//! Exercises panel operations through native form events and the actual numeric eval receiver.
+//!
+//! The renderer fixture runs the production Intl scripts in Node with German as the
+//! host default, and delivers ordered snapshots through the component's source channel.
 
 use super::*;
+use crate::persistence::to_json;
 use dioxus::document::{Document as DocumentProvider, Eval, EvalError, Evaluator};
 use serde_json::{Value, json};
-use std::{
-    future::Future,
-    task::{Context, Poll, Waker},
-};
+use std::{collections::VecDeque, task::Poll};
 
-/// Owns one evaluator request, its deferred response, and its waiting task.
+/// Exposes the replacement generation without changing the product component's API.
+pub(super) type EpochObserver = Rc<Cell<Option<Signal<u64>>>>;
+
+/// Models one renderer-owned, ordered native input transport.
 #[derive(Default)]
-struct Pending {
-    script: String,
-    response: Option<Result<Value, EvalError>>,
+struct Source {
+    token: String,
+    epoch: String,
+    sequence: u64,
+    frames: VecDeque<Value>,
     waker: Option<Waker>,
+    value: String,
+    closed: bool,
 }
 
-/// Supplies scope-owned evaluators while retaining requests for controlled completion.
+impl Source {
+    /// Captures an immutable native snapshot and wakes its actual component receiver.
+    fn push(&mut self, action: &str, value: &str) {
+        self.sequence = self.sequence.checked_add(1).unwrap();
+        self.value = value.into();
+        self.frames.push_back(json!({
+            "token": self.token, "epoch": self.epoch,
+            "sequence": self.sequence.to_string(), "session": "1",
+            "action": action, "value": value, "message": "native range unavailable",
+        }));
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// Runs real locale scripts and owns persistent renderer channels for the mounted controls.
 #[derive(Default)]
-struct ControlledDocument {
+struct NativeDocument {
     owner: dioxus::core::internal::generational_box::Owner,
-    requests: RefCell<Vec<Rc<RefCell<Pending>>>>,
+    sources: RefCell<Vec<Rc<RefCell<Source>>>>,
 }
 
-/// Receives the test-controlled result through the real Eval deserializer.
-struct ControlledEvaluator(Rc<RefCell<Pending>>);
+impl DocumentProvider for NativeDocument {
+    /// Runs Intl scripts in Node or creates the production source adapter's transport.
+    ///
+    /// - Complexity: O(script bytes) plus the Node process and Intl execution.
+    fn eval(&self, script: String) -> Eval {
+        if script.starts_with("/* adam-control-styles */") {
+            return Eval::new(self.owner.insert(Box::new(Reply(Some(Value::Null)))));
+        }
+        if let Some((_, tail)) = script.rsplit_once("return await runNumericEvents(window, \"") {
+            let source = Rc::new(RefCell::new(Source {
+                token: tail.split('"').next().unwrap().into(),
+                epoch: "0".into(),
+                ..Default::default()
+            }));
+            source.borrow_mut().push("ready", "");
+            self.sources.borrow_mut().push(source.clone());
+            return Eval::new(self.owner.insert(Box::new(SourceReply(source))));
+        }
+        let value = if script.contains("await ")
+            || script.contains("setTimeout(() => resolve(null), 5000)")
+        {
+            Value::Null
+        } else {
+            let output = std::process::Command::new("node")
+                .args(["-e", &format!(
+                    "const Original=Intl.NumberFormat;Intl.NumberFormat=function(l,o){{return new Original(l??'de-DE',o)}};Object.setPrototypeOf(Intl.NumberFormat,Original);const messages=[];new Function('dioxus',{})({{send:x=>messages.push(x)}});console.log(JSON.stringify(messages[0]));",
+                    serde_json::to_string(&script).unwrap()
+                )])
+                .output()
+                .expect("Node is required for native locale adapter tests");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "{error}: stdout={}; script={script}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            })
+        };
+        Eval::new(self.owner.insert(Box::new(Reply(Some(value)))))
+    }
 
-impl Evaluator for ControlledEvaluator {
-    /// Rejects unused outbound traffic.
+    /// Leaves head links to the renderer rather than interpreting them in Node.
+    fn create_link(&self, _: dioxus::document::LinkProps) {}
+
+    /// Leaves head styles to the renderer rather than interpreting them in Node.
+    fn create_style(&self, _: dioxus::document::StyleProps) {}
+}
+
+/// Supplies a one-shot Intl result through the real Eval decoder.
+struct Reply(Option<Value>);
+
+impl Evaluator for Reply {
+    /// Rejects unused commands to a one-shot evaluation.
     fn send(&self, _: Value) -> Result<(), EvalError> {
         Err(EvalError::Unsupported)
     }
+    /// Returns the script's JSON reply.
+    fn poll_recv(&mut self, _: &mut Context<'_>) -> Poll<Result<Value, EvalError>> {
+        Poll::Ready(self.0.take().ok_or(EvalError::Unsupported))
+    }
+    /// Completes one-shot evaluations.
+    fn poll_join(&mut self, _: &mut Context<'_>) -> Poll<Result<Value, EvalError>> {
+        Poll::Ready(Ok(Value::Null))
+    }
+}
 
-    /// Delivers a deferred result or registers the current receiver's waker.
+/// Supplies native snapshots and applies display/reset commands from the real adapter.
+struct SourceReply(Rc<RefCell<Source>>);
+
+impl Evaluator for SourceReply {
+    /// Applies source control messages without reading a later DOM value.
+    fn send(&self, message: Value) -> Result<(), EvalError> {
+        let mut source = self.0.borrow_mut();
+        match message["kind"].as_str() {
+            Some("close") => source.closed = true,
+            Some("reset") => {
+                source.epoch = message["epoch"].as_str().unwrap().into();
+                source.push("ready", message["value"].as_str().unwrap());
+            }
+            Some("display")
+                if message["sequence"].as_str() == Some(&source.sequence.to_string()) =>
+            {
+                source.value = message["value"].as_str().unwrap().into();
+            }
+            Some("display") => {}
+            _ => return Err(EvalError::Unsupported),
+        }
+        Ok(())
+    }
+    /// Delivers the next ordered snapshot or suspends the receiver.
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<Value, EvalError>> {
-        let mut pending = self.0.borrow_mut();
-        if let Some(response) = pending.response.take() {
-            Poll::Ready(response)
+        let mut source = self.0.borrow_mut();
+        if let Some(frame) = source.frames.pop_front() {
+            Poll::Ready(Ok(frame))
         } else {
-            pending.waker = Some(cx.waker().clone());
+            source.waker = Some(cx.waker().clone());
             Poll::Pending
         }
     }
-
-    /// Leaves script completion pending because these event handlers only receive.
+    /// Keeps the persistent evaluation open until the component retires it.
     fn poll_join(&mut self, _: &mut Context<'_>) -> Poll<Result<Value, EvalError>> {
-        Poll::Pending
-    }
-}
-
-impl DocumentProvider for ControlledDocument {
-    /// Records a real bridge script and returns its independently controlled evaluator.
-    ///
-    /// - Complexity: amortized O(1) recording, O(request count) worst-case vector
-    ///   growth; retains O(script.len()) script storage.
-    fn eval(&self, script: String) -> Eval {
-        let pending = Rc::new(RefCell::new(Pending {
-            script,
-            ..Pending::default()
-        }));
-        self.requests.borrow_mut().push(pending.clone());
-        Eval::new(
-            self.owner
-                .insert(Box::new(ControlledEvaluator(pending)) as Box<dyn Evaluator>),
-        )
-    }
-}
-
-/// Pumps event tasks and renders their resulting state without a browser or external executor.
-///
-/// - Complexity: queued task polling plus component rendering.
-fn settle(dom: &mut VirtualDom) {
-    dom.render_immediate_to_vec();
-    {
-        let mut work = std::pin::pin!(dom.wait_for_work());
-        let _ = work.as_mut().poll(&mut Context::from_waker(Waker::noop()));
-    }
-    dom.render_immediate_to_vec();
-}
-
-/// Dispatches an actual input event; the synthetic empty value cannot supply the live draft.
-///
-/// - Complexity: event dispatch plus queued task polling and component rendering.
-fn input(dom: &mut VirtualDom, id: ElementId) {
-    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-    let data = dioxus_html::SerializedFormData::new(String::new(), Vec::new());
-    let event = Event::new(
-        Rc::new(dioxus_html::PlatformEventData::new(Box::new(data))),
-        true,
-    );
-    dom.runtime().handle_event("input", event.into_any(), id);
-    settle(dom);
-}
-
-/// Completes the specified actual request and wakes its awaiting production handler.
-///
-/// - Complexity: delivery plus queued task polling and component rendering.
-fn respond(
-    provider: &ControlledDocument,
-    index: usize,
-    response: Result<Value, EvalError>,
-    dom: &mut VirtualDom,
-) {
-    let request = provider.requests.borrow()[index].clone();
-    let waker = {
-        let mut request = request.borrow_mut();
-        request.response = Some(response);
-        request.waker.take()
-    };
-    if let Some(waker) = waker {
-        waker.wake();
-    }
-    settle(dom);
-}
-
-/// Real minimum/maximum events apply exact drafts and surface transport/decoding failures.
-#[test]
-fn numeric_events_route_bounds_errors_and_stale_replies() {
-    for mode in [0, 6] {
-        let (mut dom, events, observed, _) = mount(mode);
-        let provider = Rc::new(ControlledDocument::default());
-        dom.provide_root_context(provider.clone() as Rc<dyn DocumentProvider>);
-        let (document, _, _) = observed.borrow().unwrap();
-        let cell = document.peek().cell_order[0];
-        let inputs: Vec<_> = events
-            .iter()
-            .filter(|(name, _)| name == "input")
-            .map(|(_, id)| *id)
-            .collect();
-        let min = inputs[1];
-        let max = inputs[2];
-        let (minimum, maximum) = if mode == 0 {
-            ("9007199254740993", "9007199254740995")
+        if self.0.borrow().closed {
+            Poll::Ready(Ok(Value::Null))
         } else {
-            ("-1.25", "3.5")
-        };
-        input(&mut dom, min);
-        assert!(
-            provider.requests.borrow()[0]
-                .borrow()
-                .script
-                .contains("clamp-min-")
-        );
-        respond(&provider, 0, Ok(json!(format!("1|{minimum}"))), &mut dom);
-        input(&mut dom, max);
-        assert!(
-            provider.requests.borrow()[1]
-                .borrow()
-                .script
-                .contains("clamp-max-")
-        );
-        respond(&provider, 1, Ok(json!(format!("1|{maximum}"))), &mut dom);
-        let expected = if mode == 0 {
-            CellType::I64 {
-                clamp: crate::model::cell::ClampRange {
-                    min: Some(9007199254740993),
-                    max: Some(9007199254740995),
-                },
-            }
-        } else {
-            CellType::F64 {
-                clamp: crate::model::cell::ClampRange {
-                    min: Some(-1.25),
-                    max: Some(3.5),
-                },
-            }
-        };
-        assert_eq!(document.peek().cells[cell].ty, expected);
-        let html = dioxus_ssr::render(&dom);
-        assert!(
-            html.contains(&format!("value=\"{minimum}\""))
-                && html.contains(&format!("value=\"{maximum}\""))
-        );
-        for (index, response, visible) in [
-            (
-                2,
-                Err(EvalError::Communication("offline".into())),
-                "numeric field read failed",
-            ),
-            (3, Ok(json!(42)), "numeric field read failed"),
-            (4, Ok(json!("malformed")), "invalid numeric field response"),
-        ] {
-            input(&mut dom, min);
-            respond(&provider, index, response, &mut dom);
-            let html = dioxus_ssr::render(&dom);
-            assert!(
-                html.contains("role=\"alert\"") && html.contains(visible),
-                "{html}"
-            );
-            assert_eq!(document.peek().cells[cell].ty, expected);
+            Poll::Pending
         }
-        input(&mut dom, min); // old success must not clear the newer transport error.
-        input(&mut dom, min);
-        respond(
-            &provider,
-            6,
-            Err(EvalError::Communication("latest failure".into())),
-            &mut dom,
-        );
-        let newest_error = dioxus_ssr::render(&dom);
-        assert!(newest_error.contains("numeric field read failed"));
-        respond(&provider, 5, Ok(json!("1|0")), &mut dom);
-        assert_eq!(document.peek().cells[cell].ty, expected);
-        assert_eq!(dioxus_ssr::render(&dom), newest_error);
-        input(&mut dom, max); // old error must not replace the newer successful field state.
-        input(&mut dom, max);
-        respond(&provider, 8, Ok(json!(format!("1|{maximum}"))), &mut dom);
-        respond(
-            &provider,
-            7,
-            Err(EvalError::Communication("obsolete".into())),
-            &mut dom,
-        );
-        assert_eq!(document.peek().cells[cell].ty, expected);
-        assert!(!dioxus_ssr::render(&dom).contains("role=\"alert\""));
-        assert_eq!(
-            html.matches("<sp-number-field").count(),
-            if mode == 0 { 0 } else { 2 }
-        );
     }
+}
+
+/// Drains immediately runnable source, locale, and render work.
+fn settle(dom: &mut VirtualDom) {
+    for _ in 0..16 {
+        settle_effects(dom);
+    }
+}
+
+/// Mounts a production side panel with an observable document and renderer transport.
+fn native_mount(mode: u8) -> (Mounted, Rc<NativeDocument>, EpochObserver) {
+    let observed: Observer = Rc::new(RefCell::new(None));
+    let renders = Rc::new(Cell::new(0));
+    let epoch = Rc::new(Cell::new(None));
+    let renderer = Rc::new(NativeDocument::default());
+    let mut dom = VirtualDom::new_with_props(host, mode);
+    dom.provide_root_context((observed.clone(), renders.clone()));
+    dom.provide_root_context(epoch.clone());
+    dom.provide_root_context(renderer.clone() as Rc<dyn DocumentProvider>);
+    let edits = dom.rebuild_to_vec().edits;
+    let events = edits
+        .into_iter()
+        .filter_map(|edit| match edit {
+            Mutation::NewEventListener { name, id } => Some((name, id)),
+            Mutation::SetAttribute {
+                name: "aria-label",
+                value: dioxus::core::AttributeValue::Text(label),
+                id,
+                ..
+            } => Some((format!("label:{label}"), id)),
+            _ => None,
+        })
+        .collect();
+    settle(&mut dom);
+    ((dom, events, observed, renders), renderer, epoch)
+}
+
+/// Dispatches a native text event with its synchronously captured value.
+fn text(dom: &mut VirtualDom, id: ElementId, value: &str) {
+    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+    let data = dioxus_html::SerializedFormData::new(value.into(), Vec::new());
+    dom.runtime().handle_event(
+        "input",
+        Event::new(
+            Rc::new(dioxus_html::PlatformEventData::new(Box::new(data))),
+            true,
+        )
+        .into_any(),
+        id,
+    );
+    settle(dom);
+}
+
+/// Delivers one native source event, including its matching bubbling focusout on blur.
+fn frame(
+    dom: &mut VirtualDom,
+    source: &Rc<RefCell<Source>>,
+    action: &str,
+    value: &str,
+    events: &[(String, ElementId)],
+) {
+    source.borrow_mut().push(action, value);
+    if action == "blur" {
+        for (_, id) in events.iter().filter(|(name, _)| name == "focusout") {
+            dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+            dom.runtime().handle_event(
+                "focusout",
+                Event::new(
+                    Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                        dioxus_html::SerializedFocusData::default(),
+                    ))),
+                    true,
+                )
+                .into_any(),
+                *id,
+            );
+        }
+    }
+    settle(dom);
+}
+
+/// Native property and formula events invoke existing Document operations.
+#[test]
+fn native_property_and_formula_events_update_document() {
+    for mode in [0, 1, 2, 7] {
+        let ((mut dom, events, observed, _), _, _) = native_mount(mode);
+        let (document, _, _) = observed.borrow().unwrap();
+        let name_id = events
+            .iter()
+            .find(|(name, _)| name == "label:Name")
+            .unwrap()
+            .1;
+        text(&mut dom, name_id, "renamed");
+        let doc = document.peek();
+        match mode {
+            0 => assert_eq!(doc.cells[doc.cell_order[0]].name, "renamed"),
+            1 => assert_eq!(
+                doc.relationship_groups[doc.relationship_group_order[0]].display_name,
+                "renamed"
+            ),
+            _ => assert_eq!(
+                doc.conditional_groups[doc.conditional_group_order[0]].display_name,
+                "renamed"
+            ),
+        }
+        drop(doc);
+        if mode < 2 {
+            let input_id = events
+                .iter()
+                .find(|(name, _)| {
+                    if mode == 0 {
+                        name == "label:Restrict"
+                    } else {
+                        name.starts_with("label:Formula for ")
+                    }
+                })
+                .unwrap()
+                .1;
+            text(
+                &mut dom,
+                input_id,
+                if mode == 0 { "positive" } else { "amount + 1" },
+            );
+            let doc = document.peek();
+            if mode == 0 {
+                assert_eq!(
+                    doc.cells[doc.cell_order[0]].restrict.as_deref(),
+                    Some("positive")
+                );
+            } else {
+                assert!(
+                    doc.relationship_groups[doc.relationship_group_order[0]]
+                        .members
+                        .iter()
+                        .any(|(_, formula)| formula == "amount + 1")
+                );
+            }
+        }
+        if mode == 7 {
+            let input_id = events
+                .iter()
+                .find(|(name, _)| name == "label:Condition")
+                .unwrap()
+                .1;
+            text(&mut dom, input_id, "enabled && true");
+            let doc = document.peek();
+            let crate::model::conditional_group::ConditionExpr::Formula { expr, .. } =
+                &doc.conditional_groups[doc.conditional_group_order[0]].condition
+            else {
+                panic!("formula")
+            };
+            assert_eq!(expr, "enabled && true");
+        }
+    }
+}
+
+/// Localized bounds commit exact values, clear to absence, and recover lexical drafts on blur.
+#[test]
+fn native_localized_bounds_clear_errors_and_blur_preserve_serialization() {
+    let ((mut dom, events, observed, _), renderer, _) = native_mount(6);
+    let (mut document, _, _) = observed.borrow().unwrap();
+    let cell = document.peek().cell_order[0];
+    let source = renderer.sources.borrow()[0].clone();
+    frame(&mut dom, &source, "focus", "", &events);
+    frame(&mut dom, &source, "input", "1.234,5", &events);
+    {
+        let doc = document.peek();
+        let CellType::F64 { clamp } = &doc.cells[cell].ty else {
+            panic!("F64")
+        };
+        assert_eq!(clamp.min, Some(1234.5));
+    }
+    frame(&mut dom, &source, "input", "wrong", &events);
+    let invalid_html = dioxus_ssr::render(&dom);
+    assert!(invalid_html.contains("Invalid number"), "{invalid_html}");
+    let before = to_json(&document.peek()).unwrap();
+    frame(&mut dom, &source, "blur", "wrong", &events);
+    assert_eq!(to_json(&document.peek()).unwrap(), before);
+    assert_eq!(source.borrow().value, "1.234,5");
+    assert!(!dioxus_ssr::render(&dom).contains("Invalid number"));
+    frame(&mut dom, &source, "focus", "1.234,5", &events);
+    frame(&mut dom, &source, "input", "", &events);
+    {
+        let doc = document.peek();
+        let CellType::F64 { clamp } = &doc.cells[cell].ty else {
+            panic!("F64")
+        };
+        assert_eq!(clamp.min, None);
+    }
+    set_clamp_min(&mut document.write(), cell, "3.5");
+    let after_external = to_json(&document.peek()).unwrap();
+    frame(&mut dom, &source, "blur", "", &events);
+    assert_eq!(to_json(&document.peek()).unwrap(), after_external);
+    assert_eq!(source.borrow().value, "3,5");
+}
+
+/// An unresolved source failure survives blur without writing the document or becoming model rejection.
+#[test]
+fn native_source_failure_remains_visible_after_blur() {
+    let ((mut dom, events, observed, _), renderer, _) = native_mount(6);
+    let (document, _, _) = observed.borrow().unwrap();
+    let before = to_json(&document.peek()).unwrap();
+    let source = renderer.sources.borrow()[0].clone();
+    frame(&mut dom, &source, "focus", "", &events);
+    frame(&mut dom, &source, "error", "", &events);
+    assert!(dioxus_ssr::render(&dom).contains("native range unavailable"));
+    frame(&mut dom, &source, "blur", "", &events);
+    let html = dioxus_ssr::render(&dom);
+    assert!(
+        html.contains("Number event source error: native range unavailable"),
+        "{html}"
+    );
+    assert!(!html.contains("The model rejected this value."), "{html}");
+    assert_eq!(to_json(&document.peek()).unwrap(), before);
+}
+
+/// Retired selection and document source callbacks cannot write a successor document.
+#[test]
+fn native_old_selection_and_document_events_cannot_write_successors() {
+    let ((mut dom, events, observed, _), renderer, epoch) = native_mount(6);
+    let (mut document, mut selection, _) = observed.borrow().unwrap();
+    let old_source = renderer.sources.borrow()[0].clone();
+    let cell = document.peek().cell_order[0];
+    let alias = add_cell_node(&mut document.write(), cell, Point::new(500.0, 60.0));
+    selection.set(HashSet::from([NodeId::CellNode(alias)]));
+    settle(&mut dom);
+    assert!(old_source.borrow().closed);
+    let before = to_json(&document.peek()).unwrap();
+    frame(&mut dom, &old_source, "input", "99", &events);
+    assert_eq!(to_json(&document.peek()).unwrap(), before);
+    let active_source = {
+        let sources = renderer.sources.borrow();
+        sources[sources.len() - 2].clone()
+    };
+    active_source.borrow_mut().push("input", "77");
+    document.set(fixture());
+    selection.set(HashSet::from([NodeId::CellNode(
+        document.peek().cell_nodes.keys().next().unwrap(),
+    )]));
+    let replacement = to_json(&document.peek()).unwrap();
+    let mut generation = epoch.get().unwrap();
+    generation.set(1);
+    settle(&mut dom);
+    assert!(active_source.borrow().closed);
+    assert_eq!(to_json(&document.peek()).unwrap(), replacement);
+    frame(&mut dom, &active_source, "input", "88", &events);
+    assert_eq!(to_json(&document.peek()).unwrap(), replacement);
+}
+
+/// Exact integer aspirations and range failures traverse both mounted numeric bound controls.
+#[test]
+fn native_integer_bounds_preserve_digits_and_reject_out_of_range_edits() {
+    let ((mut dom, events, observed, _), renderer, _) = native_mount(0);
+    let (document, _, _) = observed.borrow().unwrap();
+    let sources = renderer.sources.borrow();
+    let min = sources[0].clone();
+    let max = sources[1].clone();
+    drop(sources);
+    frame(&mut dom, &min, "input", "9007199254740993", &events);
+    frame(&mut dom, &max, "input", "9007199254740995", &events);
+    {
+        let doc = document.peek();
+        let CellType::I64 { clamp } = &doc.cells[doc.cell_order[0]].ty else {
+            panic!("I64")
+        };
+        assert_eq!(clamp.min, Some(9_007_199_254_740_993));
+        assert_eq!(clamp.max, Some(9_007_199_254_740_995));
+    }
+    let before = to_json(&document.peek()).unwrap();
+    frame(&mut dom, &min, "input", "9223372036854775808", &events);
+    assert!(dioxus_ssr::render(&dom).contains("outside Signed(64)"));
+    assert_eq!(to_json(&document.peek()).unwrap(), before);
+    frame(&mut dom, &max, "input", "", &events);
+    let doc = document.peek();
+    let CellType::I64 { clamp } = &doc.cells[doc.cell_order[0]].ty else {
+        panic!("I64")
+    };
+    assert_eq!(clamp.max, None);
 }

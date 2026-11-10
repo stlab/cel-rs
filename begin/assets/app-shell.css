@@ -3,3 +3,27 @@ html, body {
     padding: 0;
     overflow: hidden;
 }
+
+.begin-action-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.begin-examples {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 12px;
+}
+
+.begin-examples button {
+    justify-content: flex-start;
+    width: 100%;
+}
+
+.begin-examples button[aria-current="page"] {
+    background: var(--primary-color-6);
+    color: var(--secondary-color);
+    font-weight: 600;
+}

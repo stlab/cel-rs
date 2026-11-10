@@ -10,3 +10,5 @@ pub use bridge::{BridgeState, ViewMessage, ViewReply, ViewRequest};
 pub use constraints::{ViewAction, ViewConstraints, ViewInput, ViewOutput, ViewTransform};
 pub use data::{GraphData, LinkData, LinkKind, NodeData, NodeKind, to_graph_data};
 pub use view::{GraphDrive, GraphView, graph_drive_script};
+mod failure;
+pub use failure::GraphFailure;

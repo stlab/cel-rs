@@ -4,7 +4,7 @@
 use crate::model::document::Document;
 use crate::model::geometry::Point;
 use crate::ui::canvas::{NodeId, duplicate_selection};
-use adam_web_ui::spectrum::{SpActionButton, SpActionGroup};
+use adam_web_ui::components::{Button, ButtonVariant};
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
@@ -41,6 +41,15 @@ fn tool_label(tool: Tool) -> &'static str {
         Tool::AddConditional => "Add Conditional",
         Tool::Duplicate => "Duplicate",
     }
+}
+
+/// Returns whether `tool` is the currently active toolbar mode.
+///
+/// # Examples
+///
+/// `tool_button_pressed(Tool::Select, Tool::Select)` returns `true`.
+fn tool_button_pressed(active_tool: Tool, tool: Tool) -> bool {
+    active_tool == tool
 }
 
 /// Applies a tool selection or duplicates selected relationships without changing tools.
@@ -91,13 +100,22 @@ pub fn Toolbar(
         Tool::Duplicate,
     ];
     rsx! {
-        SpActionGroup {
-            compact: false,
+        div {
+            class: "toolbar",
+            role: "group",
+            aria_label: "Canvas tools",
+            style: "display: flex; gap: 4px;",
             for tool in tools {
-                SpActionButton {
-                    selected: tool == *active_tool.read(),
-                    onclick: move |_| activate_tool(tool, active_tool, document, selection),
-                    "{tool_label(tool)}"
+                {
+                    let selected = tool_button_pressed(*active_tool.read(), tool);
+                    rsx! {
+                        Button {
+                            variant: if selected { ButtonVariant::Primary } else { ButtonVariant::Outline },
+                            aria_pressed: selected,
+                            onclick: move |_| activate_tool(tool, active_tool, document, selection),
+                            "{tool_label(tool)}"
+                        }
+                    }
                 }
             }
         }
@@ -125,5 +143,32 @@ mod tests {
         ];
         let unique: std::collections::HashSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
+    /// Only the active toolbar mode exposes a pressed state.
+    fn tool_button_pressed_state_tracks_the_active_mode() {
+        assert!(tool_button_pressed(
+            Tool::AddConditional,
+            Tool::AddConditional
+        ));
+        assert!(!tool_button_pressed(Tool::AddConditional, Tool::Select));
+    }
+
+    #[test]
+    /// Selecting a toolbar mode updates the mode and preserves the current selection.
+    fn selecting_a_toolbar_mode_preserves_selection() {
+        /// Applies one toolbar selection inside its owning Dioxus scope.
+        fn host() -> Element {
+            let document = use_signal(|| Document::new("demo"));
+            let selection = use_signal(HashSet::new);
+            let active_tool = use_signal(|| Tool::Select);
+            activate_tool(Tool::AddConditional, active_tool, document, selection);
+            assert_eq!(*active_tool.read(), Tool::AddConditional);
+            assert!(selection.read().is_empty());
+            rsx! {}
+        }
+
+        VirtualDom::new(host).rebuild_in_place();
     }
 }

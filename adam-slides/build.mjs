@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
 import { access, copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { renderDeck } from "./deck.mjs";
@@ -38,7 +37,7 @@ export async function publishDeck(slides, staged) {
   const output = join(slides, "dist");
   for (const asset of [
     "adam-live-examples.json", "adam_lang_book_live.js", "adam_lang_book_live_bg.wasm",
-    "swc.js", "inspector.css", "graph.css", "graph.js", "d3.v7.min.js",
+    "adam-controls.css", "inspector.css", "graph.css", "graph.js", "d3.v7.min.js",
   ]) await access(join(staged, asset));
   for (const name of ["example.html", "example.css", "example.mjs"]) {
     await access(join(slides, name));
@@ -74,9 +73,11 @@ export async function publishDeck(slides, staged) {
  * @returns {Promise<void>}
  */
 export async function prepareDeck(root) {
-  const staging = await mkdtemp(join(tmpdir(), "adam-slides-build-"));
+  const scratch = join(root, "target", "slides-staging");
+  await mkdir(scratch, {recursive:true});
+  const staging = await mkdtemp(join(scratch, "build-"));
   try {
-    const result = spawnSync("cargo", ["run", "-p", "xtask", "--", "prepare-live-slides-assets", staging],
+    const result = spawnSync("cargo", ["run", "--manifest-path", join(root, "Cargo.toml"), "-p", "xtask", "--", "prepare-live-slides-assets", staging],
       { cwd: root, encoding: "utf8" });
     if (result.error) throw result.error;
     if (result.status !== 0) throw new Error(`Live asset staging failed:\n${result.stderr}`);

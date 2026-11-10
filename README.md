@@ -15,6 +15,7 @@ To build and run it yourself, see [Run Begin](#run-begin).
 | Live presentation | [Adam slides](https://stlab.github.io/cel-rs/adam-slides/) · [Authoring and preview](adam-slides/README.md) |
 | CEL libraries | [cel-rs](https://stlab.github.io/cel-rs/cel_rs/) · [Runtime](https://stlab.github.io/cel-rs/cel_runtime/) · [Parser](https://stlab.github.io/cel-rs/cel_parser/) · [Macros](https://stlab.github.io/cel-rs/cel_rs_macros/) · [Standard library](https://stlab.github.io/cel-rs/cel_std/) |
 | Adam libraries | [Property-model runtime](https://stlab.github.io/cel-rs/adam_rs/) · [Language](https://stlab.github.io/cel-rs/adam_lang/) · [Web UI](https://stlab.github.io/cel-rs/adam_web_ui/) |
+| Dioxus integration | [Standalone consumer and host lifecycle](docs/dioxus-integration.md) |
 | Adam tools | [Formatter](https://stlab.github.io/cel-rs/adam_fmt/) · [Language server](https://stlab.github.io/cel-rs/adam_lsp/) · [VS Code extension](editors/vscode-adam-lang/README.md) |
 | Applications | [Begin web app](https://stlab.github.io/cel-rs/begin/) · [Begin architecture](docs/VISION.md) · [EZ Adam design](docs/superpowers/specs/2026-08-24-ez-adam-design.md) |
 
@@ -238,31 +239,16 @@ See [CLAUDE.md](CLAUDE.md) for the full command reference (build, test, lint,
 sanitizers) and repository conventions, including the requirement to work in a
 separate git worktree for any change.
 
-### begin: Spectrum Web Components bundle
+### Run begin's JavaScript tests
 
-`begin/assets/swc.js` is a single bundle (elements + Spectrum 2 theme tokens + the
-zoom-control icons) produced by esbuild from real npm packages. It's committed like
-every other vendored asset, so cloning and building `begin` needs no Node/npm setup.
-
-Node.js + npm are only needed if you're updating the Spectrum version or otherwise
-need to regenerate `begin/assets/swc.js`:
-
-```bash
-cargo xtask build-js
-```
-
-or directly:
+The `begin` Rust build doesn't require Node.js or npm. Use Node.js and npm only to
+run its JavaScript tests. From the repository root, run:
 
 ```bash
 cd begin
 npm ci
-npm run build
+npm test
 ```
-
-Commit the regenerated `begin/assets/swc.js` along with any `begin/package.json`/
-`begin/package-lock.json` changes. See
-[docs/superpowers/specs/2026-07-11-begin-spectrum2-theme-tokens-design.md](docs/superpowers/specs/2026-07-11-begin-spectrum2-theme-tokens-design.md)
-for why this needs to be one compiled bundle rather than separate vendored/live files.
 
 ### adam-lang: VS Code extension
 

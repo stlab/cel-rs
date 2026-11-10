@@ -24,7 +24,7 @@ async function publicationFixture() {
     await writeFile(join(slides, name), name);
   }
   for (const name of [
-    "adam_lang_book_live.js", "adam_lang_book_live_bg.wasm", "swc.js",
+    "adam_lang_book_live.js", "adam_lang_book_live_bg.wasm", "adam-controls.css",
     "inspector.css", "graph.css", "graph.js", "d3.v7.min.js",
   ]) await writeFile(join(staged, name), name);
   await writeFile(join(staged, "adam-live-examples.json"),
@@ -76,7 +76,8 @@ test("successful publication uses merged sources for both displayed and mounted 
       assert.ok(slides[index].includes(`\`\`\`adam\n${source}\n\`\`\``));
     }
     assert.equal(await readFile(join(output, "example.html"), "utf8"), "example.html");
-    assert.equal(await readFile(join(output, "theme", "swc.js"), "utf8"), "swc.js");
+    assert.equal(await readFile(join(output, "theme", "adam-controls.css"), "utf8"), "adam-controls.css");
+    await assert.rejects(readFile(join(output, "theme", "swc.js")), {code:"ENOENT"});
   } finally {
     await rm(fixture.root, { recursive: true });
   }

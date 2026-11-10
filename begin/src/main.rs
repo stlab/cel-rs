@@ -3,6 +3,7 @@ mod app;
 mod example_source;
 mod graph_legend;
 mod open_file;
+mod recovery;
 
 use dioxus::prelude::*;
 

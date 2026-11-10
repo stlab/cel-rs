@@ -898,24 +898,20 @@ fn private_policy_factories_validate_signatures() {
     }
 }
 
-/// Detects swallowed policy factory failures or changed native attachment timing.
+/// Preserves construction errors from private policy factories.
 #[test]
-fn private_policy_failures_leave_destination_discardable() {
-    for case in 0..3 {
+fn private_policy_factory_failures_leave_destination_discardable() {
+    for case in 0..2 {
         let mut builder = TemplateBuilder::new();
         let a = builder.cell("a", || Ok(1i32)).unwrap();
-        match case {
-            0 => builder
+        if case == 0 {
+            builder
                 .filter(&a, &[], |_, _| anyhow::bail!("filter factory"))
-                .unwrap(),
-            1 => builder
+                .unwrap();
+        } else {
+            builder
                 .require(&a, &[], |_| anyhow::bail!("require factory"))
-                .unwrap(),
-            _ => builder
-                .require(&a, std::slice::from_ref(&a), |i| {
-                    Ok(Requirement::from_fn_1(i[0], |_: &i32| Ok(false)))
-                })
-                .unwrap(),
+                .unwrap();
         }
         let mut sheet = Sheet::new();
         let error = builder
@@ -936,16 +932,30 @@ fn private_policy_failures_leave_destination_discardable() {
         assert!(
             matches!(site, adam_rs::template::ConstructionSite::Policy { cell, index: 0 } if cell == a)
         );
-        if case < 2 {
-            assert!(matches!(*source, TemplateError::Factory { .. }));
-        } else {
-            assert!(matches!(
-                *source,
-                TemplateError::Runtime(adam_rs::Error::InvalidRequirement)
-            ));
-        }
+        assert!(matches!(*source, TemplateError::Factory { .. }));
         drop(sheet);
     }
+}
+
+/// Reports a false private-cell requirement after successful propagation.
+#[test]
+fn private_false_requirement_is_reported_after_successful_propagation() {
+    let mut builder = TemplateBuilder::new();
+    let a = builder.cell("a", || Ok(1i32)).unwrap();
+    builder
+        .require(&a, std::slice::from_ref(&a), |i| {
+            Ok(Requirement::from_fn_1(i[0], |_: &i32| Ok(false)))
+        })
+        .unwrap();
+    let template = builder.finish().unwrap();
+    let mut sheet = Sheet::new();
+    let instance = template.instantiate(&mut sheet, &[]).unwrap();
+    let cell = instance.cells()[0];
+
+    assert_eq!(sheet.cell_requirements(cell).unwrap().len(), 1);
+    sheet.propagate().unwrap();
+    assert!(!sheet.cell_requirements_valid(cell));
+    assert_eq!(sheet.violated_requirements(cell).count(), 1);
 }
 
 /// Detects malformed conditional owners, duplicate claims, and empty branch keys.

@@ -1,0 +1,48 @@
+/* Inspector layout. Local class names are scoped to `adam_inspector_<local>`.
+ * The embedded `rem` lengths are rewritten to `calc(<n> * var(--adam-rem, 1rem))`
+ * by the build script so hosts scale the inspector through `--adam-rem`. */
+
+.panel {
+  width: 260px;
+  min-width: 260px;
+  height: 100%;
+  overflow-y: auto;
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+.card {
+  width: 100%;
+  max-width: 24rem;
+  margin-inline: auto;
+  box-sizing: border-box;
+}
+
+.cells {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* Display-only rows match the numeric editor's label spacing and its read-only
+ * value: no frame, the input's text size, and the input's 8px block padding. */
+.display {
+  display: grid;
+}
+
+.display > label {
+  margin-bottom: 0.5rem;
+}
+
+.value {
+  padding-block: 8px;
+  font-size: 0.8333rem;
+  line-height: normal;
+  overflow-wrap: anywhere;
+  color: var(--secondary-color-4);
+}
+
+.note {
+  font-size: 0.75rem;
+  color: var(--secondary-color-5);
+}

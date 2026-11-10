@@ -98,7 +98,7 @@ impl MethodRecipe {
 /// Retains one occurrence using parent links, never copied full invocation paths.
 ///
 /// Identities retain no recipe edges. See [`TypedTemplate::instantiate`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct OccurrenceOrigin {
     /// Identifies this live occurrence.
     pub id: OccurrenceId,
@@ -184,7 +184,7 @@ pub enum AuthoredRole {
 /// Retains one direct invocation's flat occurrence records after template drop.
 ///
 /// See [`TypedTemplate::instantiate`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct InstanceOrigin {
     /// Preserves depth-first native occurrence order.
     pub occurrences: Vec<OccurrenceOrigin>,
@@ -194,7 +194,7 @@ pub struct InstanceOrigin {
 ///
 /// A live boundary cell can retain origins from several occurrences.
 /// See [`TypedTemplate::instantiate`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CellOrigin {
     /// Identifies the occurrence containing this declaration or formal.
     pub occurrence: OccurrenceId,
@@ -1422,6 +1422,7 @@ impl TypedTemplate {
         let definitions = self.definitions();
         let mut occurrences = Vec::with_capacity(instance.occurrences().len());
         let mut source_ids: HashSet<_> = destination.sources.iter().cloned().collect();
+        let mut requirement_offsets = HashMap::<CellId, usize>::new();
         for occurrence in instance.occurrences() {
             let definition = definitions[occurrence.template()];
             for (slot, shape) in &definition.cells {
@@ -1445,12 +1446,21 @@ impl TypedTemplate {
                 // Preserve attachment order, including unnamed requirements.
                 if let Some(policies) = definition.requirements.get(slot) {
                     let ids = destination.sheet.cell_requirements(id).unwrap_or_default();
-                    destination.requirement_names.extend(
-                        policies
-                            .iter()
-                            .zip(ids)
-                            .filter_map(|(name, id)| name.as_ref().map(|name| (*id, name.clone()))),
-                    );
+                    let start = requirement_offsets.entry(id).or_default();
+                    let authored = definition.authored.iter().filter(|item| {
+                        item.role == AuthoredRole::Requirement && item.cell.as_ref() == Some(slot)
+                    });
+                    for ((name, id), item) in
+                        policies.iter().zip(ids.iter().skip(*start)).zip(authored)
+                    {
+                        if let Some(name) = name {
+                            destination.requirement_names.insert(*id, name.clone());
+                        }
+                        destination
+                            .requirement_labels
+                            .insert(*id, item.label.clone());
+                    }
+                    *start += policies.len();
                 }
             }
             if let Some(location) = &definition.label.location
