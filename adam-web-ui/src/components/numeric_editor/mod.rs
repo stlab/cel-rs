@@ -9,7 +9,7 @@
 //!
 //! The layout classes (`editor`, `controls`, `stepper`, `slider`,
 //! `visually_hidden`) live in `style.css` and are compiled into scoped
-//! `adam_numeric_editor_<local>` names by [`crate::components`]' build script.
+//! `adam_numeric_editor_<local>` names by the crate's `build.rs`.
 //!
 //! # Examples
 //! ```

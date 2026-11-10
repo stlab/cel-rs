@@ -381,8 +381,8 @@ test("controls match dioxus-components sizes", async ({ page }) => {
   const label = page.locator(`label[for="${inputId}"]`);
   // The publishing host scales every embedded `rem` length by `--adam-rem`, so assert the
   // upstream dioxus-components sizes (label 0.8rem, label-to-field gap 0.5rem) relative to the
-  // host-resolved rem rather than a fixed 16px root. Absolute, px-based sizes (input height)
-  // stay fixed regardless of the scale.
+  // host-resolved rem rather than a fixed 16px root. The input's 31px height is likewise
+  // scaled by the host rem (rem / 16).
   const rem = await label.evaluate((element) => {
     const probe = document.createElement("div");
     probe.style.cssText = "position:absolute;width:var(--adam-rem,1rem)";

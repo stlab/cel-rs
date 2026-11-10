@@ -103,3 +103,27 @@ WKWebView evidence in Task 10; Task 11 preserves that delivery.
 Resume with the controller's scoped re-review. Keep these issue boundaries
 explicit; do not repeat broad rendering solely to duplicate the retained Task
 5–10 evidence.
+
+## Control sizing and card layout
+
+Plan: `docs/superpowers/plans/2026-11-09-control-card-layout.md`.
+
+Done:
+
+- **Host-scalable rem.** `adam-web-ui/build.rs` rewrites every embedded `<n>rem`
+  length into `calc(<n> * var(--adam-rem, 1rem))` (`build/scale_rem.rs`). A host
+  scales all controls by setting `--adam-rem`. The mdBook sets it to `1.6rem` on
+  `:root` in `book-rem.css`; the slides deck never loads that file.
+- **Vendored Card** component, plus component-local CSS modules for
+  `numeric_editor` and `inspector` (scoped `adam_<module>_<local>` classes). The
+  theme stylesheet now holds only tokens and the `.adam-theme` scope.
+- **`InspectorPresentation { Panel, Card }`** (default `Panel`). The book mounts
+  the card presentation without a header.
+- **Numeric rows.** The slider sits left of a fixed-width number field. The help
+  text is visually hidden but stays in the accessibility tree. Rows are separated
+  by the inspector's 1.5rem gap; the host margin on `.adam-cell-row` was removed
+  from Begin and the book.
+
+Deferred: `scale_rem` is a byte scanner, not a CSS tokenizer. Its contract
+excludes strings and comments that resemble `<n>rem` lengths; no vendored
+stylesheet contains one.

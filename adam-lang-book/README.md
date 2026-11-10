@@ -30,7 +30,7 @@ wasm-pack build --target web --release
 cd ..
 
 # Stages the compiled wasm/js bundle, the Spectrum Web Components bundle
-# (begin/assets/swc.js), begin/assets/inspector.css, and a generated
+# (begin/assets/swc.js), the embedded control stylesheet, and a generated
 # manifest of every example's source into book-src/theme/:
 cargo run -p xtask -- prepare-live-book-assets
 
@@ -60,13 +60,15 @@ up by the live-mount manifest, then let `mdbook serve`'s own watch pick up the r
 
 ## What's generated vs. committed
 
-`book-src/theme/` holds two hand-written, committed files (`adam-live-bootstrap.js`,
-`adam-live.css`) alongside everything `prepare-live-book-assets`/`wasm-pack` generate into the
-same directory (the compiled wasm/js bundle, `swc.js`, `inspector.css`, and
-`adam-live-examples.json`). The directory's own `.gitignore` (`*`) keeps the generated files
-out of git while leaving the two already-tracked files alone — never `git add -f` a new file
-into `book-src/theme/` without checking whether it's actually meant to be committed source
-versus a build artifact.
+`book-src/theme/` holds five hand-written, committed files (`adam-live-bootstrap.js`,
+`adam-live.css`, `book-rem.css`, `graph.css`, `inspector.css`) alongside everything
+`prepare-live-book-assets`/`wasm-pack` generate into the same directory (the compiled wasm/js
+bundle, `swc.js`, `adam-controls.css`, and `adam-live-examples.json`). `inspector.css` is the
+committed book-specific inspector stylesheet, which the staging step leaves in place;
+`book-rem.css` is mdBook-only and the slides deck never loads it. The directory's own
+`.gitignore` (`*`) keeps the generated files out of git while leaving the tracked files alone —
+never `git add -f` a new file into `book-src/theme/` without checking whether it's actually
+meant to be committed source versus a build artifact.
 
 `book-dist/` (mdBook's own output directory) is gitignored at the repo root and is never
 committed.

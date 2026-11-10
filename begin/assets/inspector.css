@@ -2,10 +2,3 @@
     border-left: 1px solid var(--primary-color-6);
 }
 
-.adam-cell-row {
-    margin: 12px 0;
-}
-
-.adam-cell-row [aria-invalid="true"] {
-    border-color: var(--primary-error-color);
-}

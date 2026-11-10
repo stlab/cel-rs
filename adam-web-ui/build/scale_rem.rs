@@ -34,6 +34,12 @@ pub(crate) fn is_identifier_byte(byte: u8) -> bool {
 /// `calc(calc(1.15 * var(--adam-rem, 1rem)) - 2px)`; Lightning CSS accepts and minifies nested
 /// `calc()`, so this remains valid CSS.
 ///
+/// A numeric literal is a run of ASCII digits and `.` containing at least one digit, so a
+/// class selector such as `.rem` is never rewritten.
+///
+/// - Precondition: `source` contains no string literals or comments whose text resembles a
+///   `<n>rem` length; the scan is not a CSS tokenizer and would rewrite such text.
+///
 /// - Complexity: O(b) time and space for source byte length `b`.
 pub(crate) fn scale_rem(source: &str) -> String {
     let bytes = source.as_bytes();
@@ -64,10 +70,12 @@ pub(crate) fn scale_rem(source: &str) -> String {
                     cursor += 1;
                 }
                 let number_end = cursor;
+                let has_digit = bytes[index..number_end].iter().any(u8::is_ascii_digit);
                 let unit_end = cursor + 3;
                 let followed_by_rem = bytes.get(cursor..unit_end) == Some(b"rem");
-                let unit_is_whole_word =
-                    followed_by_rem && !bytes.get(unit_end).is_some_and(|b| is_identifier_byte(*b));
+                let unit_is_whole_word = has_digit
+                    && followed_by_rem
+                    && !bytes.get(unit_end).is_some_and(|b| is_identifier_byte(*b));
                 if unit_is_whole_word {
                     output.push_str(&source[copied_to..number_start]);
                     let literal = &source[number_start..number_end];
@@ -132,6 +140,16 @@ mod tests {
             scale_rem("transform: translateX(calc(2rem - 1px - (1.15rem - 2px)));"),
             "transform: translateX(calc(calc(2 * var(--adam-rem, 1rem)) - 1px - (calc(1.15 * var(--adam-rem, 1rem)) - 2px)));"
         );
+    }
+
+    /// A lone `.` before `rem` (a class selector) is not a number and is left untouched.
+    #[test]
+    fn digitless_dot_before_rem_is_left_alone() {
+        assert_eq!(
+            scale_rem(".rem { width: 1rem; }"),
+            ".rem { width: calc(1 * var(--adam-rem, 1rem)); }"
+        );
+        assert_eq!(scale_rem("a .rem{}"), "a .rem{}");
     }
 
     /// A length in a unit other than `rem` is never rewritten.

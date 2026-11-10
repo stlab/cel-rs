@@ -5,10 +5,10 @@
  *
  * mdBook sets html { font-size: 62.5% } (1rem == 10px), shrinking controls sized
  * for a 16px root. Scale embedded control lengths back to their upstream 16px-root
- * sizing by setting --adam-rem to 1.6rem (1.6 * 10px == 16px) on .adam-theme. Hosts
+ * sizing by setting --adam-rem to 1.6rem (1.6 * 10px == 16px) on :root, so standalone controls scale as well as themed ones. Hosts
  * with a native 16px root (the slides deck) leave --adam-rem at its 1rem default and
  * therefore must not load this file.
  */
-.adam-theme {
+:root {
     --adam-rem: 1.6rem;
 }

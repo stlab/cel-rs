@@ -30,7 +30,9 @@ class exports using the public `adam_<component>_[local]` naming pattern.
 The installer deduplicates one immutable style element per document, independent
 of Dioxus root lifetimes and publication paths. Every standalone styled control
 also installs it; consumers do not need a Dioxus asset bundler.
-Numeric editor and slider composition are local code, not upstream components.
+Numeric editor and slider composition are local code, not upstream components. Their layout
+lives in the local `numeric_editor` style module (`numeric_editor/style.css`), and the
+inspector's layout lives in the local `inspector` style module (`src/inspector/style.css`).
 
 `build.rs` additionally rewrites every embedded `<n>rem` length into
 `calc(<n> * var(--adam-rem, 1rem))` before parsing each module (`scale_rem`),
