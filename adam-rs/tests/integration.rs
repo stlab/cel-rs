@@ -1989,6 +1989,7 @@ fn simultaneous_forcing_causes_retain_shared_cascade_priority() {
     let second = sheet.add_cell(false);
     let first_input = sheet.add_cell(30_i32);
     let second_input = sheet.add_cell(40_i32);
+    let d = sheet.add_cell(0_i32);
     let a = sheet.add_cell(1_i32);
     let b = sheet.add_cell(2_i32);
     let c = sheet.add_cell(9_i32);
@@ -1998,24 +1999,35 @@ fn simultaneous_forcing_causes_retain_shared_cascade_priority() {
     let force_b = sheet
         .add_relationship(vec![Method::from_fn_1_1(second_input, b, |v: &i32| Ok(*v))])
         .unwrap();
+    let force_d = sheet
+        .add_relationship(vec![Method::from_fn_1_1(second_input, d, |v: &i32| Ok(*v))])
+        .unwrap();
+    let force_a_from_d = sheet
+        .add_relationship(vec![Method::from_fn_1_1(d, a, |v: &i32| Ok(*v))])
+        .unwrap();
     sheet
         .add_relationship(vec![
             Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
             Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
-            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
+            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| {
+                x.checked_add(*y).ok_or_else(|| anyhow::anyhow!("overflow"))
+            }),
         ])
         .unwrap();
     sheet
         .add_conditional(
             MatchExpr::cell(first),
-            vec![(vec![true], vec![force_a])],
+            vec![
+                (vec![true], vec![force_a]),
+                (vec![false], vec![force_a_from_d]),
+            ],
             vec![],
         )
         .unwrap();
     sheet
         .add_conditional(
             MatchExpr::cell(second),
-            vec![(vec![true], vec![force_b])],
+            vec![(vec![true], vec![force_b, force_d])],
             vec![],
         )
         .unwrap();
@@ -2037,6 +2049,10 @@ fn simultaneous_forcing_causes_retain_shared_cascade_priority() {
     assert_eq!(*sheet.read::<i32>(c).unwrap(), 110);
 
     sheet.write(first, false).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(c));
+    assert_eq!(*sheet.source::<i32>(c).unwrap(), 9);
+
     sheet.write(second, false).unwrap();
     sheet.propagate().unwrap();
     assert!(!sheet.is_forced(c));
