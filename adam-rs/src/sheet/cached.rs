@@ -649,6 +649,261 @@ mod tests {
         );
     }
 
+    /// One mutation applied identically to both sheets of a parity pair.
+    type ParityStep = fn(&mut Sheet, &mut Vec<CellId>);
+
+    /// Builds the reversible fixture `[mode, input, a, b]`.
+    ///
+    /// Mode 1 forces `a` from `input`; mode 2 activates the reversible `a`/`b` relationship.
+    fn reversible_release_fixture() -> (Sheet, Vec<CellId>) {
+        let mut sheet = Sheet::new();
+        let mode = sheet.add_cell(0_i32);
+        let input = sheet.add_cell(30_i32);
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(2_i32);
+        let force = sheet
+            .add_relationship(vec![Method::from_fn_1_1(input, a, |v: &i32| Ok(*v))])
+            .unwrap();
+        let reversible = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+                Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+            ])
+            .unwrap();
+        sheet
+            .add_conditional(
+                MatchExpr::cell(mode),
+                vec![(vec![1_i32], vec![force]), (vec![2_i32], vec![reversible])],
+                vec![],
+            )
+            .unwrap();
+        (sheet, vec![mode, input, a, b])
+    }
+
+    /// Builds the shared-cascade fixture `[first, second, first_input, second_input, d, a, b, c]`.
+    fn simultaneous_forcing_fixture() -> (Sheet, Vec<CellId>) {
+        let mut sheet = Sheet::new();
+        let first = sheet.add_cell(0_i32);
+        let second = sheet.add_cell(0_i32);
+        let first_input = sheet.add_cell(30_i32);
+        let second_input = sheet.add_cell(40_i32);
+        let d = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(2_i32);
+        let c = sheet.add_cell(9_i32);
+        let force_a = sheet
+            .add_relationship(vec![Method::from_fn_1_1(first_input, a, |v: &i32| Ok(*v))])
+            .unwrap();
+        let force_b = sheet
+            .add_relationship(vec![Method::from_fn_1_1(second_input, b, |v: &i32| Ok(*v))])
+            .unwrap();
+        let force_d = sheet
+            .add_relationship(vec![Method::from_fn_1_1(second_input, d, |v: &i32| Ok(*v))])
+            .unwrap();
+        let force_a_from_d = sheet
+            .add_relationship(vec![Method::from_fn_1_1(d, a, |v: &i32| Ok(*v))])
+            .unwrap();
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+                Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+                Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| {
+                    x.checked_add(*y).ok_or_else(|| anyhow::anyhow!("overflow"))
+                }),
+            ])
+            .unwrap();
+        sheet
+            .add_conditional(
+                MatchExpr::cell(first),
+                vec![
+                    (vec![1_i32], vec![force_a]),
+                    (vec![0_i32], vec![force_a_from_d]),
+                ],
+                vec![],
+            )
+            .unwrap();
+        sheet
+            .add_conditional(
+                MatchExpr::cell(second),
+                vec![(vec![1_i32], vec![force_b, force_d])],
+                vec![],
+            )
+            .unwrap();
+        (
+            sheet,
+            vec![first, second, first_input, second_input, d, a, b, c],
+        )
+    }
+
+    /// Builds `[mode, input, a, guard]`, where mode 1 forces `a` and `a`/`guard` is reversible.
+    fn guard_release_fixture() -> (Sheet, Vec<CellId>) {
+        let mut sheet = Sheet::new();
+        let mode = sheet.add_cell(0_i32);
+        let input = sheet.add_cell(11_i32);
+        let a = sheet.add_cell(1_i32);
+        let guard = sheet.add_cell(2_i32);
+        let force = sheet
+            .add_relationship(vec![Method::from_fn_1_1(input, a, |v: &i32| Ok(*v))])
+            .unwrap();
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, guard, |v: &i32| Ok(*v + 100)),
+                Method::from_fn_1_1(guard, a, |v: &i32| Ok(*v + 200)),
+            ])
+            .unwrap();
+        sheet
+            .add_conditional(
+                MatchExpr::cell(mode),
+                vec![(vec![1_i32], vec![force])],
+                vec![],
+            )
+            .unwrap();
+        (sheet, vec![mode, input, a, guard])
+    }
+
+    /// Registers an independent conditional controlled by the forced cell's reversible peer.
+    ///
+    /// Appends `[from_a, from_guard, output]` to `ids`.
+    fn add_independent_guard(sheet: &mut Sheet, ids: &mut Vec<CellId>) {
+        let guard = ids[3];
+        let from_a = sheet.add_cell(111_i32);
+        let from_guard = sheet.add_cell(222_i32);
+        let output = sheet.add_cell(0_i32);
+        let branch_from_a = sheet
+            .add_relationship(vec![Method::from_fn_1_1(from_a, output, |v: &i32| Ok(*v))])
+            .unwrap();
+        let branch_from_guard = sheet
+            .add_relationship(vec![Method::from_fn_1_1(from_guard, output, |v: &i32| {
+                Ok(*v)
+            })])
+            .unwrap();
+        sheet
+            .add_conditional(
+                MatchExpr::cell(guard),
+                vec![
+                    (vec![111_i32], vec![branch_from_a]),
+                    (vec![22_i32], vec![branch_from_guard]),
+                ],
+                vec![],
+            )
+            .unwrap();
+        sheet.validate().unwrap();
+        ids.extend([from_a, from_guard, output]);
+    }
+
+    /// Applies each step to a cached sheet and a fresh-replanning sheet, comparing after every one.
+    ///
+    /// Returns the cached sheet and its fixture cells.
+    ///
+    /// - Complexity: O(S × (propagation + `assert_same_snapshot`)), for S steps.
+    fn run_parity(
+        build: fn() -> (Sheet, Vec<CellId>),
+        steps: &[ParityStep],
+    ) -> (Sheet, Vec<CellId>) {
+        let (mut automatic, mut automatic_ids) = build();
+        let (mut forced, mut forced_ids) = build();
+        for step in steps {
+            step(&mut automatic, &mut automatic_ids);
+            step(&mut forced, &mut forced_ids);
+            automatic.propagate().unwrap();
+            propagate_forced_replan(&mut forced).unwrap();
+            assert_same_snapshot(&automatic, &automatic_ids, &forced, &forced_ids);
+        }
+        (automatic, automatic_ids)
+    }
+
+    /// Checks cached and fresh planning agree through the full remembered-priority lifecycle.
+    #[test]
+    fn forcing_lifecycle_matches_forced_replanning_after_every_step() {
+        let steps: [ParityStep; 10] = [
+            |s, ids| s.write(ids[3], 22_i32).unwrap(),
+            |s, ids| s.write(ids[2], 11_i32).unwrap(),
+            |s, ids| s.write(ids[0], 1_i32).unwrap(),
+            |s, ids| s.write(ids[1], 40_i32).unwrap(),
+            |s, ids| s.write(ids[1], 50_i32).unwrap(),
+            |s, ids| s.write(ids[2], 11_i32).unwrap(),
+            |s, ids| s.write(ids[3], 22_i32).unwrap(),
+            |s, ids| s.write(ids[0], 2_i32).unwrap(),
+            |s, ids| s.write(ids[0], 1_i32).unwrap(),
+            |s, ids| s.write(ids[0], 2_i32).unwrap(),
+        ];
+        // The first release is checked on its own: the write to `b` is newer than the write to `a`.
+        let (sheet, ids) = run_parity(reversible_release_fixture, &steps[..8]);
+        assert!(sheet.is_source(ids[3]) && !sheet.is_source(ids[2]));
+        assert_eq!(
+            (
+                *sheet.read::<i32>(ids[2]).unwrap(),
+                *sheet.read::<i32>(ids[3]).unwrap()
+            ),
+            (22, 22)
+        );
+        run_parity(reversible_release_fixture, &steps);
+    }
+
+    /// Checks a cell demoted before forcing keeps its derived value and priority through release.
+    #[test]
+    fn previously_demoted_cell_matches_forced_replanning_through_forcing() {
+        let steps: [ParityStep; 8] = [
+            |s, ids| s.write(ids[0], 2_i32).unwrap(),
+            |s, ids| s.write(ids[2], 11_i32).unwrap(),
+            |s, ids| s.write(ids[3], 22_i32).unwrap(),
+            |s, ids| s.write(ids[0], 1_i32).unwrap(),
+            |s, ids| s.write(ids[1], 40_i32).unwrap(),
+            |s, ids| s.write(ids[0], 2_i32).unwrap(),
+            |s, ids| s.write(ids[0], 1_i32).unwrap(),
+            |s, ids| s.write(ids[0], 2_i32).unwrap(),
+        ];
+        let (sheet, ids) = run_parity(reversible_release_fixture, &steps[..6]);
+        assert!(sheet.is_source(ids[3]));
+        assert_eq!(*sheet.source::<i32>(ids[2]).unwrap(), 22);
+        assert_eq!(*sheet.read::<i32>(ids[2]).unwrap(), 22);
+        run_parity(reversible_release_fixture, &steps);
+    }
+
+    /// Checks cached and fresh planning agree when two causes share a forced cascade.
+    #[test]
+    fn simultaneous_forcing_causes_match_forced_replanning() {
+        let steps: [ParityStep; 6] = [
+            |s, ids| s.write(ids[7], 9_i32).unwrap(),
+            |s, ids| {
+                s.write(ids[0], 1_i32).unwrap();
+                s.write(ids[1], 1_i32).unwrap();
+            },
+            |s, ids| {
+                s.write(ids[2], 50_i32).unwrap();
+                s.write(ids[3], 60_i32).unwrap();
+            },
+            |s, ids| s.write(ids[0], 0_i32).unwrap(),
+            |s, ids| s.write(ids[1], 0_i32).unwrap(),
+            |s, ids| s.write(ids[1], 1_i32).unwrap(),
+        ];
+        let (sheet, ids) = run_parity(simultaneous_forcing_fixture, &steps[..5]);
+        assert!(sheet.is_source(ids[7]));
+        assert_eq!(*sheet.read::<i32>(ids[7]).unwrap(), 9);
+        run_parity(simultaneous_forcing_fixture, &steps);
+    }
+
+    /// Checks cached and fresh planning agree when release drives an independent guard.
+    #[test]
+    fn independent_guard_release_matches_forced_replanning() {
+        let steps: [ParityStep; 4] = [
+            |s, ids| {
+                s.write(ids[3], 22_i32).unwrap();
+                s.write(ids[2], 11_i32).unwrap();
+            },
+            |s, ids| s.write(ids[0], 1_i32).unwrap(),
+            |s, ids| {
+                add_independent_guard(s, ids);
+                s.write(ids[0], 0_i32).unwrap();
+            },
+            |s, ids| s.write(ids[1], 12_i32).unwrap(),
+        ];
+        let (sheet, ids) = run_parity(guard_release_fixture, &steps);
+        assert!(sheet.is_source(ids[2]));
+        assert_eq!(*sheet.read::<i32>(ids[3]).unwrap(), 111);
+        assert_eq!(*sheet.read::<i32>(ids[6]).unwrap(), 111);
+    }
+
     /// Returns comparable error sites using fixture declaration ordinals, not slot-map keys.
     ///
     /// Selected-method cycles normalize their unspecified starting node by rotation,
