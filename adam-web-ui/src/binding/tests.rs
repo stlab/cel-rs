@@ -1186,8 +1186,10 @@ fn release_state(owner: &SheetOwner) -> (i32, i32, i32, bool, bool) {
 
 /// Applies accepted edits in order, then checks recovery reproduces the published release state.
 ///
-/// - Complexity: O(E × P), for E edits and P the cost of one model propagation; restoration
-///   rebuilds the model and replays all E edits, so it is also O(E × P).
+/// - Complexity: O(F + B + E × (P + U)), for model factory cost F, E edits totaling B bytes,
+///   propagation cost P per transaction, and publication cost U. Construction costs F + U,
+///   each `apply` costs O(edit bytes + P + U), and `restore_accepted` costs another F plus
+///   O(B + E × P + U) because it replays the journal and publishes once.
 fn assert_release_recovers(edits: &[(&str, &str)], expected: (i32, i32, i32, bool, bool)) {
     let factory: ModelFactory = Rc::new(conditional_release_model);
     let mut owner = SheetOwner::new(factory, "release/v1".into()).unwrap();
