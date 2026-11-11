@@ -3527,6 +3527,99 @@ fn issue_182_inequality_chain_writing_the_middle_cell_then_an_untouched_endpoint
 }
 
 #[test]
+/// Checks that late conditional registration preserves unconditional seed folding.
+fn registering_conditional_after_propagation_preserves_unconditional_seed_folding() {
+    let mut sheet = Sheet::new();
+    let x = sheet.add_cell(4_i32);
+    let sink_a = sheet.add_cell(0_i32);
+    let sink_b = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(3_i32);
+    let a = sheet.add_cell(5_i32);
+    let input = sheet.add_cell(5_i32);
+    let int_type = std::any::TypeId::of::<i32>();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(input, a, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| Ok(*value))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![a, x, sink_a],
+                vec![sink_a],
+                vec![int_type; 3],
+                vec![int_type],
+                |args| {
+                    let lhs = args[0].downcast_ref::<i32>().unwrap();
+                    let rhs = args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new((*lhs).min(*rhs))])
+                },
+            ),
+            Method::new(
+                vec![a, x, sink_a],
+                vec![x],
+                vec![int_type; 3],
+                vec![int_type],
+                |args| {
+                    let lhs = args[0].downcast_ref::<i32>().unwrap();
+                    let rhs = args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new((*lhs).max(*rhs))])
+                },
+            ),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![x, b, sink_b],
+                vec![x],
+                vec![int_type; 3],
+                vec![int_type],
+                |args| {
+                    let lhs = args[0].downcast_ref::<i32>().unwrap();
+                    let rhs = args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new((*lhs).min(*rhs))])
+                },
+            ),
+            Method::new(
+                vec![x, b, sink_b],
+                vec![sink_b],
+                vec![int_type; 3],
+                vec![int_type],
+                |args| {
+                    let lhs = args[0].downcast_ref::<i32>().unwrap();
+                    let rhs = args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new((*lhs).max(*rhs))])
+                },
+            ),
+        ])
+        .unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(a));
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 5);
+    assert_eq!(*sheet.read::<i32>(x).unwrap(), 5);
+
+    // The guard adds no forcing: both phases must fold with a's derived priority.
+    sheet
+        .add_conditional(
+            MatchExpr::cell(x),
+            vec![(vec![3_i32, 5_i32], vec![])],
+            vec![],
+        )
+        .unwrap();
+    sheet.propagate().unwrap();
+
+    assert!(sheet.is_forced(a));
+    assert_eq!(*sheet.source::<i32>(x).unwrap(), 4);
+    assert_eq!(*sheet.read::<i32>(x).unwrap(), 3);
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(x).unwrap(), 3);
+}
+
+#[test]
 /// Checks strength-ordered folding of sibling seed contributions.
 fn sibling_seed_fold_uses_strength_order() {
     // Build the cells in x,a,b,c order so the values stay the required 4,5,3,10 while

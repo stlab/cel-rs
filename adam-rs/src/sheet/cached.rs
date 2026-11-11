@@ -88,7 +88,7 @@ impl Sheet {
         }
     }
 
-    /// Captures priorities on entry to forcing and restores them after the final release.
+    /// Captures priorities on entry to conditional forcing and restores them on release.
     ///
     /// - Postcondition: every still-forced cell retains its first remembered priority,
     ///   and every released cell resumes that priority before derived post-processing.
@@ -392,10 +392,11 @@ impl Sheet {
         )?;
 
         let previously_derived = self.commit_stage(stage);
-        let no_forced_outputs = HashSet::new();
         let previous_forced = pre_plan
             .as_ref()
-            .map_or(&no_forced_outputs, |plan| &plan.plan.forced_outputs);
+            .map_or(&prepared.plan.forced_outputs, |plan| {
+                &plan.plan.forced_outputs
+            });
         let priorities_changed =
             self.update_remembered_strengths(previous_forced, &prepared.plan.forced_outputs);
         let strengths_changed =
