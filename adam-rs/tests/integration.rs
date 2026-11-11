@@ -1167,6 +1167,80 @@ fn incompatible_guard_assignment_returns_conflict() {
 }
 
 #[test]
+/// Returns a conflict when a previously forced guard source is released incompatibly.
+fn incompatible_guard_assignment_returns_conflict_after_conditional_force() {
+    let mut sheet = Sheet::new();
+    let release = sheet.add_cell(false);
+    let mode = sheet.add_cell(false);
+    let guard = sheet.add_cell(false);
+    let switch = sheet.add_cell(true);
+    let selected_output = sheet.add_cell(false);
+    let mode_input = sheet.add_cell(true);
+    let force_mode = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            mode_input,
+            mode,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(release),
+            vec![(vec![true], vec![force_mode])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(mode, true).unwrap();
+    sheet.write(release, true).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(mode));
+
+    let shared = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(mode, guard, |value: &bool| Ok(*value)),
+            Method::from_fn_1_1(guard, mode, |value: &bool| Ok(*value)),
+        ])
+        .unwrap();
+    let competing = sheet
+        .add_relationship(vec![Method::from_fn_1_1(switch, guard, |value: &bool| {
+            Ok(*value)
+        })])
+        .unwrap();
+    let selected_branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            switch,
+            selected_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![true], vec![selected_branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(switch),
+            vec![(vec![true], vec![competing])],
+            vec![],
+        )
+        .unwrap();
+    sheet.validate().unwrap();
+    sheet.write(release, false).unwrap();
+
+    let error = sheet.propagate().unwrap_err();
+    assert!(matches!(
+        error,
+        Error::Conflict { ref sites }
+            if sites.contains(&ErrorSite::Relationship(shared))
+                && sites.contains(&ErrorSite::Relationship(competing))
+                && sites.contains(&ErrorSite::Cell(guard))
+    ));
+}
+
+#[test]
 /// Returns a conflict when a staged guard method's input producer changes.
 fn changed_guard_method_input_producer_returns_conflict() {
     let mut sheet = Sheet::new();
@@ -1717,7 +1791,434 @@ fn unforced_conditional_relationship_does_not_shadow_its_losing_cell() {
 }
 
 #[test]
+/// Checks restored write priority when conditional forcing changes to a reversible relationship.
+fn conditional_forcing_restores_priority_for_reversible_release() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let input = sheet.add_cell(30_i32);
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(2_i32);
+    let force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(input, a, |v: &i32| Ok(*v))])
+        .unwrap();
+    let reversible = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+            Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![1_i32], vec![force]), (vec![2_i32], vec![reversible])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(b, 22_i32).unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 30);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 11);
+    sheet.write(input, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 40);
+    sheet.write(mode, 2_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_source(a));
+    assert_eq!(
+        (
+            *sheet.read::<i32>(a).unwrap(),
+            *sheet.read::<i32>(b).unwrap()
+        ),
+        (11, 11)
+    );
+}
+
+/// Checks write order and same-value writes while conditional forcing is active.
+#[test]
+fn conditional_forcing_preserves_write_order_and_same_value_writes() {
+    let make_sheet = || {
+        let mut sheet = Sheet::new();
+        let mode = sheet.add_cell(0_i32);
+        let input = sheet.add_cell(30_i32);
+        let a = sheet.add_cell(11_i32);
+        let b = sheet.add_cell(22_i32);
+        let force = sheet
+            .add_relationship(vec![Method::from_fn_1_1(input, a, |v: &i32| Ok(*v))])
+            .unwrap();
+        let reversible = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+                Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+            ])
+            .unwrap();
+        sheet
+            .add_conditional(
+                MatchExpr::cell(mode),
+                vec![(vec![1_i32], vec![force]), (vec![2_i32], vec![reversible])],
+                vec![],
+            )
+            .unwrap();
+        (sheet, mode, a, b)
+    };
+
+    let (mut sheet, mode, a, b) = make_sheet();
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.write(b, 22_i32).unwrap();
+    sheet.write(mode, 2_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_source(b));
+    assert_eq!(
+        (
+            *sheet.read::<i32>(a).unwrap(),
+            *sheet.read::<i32>(b).unwrap()
+        ),
+        (22, 22)
+    );
+
+    let (mut sheet, mode, a, b) = make_sheet();
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(b, 22_i32).unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.write(mode, 2_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_source(a));
+    assert_eq!(
+        (
+            *sheet.read::<i32>(a).unwrap(),
+            *sheet.read::<i32>(b).unwrap()
+        ),
+        (11, 11)
+    );
+
+    let (mut sheet, mode, a, b) = make_sheet();
+    sheet.write(b, 22_i32).unwrap();
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.write(mode, 2_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_source(a));
+    assert_eq!(
+        (
+            *sheet.read::<i32>(a).unwrap(),
+            *sheet.read::<i32>(b).unwrap()
+        ),
+        (11, 11)
+    );
+}
+
+/// Checks that switching between conditional forcing causes preserves priority.
+#[test]
+fn conditional_forcing_switches_between_independent_conditions() {
+    let mut sheet = Sheet::new();
+    let first = sheet.add_cell(false);
+    let second = sheet.add_cell(false);
+    let first_input = sheet.add_cell(30_i32);
+    let second_input = sheet.add_cell(35_i32);
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(2_i32);
+    let force_first = sheet
+        .add_relationship(vec![Method::from_fn_1_1(first_input, a, |v: &i32| Ok(*v))])
+        .unwrap();
+    let force_second = sheet
+        .add_relationship(vec![Method::from_fn_1_1(second_input, a, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+            Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(first),
+            vec![(vec![true], vec![force_first])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(second),
+            vec![(vec![true], vec![force_second])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(b, 22_i32).unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.write(first, true).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(a));
+    assert!(!sheet.is_source(a));
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 11);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 30);
+
+    sheet.write(first, false).unwrap();
+    sheet.write(second, true).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(a));
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 35);
+    sheet.write(second_input, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(a));
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 40);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 11);
+
+    sheet.write(second, false).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_source(a));
+    assert!(!sheet.is_forced(a));
+    assert_eq!(
+        (
+            *sheet.read::<i32>(a).unwrap(),
+            *sheet.read::<i32>(b).unwrap()
+        ),
+        (11, 11)
+    );
+}
+
+/// Checks that simultaneous conditional causes retain a cascaded output's priority.
+#[test]
+fn simultaneous_forcing_causes_retain_shared_cascade_priority() {
+    let mut sheet = Sheet::new();
+    let first = sheet.add_cell(false);
+    let second = sheet.add_cell(false);
+    let first_input = sheet.add_cell(30_i32);
+    let second_input = sheet.add_cell(40_i32);
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(2_i32);
+    let c = sheet.add_cell(9_i32);
+    let force_a = sheet
+        .add_relationship(vec![Method::from_fn_1_1(first_input, a, |v: &i32| Ok(*v))])
+        .unwrap();
+    let force_b = sheet
+        .add_relationship(vec![Method::from_fn_1_1(second_input, b, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(first),
+            vec![(vec![true], vec![force_a])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(second),
+            vec![(vec![true], vec![force_b])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(a, 1_i32).unwrap();
+    sheet.write(b, 2_i32).unwrap();
+    sheet.write(c, 9_i32).unwrap();
+    sheet.write(first, true).unwrap();
+    sheet.write(second, true).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(c));
+    assert_eq!(*sheet.source::<i32>(c).unwrap(), 9);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 70);
+
+    sheet.write(first_input, 50_i32).unwrap();
+    sheet.write(second_input, 60_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(c));
+    assert_eq!(*sheet.source::<i32>(c).unwrap(), 9);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 110);
+
+    sheet.write(first, false).unwrap();
+    sheet.write(second, false).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.is_forced(c));
+    assert!(sheet.is_source(c));
+    assert_eq!(*sheet.source::<i32>(c).unwrap(), 9);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 9);
+}
+
+/// Checks that conditional forcing preserves an ordinary-derived priority and value.
+#[test]
+fn conditional_forcing_preserves_ordinary_derived_priority() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let force_input = sheet.add_cell(30_i32);
+    let d = sheet.add_cell(3_i32);
+    let b = sheet.add_cell(22_i32);
+    let a = sheet.add_cell(1_i32);
+    let force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(force_input, b, |v: &i32| Ok(*v))])
+        .unwrap();
+    let ordinary_reversible = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(a, b, |value: &i32| Ok(*value)),
+            Method::from_fn_1_1(b, a, |value: &i32| Ok(*value)),
+        ])
+        .unwrap();
+    let released_reversible = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, d, |value: &i32| Ok(*value + 200)),
+            Method::from_fn_1_1(d, b, |value: &i32| Ok(*value + 100)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![
+                (vec![0_i32], vec![ordinary_reversible]),
+                (vec![1_i32], vec![force]),
+                (vec![2_i32], vec![released_reversible]),
+            ],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(b, 22_i32).unwrap();
+    sheet.write(a, 10_i32).unwrap();
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert_eq!(*sheet.source::<i32>(b).unwrap(), 10);
+    assert!(!sheet.is_source(b));
+
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(b));
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 30);
+    assert_eq!(*sheet.source::<i32>(b).unwrap(), 10);
+    sheet.write(mode, 2_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_source(d));
+    assert!(!sheet.is_source(b));
+    assert_eq!(
+        (
+            *sheet.read::<i32>(b).unwrap(),
+            *sheet.read::<i32>(d).unwrap()
+        ),
+        (103, 3)
+    );
+    assert_eq!(*sheet.source::<i32>(b).unwrap(), 103);
+}
+
+/// Checks that self-referencing seeds and spring-back survive conditional forcing.
+#[test]
+fn conditional_forcing_preserves_self_referencing_aspiration() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let input = sheet.add_cell(30_i32);
+    let limit = sheet.add_cell(5_i32);
+    let a = sheet.add_cell(4_i32);
+    let force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(input, a, |v: &i32| Ok(*v))])
+        .unwrap();
+    let self_reference = sheet
+        .add_relationship(vec![Method::from_fn_2_1(
+            [a, limit],
+            a,
+            |value: &i32, maximum: &i32| Ok((*value).min(*maximum)),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![
+                (vec![1_i32], vec![force]),
+                (vec![2_i32], vec![self_reference]),
+            ],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(a));
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 11);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 30);
+
+    sheet.write(mode, 2_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.is_forced(a));
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 11);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_source(a));
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 11);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 11);
+}
+
+/// Checks that a remembered priority selects an independent conditional guard.
+#[test]
+fn conditional_release_priority_drives_independent_guard_preplan() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let input = sheet.add_cell(11_i32);
+    let a = sheet.add_cell(1_i32);
+    let guard = sheet.add_cell(2_i32);
+    let force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(input, a, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(a, guard, |v: &i32| Ok(*v + 100)),
+            Method::from_fn_1_1(guard, a, |v: &i32| Ok(*v + 200)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![1_i32], vec![force])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(guard, 22_i32).unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.validate().unwrap();
+    sheet.propagate().unwrap();
+
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(a));
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 11);
+
+    let from_a = sheet.add_cell(111_i32);
+    let from_guard = sheet.add_cell(222_i32);
+    let output = sheet.add_cell(0_i32);
+    let branch_from_a = sheet
+        .add_relationship(vec![Method::from_fn_1_1(from_a, output, |v: &i32| Ok(*v))])
+        .unwrap();
+    let branch_from_guard = sheet
+        .add_relationship(vec![Method::from_fn_1_1(from_guard, output, |v: &i32| {
+            Ok(*v)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![
+                (vec![111_i32], vec![branch_from_a]),
+                (vec![22_i32], vec![branch_from_guard]),
+            ],
+            vec![],
+        )
+        .unwrap();
+    sheet.validate().unwrap();
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_source(a));
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 111);
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 111);
+}
+
 /// Checks shadowing and restoration through cascaded forced outputs.
+#[test]
 fn cascaded_forced_output_of_an_unconditional_relationship_shadows_and_reverts() {
     // R1 (a -> b, single method) lives in a conditional and forces b only while
     // active. R2 (b <-> c, two methods) is itself unconditional, but once R1 is
@@ -1762,19 +2263,16 @@ fn cascaded_forced_output_of_an_unconditional_relationship_shadows_and_reverts()
     );
 
     // p == 0: R1 inactive, cascade lifts, and R2 is a genuine two-way choice
-    // again. b's derived strength (assigned while forced) still outranks c's, so
-    // b is preferred as the source this round -- revealing its own untouched
-    // original (0), not the stale forced 20, exactly because it was shadowed
-    // rather than overwritten. c is then freshly derived from that real value
-    // (0 + 1 = 1), not left stuck at the stale cascaded 21.
+    // again. c's remembered pre-force priority keeps its original value as the
+    // source, and b is freshly derived from it.
     sheet.write(p, 0_i32).unwrap();
     sheet.propagate().unwrap();
     assert_eq!(
         *sheet.read::<i32>(b).unwrap(),
-        0,
-        "b must reveal its own untouched original value, not the stale forced 20"
+        10,
+        "b must be derived from c's remembered source value"
     );
-    assert_eq!(*sheet.read::<i32>(c).unwrap(), 1);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 9);
 }
 
 #[test]

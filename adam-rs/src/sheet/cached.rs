@@ -9,9 +9,11 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use crate::cell::CellData;
 use crate::planner::{
-    Plan, PlanStep, SeedEvaluationCache, SeedRecipes, SeedSignatures, SourceCertificate,
-    evaluate_seeds,
+    Plan, PlanStep, PriorityPolicy, SeedEvaluationCache, SeedRecipes, SeedSignatures,
+    SourceCertificate, evaluate_seeds, evaluate_seeds_with_priority, plan,
+    plan_with_priority_policy, priority_for_cell,
 };
 use crate::{CellId, Error, ErrorSite, FilterViolation, RelationshipId, RequirementId};
 
@@ -86,6 +88,37 @@ impl Sheet {
         }
     }
 
+    /// Captures priorities on entry to forcing and restores them after the final release.
+    ///
+    /// - Postcondition: every still-forced cell retains its first remembered priority,
+    ///   and every released cell resumes that priority before derived post-processing.
+    /// - Complexity: O(C) time and O(1) additional space for C cells.
+    fn update_remembered_strengths(
+        &mut self,
+        previous_forced: &HashSet<CellId>,
+        current_forced: &HashSet<CellId>,
+    ) -> bool {
+        let mut changed = false;
+        let mut captured = 0;
+        let mut released = 0;
+        for (id, cell) in &mut self.cells {
+            if current_forced.contains(&id) {
+                if !previous_forced.contains(&id) && cell.remembered_strength.is_none() {
+                    cell.remembered_strength = Some(cell.strength);
+                    changed = true;
+                    captured += 1;
+                }
+            } else if let Some(strength) = cell.remembered_strength.take() {
+                cell.strength = strength;
+                changed = true;
+                released += 1;
+            }
+        }
+        debug_assert!(self.remembered_strength_count >= released);
+        self.remembered_strength_count = self.remembered_strength_count - released + captured;
+        changed
+    }
+
     /// Acquires a phase plan, preparing only on active-set or certificate misses.
     ///
     /// - Precondition: `active` contains only live relationship IDs.
@@ -99,13 +132,21 @@ impl Sheet {
     /// # Errors
     ///
     /// Returns the planner's assignment/dependency errors or guard-prerequisite errors.
-    fn acquire_prepared_plan<'cache>(
+    fn acquire_prepared_plan(
         &mut self,
-        cache: &'cache mut Option<CachedPlan>,
+        cache: &mut Option<CachedPlan>,
         active: &HashSet<RelationshipId>,
         phase: PlanPhase,
-    ) -> Result<&'cache PreparedPlan, Error> {
+    ) -> Result<(Rc<PreparedPlan>, PriorityPolicy), Error> {
         debug_assert!(active.iter().all(|id| self.relationships.contains_key(*id)));
+        let priority_policy = if self.remembered_strength_count > 0 {
+            match phase {
+                PlanPhase::Unconditional => PriorityPolicy::Remembered,
+                PlanPhase::Main => PriorityPolicy::RememberedUnlessForced,
+            }
+        } else {
+            PriorityPolicy::Current
+        };
         let reusable = cache.as_mut().is_some_and(|entry| {
             if entry.prepared.active != *active {
                 return false;
@@ -115,7 +156,21 @@ impl Sheet {
                 {
                     self.reuse_stats.certificate_checks += 1;
                 }
-                if !entry.prepared.certificate.is_valid(&self.cells) {
+                let valid = match priority_policy {
+                    PriorityPolicy::Current => entry.prepared.certificate.is_valid(&self.cells),
+                    _ => entry.prepared.certificate.is_valid_with_priority(
+                        &self.cells,
+                        |id, cell| {
+                            priority_for_cell(
+                                id,
+                                cell,
+                                priority_policy,
+                                &entry.prepared.plan.forced_outputs,
+                            )
+                        },
+                    ),
+                };
+                if !valid {
                     return false;
                 }
                 entry.needs_certificate_check = false;
@@ -128,7 +183,15 @@ impl Sheet {
                 PlanPhase::Unconditional => self.reuse_stats.pre_plans += 1,
                 PlanPhase::Main => self.reuse_stats.main_plans += 1,
             }
-            let plan = crate::planner::plan(&self.cells, &self.relationships, active)?;
+            let plan = match priority_policy {
+                PriorityPolicy::Current => plan(&self.cells, &self.relationships, active)?,
+                _ => plan_with_priority_policy(
+                    &self.cells,
+                    &self.relationships,
+                    active,
+                    priority_policy,
+                )?,
+            };
             let mut claimed = HashSet::new();
             for &step in &plan.execution_order {
                 if let PlanStep::Method(relationship, index) = step {
@@ -187,7 +250,10 @@ impl Sheet {
                 needs_certificate_check: false,
             });
         }
-        Ok(&cache.as_ref().expect("acquired plan exists").prepared)
+        Ok((
+            Rc::clone(&cache.as_ref().expect("acquired plan exists").prepared),
+            priority_policy,
+        ))
     }
 
     /// Executes fresh staged values against independent eligible phase artifacts.
@@ -223,17 +289,39 @@ impl Sheet {
                 .keys()
                 .filter(|id| !self.conditional_relationships.contains(id))
                 .collect();
-            let prepared = self.acquire_prepared_plan(pre, &active, PlanPhase::Unconditional)?;
+            let (prepared, priority_policy) =
+                self.acquire_prepared_plan(pre, &active, PlanPhase::Unconditional)?;
             let seeds = {
                 let source = |id| stage.seed_source(&self.cells, id);
-                evaluate_seeds(
-                    &prepared.seeds,
-                    &prepared.signatures,
-                    &self.cells,
-                    &self.relationships,
-                    &source,
-                    &mut seed_evaluation_cache,
-                )?
+                match priority_policy {
+                    PriorityPolicy::Current => evaluate_seeds(
+                        &prepared.seeds,
+                        &prepared.signatures,
+                        &self.cells,
+                        &self.relationships,
+                        &source,
+                        &mut seed_evaluation_cache,
+                    )?,
+                    _ => {
+                        let priority = |id: CellId, cell: &CellData| {
+                            priority_for_cell(
+                                id,
+                                cell,
+                                priority_policy,
+                                &prepared.plan.forced_outputs,
+                            )
+                        };
+                        evaluate_seeds_with_priority(
+                            &prepared.seeds,
+                            &prepared.signatures,
+                            &self.cells,
+                            &self.relationships,
+                            &source,
+                            &mut seed_evaluation_cache,
+                            &priority,
+                        )?
+                    }
+                }
             };
             self.execute_plan_staged(
                 &prepared.prerequisite_steps,
@@ -247,8 +335,9 @@ impl Sheet {
         };
 
         let active = self.build_active_set_staged(&stage)?;
-        let prepared = self.acquire_prepared_plan(main, &active, PlanPhase::Main)?;
-        if let Some(prepared_pre) = pre_plan {
+        let (prepared, priority_policy) =
+            self.acquire_prepared_plan(main, &active, PlanPhase::Main)?;
+        if let Some(prepared_pre) = &pre_plan {
             for &step in &prepared_pre.prerequisite_steps {
                 if !self.prerequisite_step_is_compatible(
                     &prepared_pre.provenance,
@@ -268,14 +357,30 @@ impl Sheet {
         }
         let seeds = {
             let source = |id| stage.seed_source(&self.cells, id);
-            evaluate_seeds(
-                &prepared.seeds,
-                &prepared.signatures,
-                &self.cells,
-                &self.relationships,
-                &source,
-                &mut seed_evaluation_cache,
-            )?
+            match priority_policy {
+                PriorityPolicy::Current => evaluate_seeds(
+                    &prepared.seeds,
+                    &prepared.signatures,
+                    &self.cells,
+                    &self.relationships,
+                    &source,
+                    &mut seed_evaluation_cache,
+                )?,
+                _ => {
+                    let priority = |id: CellId, cell: &CellData| {
+                        priority_for_cell(id, cell, priority_policy, &prepared.plan.forced_outputs)
+                    };
+                    evaluate_seeds_with_priority(
+                        &prepared.seeds,
+                        &prepared.signatures,
+                        &self.cells,
+                        &self.relationships,
+                        &source,
+                        &mut seed_evaluation_cache,
+                        &priority,
+                    )?
+                }
+            }
         };
         self.execute_plan_staged(
             &prepared.plan.execution_order,
@@ -287,7 +392,14 @@ impl Sheet {
         )?;
 
         let previously_derived = self.commit_stage(stage);
-        let strengths_changed = self.post_process_strengths(&prepared.plan.execution_order);
+        let no_forced_outputs = HashSet::new();
+        let previous_forced = pre_plan
+            .as_ref()
+            .map_or(&no_forced_outputs, |plan| &plan.plan.forced_outputs);
+        let priorities_changed =
+            self.update_remembered_strengths(previous_forced, &prepared.plan.forced_outputs);
+        let strengths_changed =
+            self.post_process_strengths(&prepared.plan.execution_order) | priorities_changed;
         for id in previously_derived {
             if let Some(cell) = self.cells.get_mut(id)
                 && cell.derived.is_none()
@@ -457,6 +569,84 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(choices(automatic), choices(forced));
+    }
+
+    /// Checks cached and fresh replanning agree across repeated forcing and release.
+    #[test]
+    fn remembered_priority_release_matches_forced_replanning() {
+        let make_sheet = || {
+            let mut sheet = Sheet::new();
+            let mode = sheet.add_cell(0_i32);
+            let input = sheet.add_cell(30_i32);
+            let a = sheet.add_cell(11_i32);
+            let b = sheet.add_cell(22_i32);
+            let force = sheet
+                .add_relationship(vec![Method::from_fn_1_1(input, a, |value: &i32| {
+                    Ok(*value)
+                })])
+                .unwrap();
+            let reversible = sheet
+                .add_relationship(vec![
+                    Method::from_fn_1_1(a, b, |value: &i32| Ok(*value)),
+                    Method::from_fn_1_1(b, a, |value: &i32| Ok(*value)),
+                ])
+                .unwrap();
+            sheet
+                .add_conditional(
+                    MatchExpr::cell(mode),
+                    vec![(vec![1_i32], vec![force]), (vec![2_i32], vec![reversible])],
+                    vec![],
+                )
+                .unwrap();
+            sheet.write(b, 22_i32).unwrap();
+            sheet.write(a, 11_i32).unwrap();
+            (sheet, mode, input, a, b)
+        };
+        let (mut automatic, mode, input, a, b) = make_sheet();
+        let (mut forced, forced_mode, forced_input, forced_a, forced_b) = make_sheet();
+
+        automatic.write(mode, 1_i32).unwrap();
+        forced.write(forced_mode, 1_i32).unwrap();
+        automatic.propagate().unwrap();
+        propagate_forced_replan(&mut forced).unwrap();
+        assert_same_snapshot(
+            &automatic,
+            &[mode, input, a, b],
+            &forced,
+            &[forced_mode, forced_input, forced_a, forced_b],
+        );
+        assert_eq!(*automatic.read::<i32>(a).unwrap(), 30);
+
+        automatic.write(input, 40_i32).unwrap();
+        forced.write(forced_input, 40_i32).unwrap();
+        automatic.propagate().unwrap();
+        propagate_forced_replan(&mut forced).unwrap();
+        assert_same_snapshot(
+            &automatic,
+            &[mode, input, a, b],
+            &forced,
+            &[forced_mode, forced_input, forced_a, forced_b],
+        );
+        assert_eq!(*automatic.read::<i32>(a).unwrap(), 40);
+
+        automatic.write(mode, 2_i32).unwrap();
+        forced.write(forced_mode, 2_i32).unwrap();
+        automatic.propagate().unwrap();
+        propagate_forced_replan(&mut forced).unwrap();
+        assert_same_snapshot(
+            &automatic,
+            &[mode, input, a, b],
+            &forced,
+            &[forced_mode, forced_input, forced_a, forced_b],
+        );
+        assert!(automatic.is_source(a));
+        assert_eq!(
+            (
+                *automatic.read::<i32>(a).unwrap(),
+                *automatic.read::<i32>(b).unwrap()
+            ),
+            (11, 11)
+        );
     }
 
     /// Returns comparable error sites using fixture declaration ordinals, not slot-map keys.
@@ -683,9 +873,9 @@ mod tests {
         let (mut forced, other, other_guard) = phase_sheet();
         assert_same_result(&mut automatic, &mut forced);
         let initial = automatic.reuse_stats;
-        // Main claims/demotes a, crossing the initial unconditional source prefix.
+        // Main forces a, but its remembered priority keeps the unconditional prefix valid.
         assert_same_result(&mut automatic, &mut forced);
-        assert_eq!(automatic.reuse_stats.pre_plans, initial.pre_plans + 1);
+        assert_eq!(automatic.reuse_stats.pre_plans, initial.pre_plans);
         assert_eq!(automatic.reuse_stats.main_plans, initial.main_plans);
         assert_same_snapshot(&automatic, &ids, &forced, &other);
         assert_same_result(&mut automatic, &mut forced);
@@ -1508,9 +1698,9 @@ mod tests {
         assert_eq!(sheet.reuse_stats.signature_builds, 1);
     }
 
-    /// Checks that main-plan demotion invalidates a pre-plan certificate, not the solver flag alone.
+    /// Checks that remembered forcing priorities preserve a valid pre-plan certificate.
     #[test]
-    fn crossed_unconditional_certificate_replans_only_unconditional_phase() {
+    fn remembered_priority_preserves_unconditional_certificate() {
         let (mut sheet, a, b, identity) = identity_sheet();
         let input = sheet.add_source(7_i32);
         let guard = sheet.add_source(true);
@@ -1529,9 +1719,9 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(b).unwrap(), 7);
         assert_eq!(sheet.selected_method(identity), Some(0));
         sheet.propagate().unwrap();
-        assert_eq!(sheet.reuse_stats.pre_plans, initial.pre_plans + 1);
+        assert_eq!(sheet.reuse_stats.pre_plans, initial.pre_plans);
         assert_eq!(sheet.reuse_stats.main_plans, initial.main_plans);
-        assert_eq!(sheet.reuse_stats.preparations, initial.preparations + 1);
+        assert_eq!(sheet.reuse_stats.preparations, initial.preparations);
         assert_eq!(sheet.reuse_stats.certificate_checks, 2);
         assert_eq!(sheet.reuse_stats.signature_builds, 1);
     }

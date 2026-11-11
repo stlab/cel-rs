@@ -59,6 +59,8 @@ pub(crate) struct CellData {
     /// authority behind the result and so keeps its explicit strength (see
     /// `Sheet::post_process_strengths`).
     pub(crate) strength: u64,
+    /// Priority to restore when conditional forcing ends, if this cell was forced.
+    pub(crate) remembered_strength: Option<u64>,
     /// Set during `Sheet::propagate`; cleared by `Sheet::clear_changed`.
     pub(crate) changed: bool,
     /// Relationships that include this cell.
@@ -81,10 +83,10 @@ impl CellData {
         self.derived.as_deref().unwrap_or(self.source.as_ref())
     }
 
-    /// Returns whether `strength` reflects a live explicit `write()`/`add_cell` (bit 63
-    /// set) rather than a strength assigned by the post-round derived-strength pass.
+    /// Returns whether the active or remembered priority reflects an explicit
+    /// `write()`/`add_cell` (bit 63 set) rather than a derived strength.
     pub(crate) fn has_explicit_strength(&self) -> bool {
-        self.strength & (1u64 << 63) != 0
+        self.remembered_strength.unwrap_or(self.strength) & (1u64 << 63) != 0
     }
 }
 
@@ -100,6 +102,7 @@ mod tests {
             derived: None,
             type_id: TypeId::of::<i32>(),
             strength: 0,
+            remembered_strength: None,
             changed: false,
             adj: vec![],
             eq_fn: |a, b| a.downcast_ref::<i32>() == b.downcast_ref::<i32>(),

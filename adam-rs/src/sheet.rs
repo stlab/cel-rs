@@ -133,6 +133,8 @@ pub struct Sheet {
     /// [`Sheet::is_forced`]) can report which method the planner picked for each
     /// relationship without re-planning.
     last_plan: Option<Rc<PreparedPlan>>,
+    /// Number of cells with a priority retained through conditional forcing.
+    remembered_strength_count: usize,
     /// Eligible prepared unconditional plan, independent of the display snapshot.
     pre_plan_cache: Option<CachedPlan>,
     /// Eligible prepared final active plan, independent of the unconditional plan.
@@ -311,6 +313,7 @@ impl Sheet {
             changed_cells: Vec::new(),
             next_strength: 0,
             last_plan: None,
+            remembered_strength_count: 0,
             pre_plan_cache: None,
             main_plan_cache: None,
             seed_signatures: None,
@@ -350,6 +353,7 @@ impl Sheet {
             derived: None,
             type_id: TypeId::of::<T>(),
             strength,
+            remembered_strength: None,
             changed: false,
             adj: Vec::new(),
             eq_fn: |a, b| a.downcast_ref::<T>() == b.downcast_ref::<T>(),
@@ -1343,6 +1347,9 @@ impl Sheet {
         self.next_strength += 1;
         let cell = &mut self.cells[id];
         cell.strength = self.next_strength | (1u64 << 63);
+        if cell.remembered_strength.is_some() {
+            cell.remembered_strength = Some(cell.strength);
+        }
         cell.source = Box::new(value);
         cell.derived = None;
         Ok(())

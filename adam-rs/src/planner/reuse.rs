@@ -2,7 +2,7 @@
 //!
 //! Construct a certificate from a plan's complete elimination order and the cells
 //! absent from every selected method's outputs. Query membership without replanning,
-//! then check changed strengths only while cells and the planning structure are unchanged.
+//! then check changed priorities only while cells and the planning structure are unchanged.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -88,6 +88,20 @@ impl SourceCertificate {
     ///   construction; only cell values and strengths may have changed.
     /// - Complexity: Expected O(C) time and O(1) additional space for C cells.
     pub(crate) fn is_valid(&self, cells: &SlotMap<CellId, CellData>) -> bool {
+        self.is_valid_with_priority(cells, |_, cell| cell.strength)
+    }
+
+    /// Returns whether every rejected cell remains below its released prefix under `priority`.
+    ///
+    /// - Precondition: The cells and planning structure are unchanged since construction;
+    ///   `priority` matches the policy used to create the plan.
+    /// - Precondition: `priority` takes O(1) time.
+    /// - Complexity: Expected O(C) time and O(1) additional space for C cells.
+    pub(crate) fn is_valid_with_priority(
+        &self,
+        cells: &SlotMap<CellId, CellData>,
+        priority: impl Fn(CellId, &CellData) -> u64,
+    ) -> bool {
         debug_assert_eq!(cells.len(), self.tie_ordinals.len());
         debug_assert!(
             cells
@@ -96,7 +110,10 @@ impl SourceCertificate {
         );
         let mut weakest = None;
         for &cell in &self.original_order {
-            let priority = (cells[cell].strength, Reverse(self.tie_ordinals[&cell]));
+            let priority = (
+                priority(cell, &cells[cell]),
+                Reverse(self.tie_ordinals[&cell]),
+            );
             if self.released.contains(&cell) {
                 weakest =
                     Some(weakest.map_or(priority, |previous| std::cmp::min(previous, priority)));
