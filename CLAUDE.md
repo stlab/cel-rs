@@ -111,8 +111,9 @@ each with and without their default features).
 
 `cargo build --workspace` and `cargo test --workspace` must produce zero compiler
 warnings — clippy's `-D warnings` does not catch everything a plain build/test compile
-can warn about (e.g. an unused `mut`). Read the build/test output and fix any warnings
-before opening the PR.
+can warn about (e.g. an unused `mut`). On macOS, ignore only Cargo's known
+future-incompatibility warning for `block v0.1.6` concerning `_NSConcreteStackBlock`.
+Read the build/test output and fix all other warnings before opening the PR.
 
 For any multi-phase or multi-step piece of work (a design doc phased into several sub-plans, a
 plan executed across multiple sessions), create or update a dated handoff document under
