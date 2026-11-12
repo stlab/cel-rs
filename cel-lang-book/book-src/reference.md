@@ -172,7 +172,27 @@ when the evaluation environment installs it. See
 | `abs(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | Minimum signed integer reports `arithmetic overflow`. |
 | `signum(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | No unsigned support. Successful calls are infallible. |
 | `sqrt(x)` | `f32`, `f64` | same as operand | Float-only. Inputs below zero yield `NaN` rather than an error. |
-| `floor(x)`, `ceil(x)`, `trunc(x)`, `fract(x)`, `round_ties_even(x)` | `f32`, `f64` | same as operand | Float-only. Successful calls are infallible. |
+| `floor(x)`, `ceil(x)`, `trunc(x)`, `fract(x)`, `round_ties_even(x)`, `round(x)` | `f32`, `f64` | same as operand | `round` resolves halfway cases away from zero; `round_ties_even` selects the even neighbor. |
+| `sin(x)`, `cos(x)`, `tan(x)` | `f32`, `f64` | same as operand | Angles in radians. Infinite inputs yield NaN. |
+| `asin(x)`, `acos(x)`, `atan(x)` | `f32`, `f64` | same as operand | Results in radians. `asin` and `acos` yield NaN outside `[-1, 1]`. |
+| `atan2(y, x)` | same-type `f32` or `f64` | same as operands | Quadrant-aware angle in radians; vertical coordinate first. |
+| `sin_cos(x)` | `f32`, `f64` | `(f32, f32)` or `(f64, f64)` | CEL tuple ordered as sine then cosine; angle in radians. |
+| `to_radians(x)`, `to_degrees(x)` | `f32`, `f64` | same as operand | Angle conversion without wrapping. |
+| `hypot(x, y)` | same-type `f32` or `f64` | same as operands | Vector length. |
+| `cbrt(x)` | `f32`, `f64` | same as operand | Real cube root, including negative inputs. |
+| `powi(x, exponent)` | `f32` or `f64` base, `i32` exponent | same as base | Supports negative integer exponents. |
+| `powf(x, exponent)` | same-type `f32` or `f64` | same as operands | Floating-point power. |
+| `exp(x)`, `exp2(x)` | `f32`, `f64` | same as operand | Powers of `e` and `2`. |
+| `ln(x)`, `log2(x)`, `log10(x)` | `f32`, `f64` | same as operand | Logarithms in bases `e`, `2`, and `10`; zeros yield negative infinity and negative inputs yield NaN. |
+| `log(x, base)` | same-type `f32` or `f64` | same as operands | Arbitrary-base logarithm with Rust's floating-point domain behavior. |
+| `recip(x)` | `f32`, `f64` | same as operand | Reciprocal; signed zeros yield signed infinities. |
+| `mul_add(x, multiplier, addend)` | same-type `f32` or `f64` | same as operands | Fused multiply-add with one rounding step. |
+| `rem_euclid(x, divisor)` | same-type `f32` or `f64` | same as operands | Nonnegative remainder; rounding can produce `abs(divisor)`. Zero divisor yields NaN. |
+| `copysign(magnitude, sign)` | same-type `f32` or `f64` | same as operands | Copies the second operand's sign bit onto the first operand's magnitude. |
+
+Both `op(x, ...)` and `x.op(...)` select these registered operations.
+Float calls retain Rust's method semantics, including NaN and infinity;
+they do not introduce evaluation errors for mathematical domain violations.
 
 ## Collection table
 
