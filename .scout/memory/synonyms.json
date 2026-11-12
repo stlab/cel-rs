@@ -2452,6 +2452,18 @@
       [
         "document-replacement",
         1.0
+      ],
+      [
+        "shared-assets",
+        1.0
+      ],
+      [
+        "spectrum",
+        1.0
+      ],
+      [
+        "reentrancy",
+        1.0
       ]
     ],
     "sheet planner": [
@@ -2583,6 +2595,18 @@
       ],
       [
         "send",
+        0.5
+      ],
+      [
+        "closures",
+        0.5
+      ],
+      [
+        "cel",
+        0.5
+      ],
+      [
+        "prepared-execution",
         0.5
       ]
     ],
@@ -2860,6 +2884,10 @@
       [
         "reactivity",
         1.0
+      ],
+      [
+        "reentrancy",
+        1.0
       ]
     ],
     "erased whole-value owner": [
@@ -3058,24 +3086,32 @@
     ],
     "closures": [
       [
-        "grammar",
-        1.0
-      ],
-      [
-        "ll1",
-        1.0
-      ],
-      [
         "cel",
         1.0
       ],
       [
+        "prepared-execution",
+        0.5
+      ],
+      [
+        "grammar",
+        0.5
+      ],
+      [
         "precedence",
-        1.0
+        0.5
+      ],
+      [
+        "ll1",
+        0.5
       ],
       [
         "design",
-        1.0
+        0.5
+      ],
+      [
+        "ownership",
+        0.5
       ]
     ],
     "document": [
@@ -5092,6 +5128,14 @@
       [
         "xtask maintenance",
         1.0
+      ],
+      [
+        "shared-assets",
+        1.0
+      ],
+      [
+        "dioxus",
+        1.0
       ]
     ],
     "branch workflow": [
@@ -6350,24 +6394,44 @@
     ],
     "cel": [
       [
-        "design",
+        "closures",
         1.0
       ],
       [
-        "precedence",
-        1.0
+        "emission",
+        0.5
+      ],
+      [
+        "records",
+        0.5
+      ],
+      [
+        "evaluation-order",
+        0.5
       ],
       [
         "grammar",
-        1.0
+        0.5
       ],
       [
         "ll1",
-        1.0
+        0.5
       ],
       [
-        "closures",
-        1.0
+        "precedence",
+        0.5
+      ],
+      [
+        "ownership",
+        0.5
+      ],
+      [
+        "design",
+        0.5
+      ],
+      [
+        "prepared-execution",
+        0.5
       ]
     ],
     "provenance": [
@@ -8329,6 +8393,138 @@
         "ast-parser",
         1.0
       ]
+    ],
+    "shared-assets": [
+      [
+        "spectrum",
+        1.0
+      ],
+      [
+        "dioxus",
+        1.0
+      ]
+    ],
+    "source-spans": [
+      [
+        "lexer",
+        1.0
+      ],
+      [
+        "parity",
+        1.0
+      ]
+    ],
+    "records": [
+      [
+        "evaluation-order",
+        1.0
+      ],
+      [
+        "emission",
+        1.0
+      ],
+      [
+        "parity",
+        1.0
+      ],
+      [
+        "member-dispatch",
+        1.0
+      ],
+      [
+        "cel",
+        1.0
+      ]
+    ],
+    "member-dispatch": [
+      [
+        "records",
+        1.0
+      ],
+      [
+        "parity",
+        1.0
+      ]
+    ],
+    "emission": [
+      [
+        "evaluation-order",
+        1.0
+      ],
+      [
+        "cel",
+        1.0
+      ],
+      [
+        "records",
+        1.0
+      ]
+    ],
+    "parity": [
+      [
+        "records",
+        1.0
+      ],
+      [
+        "lexer",
+        1.0
+      ],
+      [
+        "member-dispatch",
+        1.0
+      ],
+      [
+        "source-spans",
+        1.0
+      ]
+    ],
+    "evaluation-order": [
+      [
+        "records",
+        1.0
+      ],
+      [
+        "emission",
+        1.0
+      ],
+      [
+        "cel",
+        1.0
+      ]
+    ],
+    "prepared-execution": [
+      [
+        "cel",
+        1.0
+      ],
+      [
+        "closures",
+        1.0
+      ],
+      [
+        "ownership",
+        1.0
+      ]
+    ],
+    "lexer": [
+      [
+        "source-spans",
+        1.0
+      ],
+      [
+        "parity",
+        1.0
+      ]
+    ],
+    "reentrancy": [
+      [
+        "dioxus",
+        1.0
+      ],
+      [
+        "bindings",
+        1.0
+      ]
     ]
   },
   "provenance": {
@@ -9558,7 +9754,8 @@
       "knowledge/cel-cleanup-belongs-to-live-values-not-typed-instruction-plans.md"
     ],
     "bindings|dioxus": [
-      "knowledge/avoid-reactive-self-subscription-in-binding-mutations.md"
+      "knowledge/avoid-reactive-self-subscription-in-binding-mutations.md",
+      "knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md"
     ],
     "method|idempotence": [
       "knowledge/filter-purity-and-idempotence-contract.md"
@@ -12792,7 +12989,8 @@
       "knowledge/filter-purity-and-idempotence-contract.md"
     ],
     "cel|closures": [
-      "knowledge/cel-closure-grouping-preserves-precedence-grammar.md"
+      "knowledge/cel-closure-grouping-preserves-precedence-grammar.md",
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
     ],
     "ez-adam features|cargo clippy flags": [
       "knowledge/clippy-and-feature-flag-validation-matrix.md"
@@ -13002,7 +13200,8 @@
       "knowledge/contract-style-documentation-and-precondition-invariants.md"
     ],
     "closures|cel": [
-      "knowledge/cel-closure-grouping-preserves-precedence-grammar.md"
+      "knowledge/cel-closure-grouping-preserves-precedence-grammar.md",
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
     ],
     "grammar|cel": [
       "knowledge/cel-closure-grouping-preserves-precedence-grammar.md"
@@ -13278,7 +13477,8 @@
       "knowledge/adam-lsp-server-loop-and-diagnostic-publishing-flow.md"
     ],
     "dioxus|bindings": [
-      "knowledge/avoid-reactive-self-subscription-in-binding-mutations.md"
+      "knowledge/avoid-reactive-self-subscription-in-binding-mutations.md",
+      "knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md"
     ],
     "cell|document-model": [
       "knowledge/ez-adam-document-model-and-node-placements-separation.md"
@@ -14261,8 +14461,140 @@
     ],
     "source-identity|nonexecution": [
       "knowledge/module-checking-selects-registered-source-identity-and-checks-the-whole-collection.md"
+    ],
+    "records|evaluation-order": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "records|parity": [
+      "knowledge/cel-record-fields-use-typed-member-operation-dispatch.md"
+    ],
+    "reentrancy|bindings": [
+      "knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md"
+    ],
+    "member-dispatch|records": [
+      "knowledge/cel-record-fields-use-typed-member-operation-dispatch.md"
+    ],
+    "cel|emission": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "dioxus|shared-assets": [
+      "knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md"
+    ],
+    "emission|evaluation-order": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "prepared-execution|cel": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "reentrancy|dioxus": [
+      "knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md"
+    ],
+    "shared-assets|spectrum": [
+      "knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md"
+    ],
+    "member-dispatch|parity": [
+      "knowledge/cel-record-fields-use-typed-member-operation-dispatch.md"
+    ],
+    "shared-assets|dioxus": [
+      "knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md"
+    ],
+    "emission|cel": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "lexer|source-spans": [
+      "knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md"
+    ],
+    "records|member-dispatch": [
+      "knowledge/cel-record-fields-use-typed-member-operation-dispatch.md"
+    ],
+    "ownership|closures": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "bindings|reentrancy": [
+      "knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md"
+    ],
+    "records|emission": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "parity|lexer": [
+      "knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md"
+    ],
+    "closures|prepared-execution": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "spectrum|dioxus": [
+      "knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md"
+    ],
+    "cel|prepared-execution": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "cel|evaluation-order": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "cel|ownership": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "lexer|parity": [
+      "knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md"
+    ],
+    "spectrum|shared-assets": [
+      "knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md"
+    ],
+    "prepared-execution|closures": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "ownership|prepared-execution": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "source-spans|lexer": [
+      "knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md"
+    ],
+    "source-spans|parity": [
+      "knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md"
+    ],
+    "closures|ownership": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "evaluation-order|emission": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "parity|records": [
+      "knowledge/cel-record-fields-use-typed-member-operation-dispatch.md"
+    ],
+    "emission|records": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "parity|source-spans": [
+      "knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md"
+    ],
+    "evaluation-order|cel": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "prepared-execution|ownership": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "dioxus|reentrancy": [
+      "knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md"
+    ],
+    "dioxus|spectrum": [
+      "knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md"
+    ],
+    "records|cel": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "ownership|cel": [
+      "knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md"
+    ],
+    "cel|records": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "parity|member-dispatch": [
+      "knowledge/cel-record-fields-use-typed-member-operation-dispatch.md"
+    ],
+    "evaluation-order|records": [
+      "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
     ]
   },
-  "entries_processed": 37,
-  "built_at": "2026-11-08T23:23:18.429030+00:00"
+  "entries_processed": 43,
+  "built_at": "2026-11-12T18:52:21.682123+00:00"
 }
