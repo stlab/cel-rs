@@ -82,17 +82,18 @@ fn registered_record_and_member_example() {
 }
 // ANCHOR_END: registered-record
 
+/// Rounding is opt-in and distinguishes ties-away-from-zero from ties-to-even.
 #[test]
-fn round_is_not_available_with_the_standard_library() {
+fn round_requires_the_standard_library() {
     assert!(
         CELParser::new(OpLookup::new())
             .parse_str("round(-3.5)")
             .is_err()
     );
 
-    let mut lookup = OpLookup::new();
-    install_std(&mut lookup);
-    assert!(CELParser::new(lookup).parse_str("round(-3.5)").is_err());
+    assert_eq!(eval_with_std::<f64>("round(-3.5)"), -4.0);
+    assert_eq!(eval_with_std::<f64>("(2.5).round()"), 3.0);
+    assert_eq!(eval_with_std::<f64>("round_ties_even(2.5)"), 2.0);
 }
 
 #[test]
@@ -184,6 +185,59 @@ fn optional_standard_library_supports_float_projection_examples() {
     assert_eq!(eval_with_std::<f64>("trunc(-3.2)"), -3.0);
     assert_eq!(eval_with_std::<f64>("round_ties_even(2.5)"), 2.0);
     assert_eq!(eval_with_std::<f32>("fract(-3.75f32)"), -0.75);
+}
+
+/// Computes graphics angles and polar coordinates using both call forms.
+#[test]
+fn standard_library_graphics_angle_examples() {
+    for (source, expected) in [
+        ("(30.0).to_radians().sin()", 0.5),
+        ("asin(0.5).to_degrees()", 30.0),
+        ("acos(0.5).to_degrees()", 60.0),
+        ("atan(1.0).to_degrees()", 45.0),
+        ("atan2(1.0, -1.0).to_degrees()", 135.0),
+        ("to_radians(180.0)", std::f64::consts::PI),
+        ("to_radians(180.0).to_degrees()", 180.0),
+        ("sin_cos((30.0).to_radians()).0 * 10.0", 5.0),
+    ] {
+        assert!(
+            (eval_with_std::<f64>(source) - expected).abs() < 1e-12,
+            "{source}"
+        );
+    }
+    assert_eq!(eval_with_std::<f32>("cos(0.0f32)"), 1.0);
+    assert_eq!(eval_with_std::<f64>("tan(0.0)"), 0.0);
+    assert_eq!(eval_with_std::<f32>("hypot(3.0f32, 4.0f32)"), 5.0);
+}
+
+/// Evaluates the documented power, exponential, and logarithmic curves.
+#[test]
+fn standard_library_graphics_curve_examples() {
+    for (source, expected) in [
+        ("cbrt(-8.0)", -2.0),
+        ("powf(0.25, 0.5)", 0.5),
+        ("exp(1.0)", std::f64::consts::E),
+        ("exp2(3.0)", 8.0),
+        ("ln(2.0)", std::f64::consts::LN_2),
+        ("log(8.0, 2.0)", 3.0),
+        ("log2(8.0)", 3.0),
+        ("log10(100.0)", 2.0),
+    ] {
+        assert!(
+            (eval_with_std::<f64>(source) - expected).abs() < 1e-12,
+            "{source}"
+        );
+    }
+    assert_eq!(eval_with_std::<f32>("powi(2.0f32, -3i32)"), 0.125);
+}
+
+/// Evaluates the documented reciprocal, interpolation, wrapping, and sign examples.
+#[test]
+fn standard_library_graphics_utility_examples() {
+    assert_eq!(eval_with_std::<f64>("recip(4.0)"), 0.25);
+    assert_eq!(eval_with_std::<f64>("mul_add(0.25, 8.0, 2.0)"), 4.0);
+    assert_eq!(eval_with_std::<f64>("rem_euclid(-450.0, 360.0)"), 270.0);
+    assert_eq!(eval_with_std::<f64>("copysign(2.0, -1.0)"), -2.0);
 }
 
 #[test]
