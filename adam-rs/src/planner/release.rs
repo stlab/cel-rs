@@ -88,6 +88,24 @@ pub(crate) fn resolve(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
 ) -> Result<ReleaseResult, ReleaseFailure> {
+    resolve_with_priority(cells, relationships, active, |_, cell| cell.strength)
+}
+
+/// Finds the strength-optimal acyclic assignment using caller-selected cell priorities.
+///
+/// - Precondition: every active relationship belongs to `relationships`.
+/// - Precondition: `priority` takes O(1) time.
+/// - Complexity: The same as [`resolve`].
+///
+/// # Errors
+///
+/// Returns the assignment errors documented by [`resolve`].
+pub(crate) fn resolve_with_priority(
+    cells: &SlotMap<CellId, CellData>,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+    priority: impl Fn(CellId, &CellData) -> u64,
+) -> Result<ReleaseResult, ReleaseFailure> {
     let mut released: HashSet<CellId> = HashSet::new();
     let Some(mut current) = Assignment::solve_acyclic(relationships, active, &released) else {
         return Err(match Assignment::solve(relationships, active, &released) {
@@ -97,7 +115,7 @@ pub(crate) fn resolve(
     };
 
     let mut cells_sorted: Vec<CellId> = cells.keys().collect();
-    cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
+    cells_sorted.sort_by_key(|&id| Reverse(priority(id, &cells[id])));
 
     for &cell in &cells_sorted {
         released.insert(cell);

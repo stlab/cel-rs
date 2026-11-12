@@ -193,6 +193,7 @@ struct SeedBuildContext<'context, 'source> {
     cells: &'context SlotMap<CellId, CellData>,
     relationships: &'context SlotMap<RelationshipId, RelationshipData>,
     source: &'context dyn Fn(CellId) -> SeedSource<'source>,
+    priority: &'context dyn Fn(CellId, &CellData) -> u64,
 }
 
 /// One cell's staged source value and the version identifying that exact value.
@@ -324,12 +325,43 @@ pub(crate) fn evaluate_seeds<'source>(
     source: &dyn Fn(CellId) -> SeedSource<'source>,
     cache: &mut SeedEvaluationCache,
 ) -> Result<Seeds, Error> {
+    evaluate_seeds_with_priority(
+        recipes,
+        signatures,
+        cells,
+        relationships,
+        source,
+        cache,
+        &|_, cell| cell.strength,
+    )
+}
+
+/// Evaluates prepared roots using phase-specific strengths and staged source values.
+///
+/// - Precondition: `recipes`, `signatures`, `source`, and `cache` satisfy
+///   [`evaluate_seeds`]'s preconditions.
+/// - Precondition: `priority` takes O(1) time and matches this planning phase.
+/// - Complexity: The same as [`evaluate_seeds`].
+///
+/// # Errors
+///
+/// Returns the seed-cycle and conflict errors documented by [`evaluate_seeds`].
+pub(crate) fn evaluate_seeds_with_priority<'source>(
+    recipes: &SeedRecipes,
+    signatures: &SeedSignatures,
+    cells: &SlotMap<CellId, CellData>,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    source: &dyn Fn(CellId) -> SeedSource<'source>,
+    cache: &mut SeedEvaluationCache,
+    priority: &dyn Fn(CellId, &CellData) -> u64,
+) -> Result<Seeds, Error> {
     let context = SeedBuildContext {
         recipes,
         signatures,
         cells,
         relationships,
         source,
+        priority,
     };
     let mut traversal = SeedTraversal {
         seeds: HashMap::new(),
@@ -448,6 +480,7 @@ fn compute_seed(
             context.cells,
             context.relationships,
             context.signatures,
+            context.priority,
         )
     };
     sibling_methods.sort_by(|lhs, rhs| order_key(lhs).cmp(&order_key(rhs)));
@@ -535,7 +568,8 @@ fn compute_seed(
             && method.inputs.iter().any(|&input| {
                 input != x
                     && context.recipes.claimant.get(&input) == Some(&rel_id)
-                    && context.cells[input].strength <= context.cells[x].strength
+                    && (context.priority)(input, &context.cells[input])
+                        <= (context.priority)(x, &context.cells[x])
             });
         if has_weaker_self_referenced_input {
             continue;
@@ -632,6 +666,7 @@ fn seed_fold_order_key<'signature>(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     signatures: &'signature SeedSignatures,
+    priority: &dyn Fn(CellId, &CellData) -> u64,
 ) -> SeedFoldOrderKey<'signature> {
     let relationship = &relationships[rel_id];
     let method = &relationship.methods[method_idx];
@@ -639,7 +674,7 @@ fn seed_fold_order_key<'signature>(
         .inputs
         .iter()
         .filter(|&&input| input != target)
-        .map(|&input| cells[input].strength)
+        .map(|&input| priority(input, &cells[input]))
         .max()
         .unwrap_or(0);
     SeedFoldOrderKey {
@@ -1314,8 +1349,16 @@ mod tests {
             .unwrap();
 
         let signatures = SeedSignatures::new(&sheet.relationships);
-        let first_key =
-            seed_fold_order_key(first, 0, x, &sheet.cells, &sheet.relationships, &signatures);
+        let current_priority = |_: CellId, cell: &CellData| cell.strength;
+        let first_key = seed_fold_order_key(
+            first,
+            0,
+            x,
+            &sheet.cells,
+            &sheet.relationships,
+            &signatures,
+            &current_priority,
+        );
         let second_key = seed_fold_order_key(
             second,
             0,
@@ -1323,6 +1366,7 @@ mod tests {
             &sheet.cells,
             &sheet.relationships,
             &signatures,
+            &current_priority,
         );
 
         assert_eq!(first_key.strongest_input, second_key.strongest_input);

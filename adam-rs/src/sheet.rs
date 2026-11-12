@@ -73,6 +73,57 @@
 //! assert_eq!(sheet.changed().count(), 0);
 //! # Ok::<(), adam_rs::Error>(())
 //! ```
+//!
+//! # Forced, self-referencing, and reversible outcomes
+//!
+//! A cell has three distinct outcomes when a relationship determines it:
+//!
+//! - **Conditionally forced.** The forcing relationship supplies the effective
+//!   value, [`Sheet::read`] reports it, and the cell's [`Sheet::source`]
+//!   aspiration is unchanged. The cell keeps the priority it had when forcing
+//!   began, and an explicit write while forced replaces that priority with the
+//!   write's recency. When the last forcing cause ends, the retained aspiration
+//!   and priority compete in the first plan that can use the cell, so no
+//!   additional edit is needed.
+//! - **Self-referencing.** A method that reads and writes the same cell seeds
+//!   from its aspiration and honors that edit's priority. Forcing and release
+//!   do not erase either.
+//! - **Ordinary reversible.** A losing cell receives the winner's value as its
+//!   new aspiration with a derived priority. It does not revive an earlier
+//!   value when the relationship later deactivates, and forcing a cell that
+//!   was already derived retains that derived value and priority.
+//!
+//! ```
+//! use adam_rs::{MatchExpr, Method, Sheet};
+//! let mut sheet = Sheet::default();
+//! let mode = sheet.add_cell(0_i32);
+//! let input = sheet.add_cell(30_i32);
+//! let a = sheet.add_cell(1_i32);
+//! let b = sheet.add_cell(2_i32);
+//! let force = sheet.add_relationship(vec![Method::from_fn_1_1(input, a, |v: &i32| Ok(*v))])?;
+//! let reversible = sheet.add_relationship(vec![
+//!     Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+//!     Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+//! ])?;
+//! sheet.add_conditional(
+//!     MatchExpr::cell(mode),
+//!     vec![(vec![1_i32], vec![force]), (vec![2_i32], vec![reversible])],
+//!     vec![],
+//! )?;
+//! sheet.write(b, 22_i32)?;
+//! sheet.write(a, 11_i32)?;
+//! sheet.write(mode, 1_i32)?;
+//! sheet.propagate()?;
+//! assert!(sheet.is_forced(a));
+//! assert_eq!((*sheet.read::<i32>(a)?, *sheet.source::<i32>(a)?), (30, 11));
+//!
+//! // Releasing `a` keeps its newer edit, so `a` wins the reversible relationship.
+//! sheet.write(mode, 2_i32)?;
+//! sheet.propagate()?;
+//! assert!(sheet.is_source(a));
+//! assert_eq!(*sheet.read::<i32>(b)?, 11);
+//! # Ok::<(), adam_rs::Error>(())
+//! ```
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -133,6 +184,8 @@ pub struct Sheet {
     /// [`Sheet::is_forced`]) can report which method the planner picked for each
     /// relationship without re-planning.
     last_plan: Option<Rc<PreparedPlan>>,
+    /// Number of cells with a priority retained through conditional forcing.
+    remembered_strength_count: usize,
     /// Eligible prepared unconditional plan, independent of the display snapshot.
     pre_plan_cache: Option<CachedPlan>,
     /// Eligible prepared final active plan, independent of the unconditional plan.
@@ -311,6 +364,7 @@ impl Sheet {
             changed_cells: Vec::new(),
             next_strength: 0,
             last_plan: None,
+            remembered_strength_count: 0,
             pre_plan_cache: None,
             main_plan_cache: None,
             seed_signatures: None,
@@ -350,6 +404,7 @@ impl Sheet {
             derived: None,
             type_id: TypeId::of::<T>(),
             strength,
+            remembered_strength: None,
             changed: false,
             adj: Vec::new(),
             eq_fn: |a, b| a.downcast_ref::<T>() == b.downcast_ref::<T>(),
@@ -1343,6 +1398,9 @@ impl Sheet {
         self.next_strength += 1;
         let cell = &mut self.cells[id];
         cell.strength = self.next_strength | (1u64 << 63);
+        if cell.remembered_strength.is_some() {
+            cell.remembered_strength = Some(cell.strength);
+        }
         cell.source = Box::new(value);
         cell.derived = None;
         Ok(())
@@ -2348,6 +2406,9 @@ impl Sheet {
     /// alternatives that conflict with another relationship's forced outputs until
     /// the classification stabilizes. A forced pure output's producer does not read
     /// that cell as a self-referencing input.
+    ///
+    /// A conditionally forced cell retains its pre-forcing priority and source
+    /// aspiration for release; see [the forcing outcomes](crate::sheet#forced-self-referencing-and-reversible-outcomes).
     ///
     /// This does not decide whether some assignment can leave the cell unclaimed.
     /// A mandatory self-referencing writer claims its output exclusively but remains

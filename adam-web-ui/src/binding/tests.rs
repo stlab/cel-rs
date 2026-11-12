@@ -1134,3 +1134,103 @@ fn replay_write_failure_reports_typed_mutation() {
         "7"
     );
 }
+
+/// Builds a model whose mode 1 forces `a` from `input` and mode 2 activates a reversible `a`/`b`.
+fn conditional_release_model() -> Result<BuiltSheet, BuildError> {
+    let mut built = build_sheet(
+        "sheet s { cell mode: i32 = 0; cell input: i32 = 30; cell a: i32 = 1; cell b: i32 = 2; }",
+        "release.adm2",
+    )?;
+    let [mode, input, a, b] = ["mode", "input", "a", "b"].map(|key| built.keys[key]);
+    let force = built
+        .parsed
+        .add_relationship(vec![Method::from_fn_1_1(input, a, |v: &i32| Ok(*v))])
+        .unwrap();
+    let reversible = built
+        .parsed
+        .add_relationship(vec![
+            Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+            Method::from_fn_1_1(b, a, |v: &i32| Ok(*v)),
+        ])
+        .unwrap();
+    built
+        .parsed
+        .add_conditional(
+            adam_rs::MatchExpr::cell(mode),
+            vec![(vec![1_i32], vec![force]), (vec![2_i32], vec![reversible])],
+            vec![],
+        )
+        .unwrap();
+    let file_name = built.file_name;
+    let mut initialized = crate::initialize_sheet(built.parsed)?;
+    initialized.file_name = file_name;
+    Ok(initialized)
+}
+
+/// Returns `a` and `b`'s effective values, `a`'s aspiration, and which of the two is a source.
+fn release_state(owner: &SheetOwner) -> (i32, i32, i32, bool, bool) {
+    owner
+        .inspect(|p, _| {
+            let a = p.cell_names["a"].0;
+            let b = p.cell_names["b"].0;
+            (
+                *p.read::<i32>(a).unwrap(),
+                *p.read::<i32>(b).unwrap(),
+                *p.source::<i32>(a).unwrap(),
+                p.is_source(a),
+                p.is_source(b),
+            )
+        })
+        .unwrap()
+}
+
+/// Applies accepted edits in order, then checks recovery reproduces the published release state.
+///
+/// - Complexity: The sum of the documented costs of one `SheetOwner::new`, one `apply` per
+///   edit, and one `restore_accepted`, plus constant-size state inspections. Those contracts
+///   include the factory, propagation, publication, edit and history bytes, and diagnostic
+///   metadata terms. With no edits, the cost is construction plus restoration.
+fn assert_release_recovers(edits: &[(&str, &str)], expected: (i32, i32, i32, bool, bool)) {
+    let factory: ModelFactory = Rc::new(conditional_release_model);
+    let mut owner = SheetOwner::new(factory, "release/v1".into()).unwrap();
+    for (key, value) in edits {
+        assert!(matches!(
+            owner.apply(&[edit(key, value)], UpdateOrigin::User),
+            HostOutcome::Accepted
+        ));
+    }
+    assert_eq!(release_state(&owner), expected);
+    assert_eq!(owner.accepted_state().transactions.len(), edits.len());
+    owner.restore_accepted().unwrap();
+    assert_eq!(release_state(&owner), expected);
+    assert_eq!(owner.accepted_state().transactions.len(), edits.len());
+}
+
+/// Replays conditional forcing and release with their original write order.
+#[test]
+fn restore_accepted_replays_conditional_release_priority() {
+    // `a` is newer than `b`, so the released reversible relationship keeps `a`.
+    assert_release_recovers(
+        &[
+            ("b", "22"),
+            ("a", "11"),
+            ("mode", "1"),
+            ("input", "40"),
+            ("mode", "2"),
+        ],
+        (11, 11, 11, true, false),
+    );
+    // A same-value write while forced is still a newer edit; `b`'s later write outranks it; ordinary derivation then publishes 22 into `a`.
+    assert_release_recovers(
+        &[
+            ("b", "22"),
+            ("a", "11"),
+            ("mode", "1"),
+            ("a", "11"),
+            ("b", "22"),
+            ("input", "40"),
+            ("mode", "2"),
+        ],
+        (22, 22, 22, false, true),
+    );
+}

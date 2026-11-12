@@ -27,8 +27,10 @@ cargo clippy -p begin --all-targets -- -D warnings
 
 CI currently builds and tests the workspace excluding `begin`, and checks `begin` with
 `--no-default-features`. Before opening a PR, run the complete commands above and ensure
-the plain build and test commands emit no warnings. Run `cargo doc --workspace --no-deps --lib`
-when changing library documentation.
+the plain build and test commands emit no warnings, except for Cargo's known
+future-incompatibility warning for the macOS dependency `block v0.1.6` concerning
+`_NSConcreteStackBlock`. Do not ignore other warnings. Run
+`cargo doc --workspace --no-deps --lib` when changing library documentation.
 
 Activate shared hooks after cloning with `git config core.hooksPath .githooks`. Make changes in
 a separate git worktree and never commit directly to `main`.

@@ -14,7 +14,7 @@
 //! design rationale and literature grounding.
 //!
 //! Method selection is value-blind, including for self-referencing components: a
-//! self-referencing chain reaches the correct values through [`evaluate_seeds`], which
+//! self-referencing chain reaches the correct values through [`seed::evaluate_seeds`], which
 //! evaluates structurally selected sibling seed methods using current strengths,
 //! reconstructs each self-referencing input's value at execution time, and reports
 //! non-self seed dependency cycles as [`Error::SeedCycle`] rather than substituting a
@@ -63,6 +63,7 @@ use release::ReleaseFailure;
 pub(crate) use reuse::SourceCertificate;
 pub(crate) use seed::{
     SeedEvaluationCache, SeedRecipes, SeedSignatures, SeedSource, evaluate_seeds,
+    evaluate_seeds_with_priority,
 };
 
 /// The seed value each self-referencing input should read this round, keyed by cell. A
@@ -160,12 +161,45 @@ pub(crate) struct Plan {
     pub(crate) forced_relationships: HashSet<RelationshipId>,
 }
 
+/// Selects which remembered cell priorities participate in one planning phase.
+#[derive(Clone, Copy)]
+pub(crate) enum PriorityPolicy {
+    /// Uses each cell's current strength.
+    Current,
+    /// Uses remembered strengths for every cell that has one.
+    Remembered,
+    /// Uses remembered strengths only for cells not forced by the active plan.
+    RememberedUnlessForced,
+}
+
+/// Returns the priority used for `cell` under one planning phase.
+///
+/// - Complexity: Expected O(1) time and O(1) space.
+pub(crate) fn priority_for_cell(
+    id: CellId,
+    cell: &CellData,
+    policy: PriorityPolicy,
+    forced_outputs: &HashSet<CellId>,
+) -> u64 {
+    match policy {
+        PriorityPolicy::Current => cell.strength,
+        PriorityPolicy::Remembered => cell.remembered_strength.unwrap_or(cell.strength),
+        PriorityPolicy::RememberedUnlessForced => {
+            if forced_outputs.contains(&id) {
+                cell.strength
+            } else {
+                cell.remembered_strength.unwrap_or(cell.strength)
+            }
+        }
+    }
+}
+
 /// Assigns one method per active relationship and returns them in dependency order.
 ///
 /// Only relationships in `active` are planned; relationships outside `active` are
 /// invisible to method selection. Method selection is purely strength-based and
 /// value-blind: a self-referencing chain reaches the correct values not by choosing a
-/// value-aware assignment, but by [`evaluate_seeds`] reconstructing each self-referencing
+/// value-aware assignment, but by [`seed::evaluate_seeds`] reconstructing each self-referencing
 /// input's value at execution time.
 ///
 /// - Precondition: `Sheet::validate` has established static filter/guard independence
@@ -185,9 +219,34 @@ pub(crate) fn plan(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
 ) -> Result<Plan, Error> {
+    plan_with_priority_policy(cells, relationships, active, PriorityPolicy::Current)
+}
+
+/// Assigns one method per active relationship using phase-specific remembered priorities.
+///
+/// - Precondition: every active relationship belongs to `relationships`.
+/// - Precondition: `priority_policy` selects the same priority interpretation used by
+///   every cache certificate and seed evaluation for this phase.
+/// - Complexity: The same as [`plan`].
+///
+/// # Errors
+///
+/// Returns the assignment and dependency errors documented by [`plan`].
+pub(crate) fn plan_with_priority_policy(
+    cells: &SlotMap<CellId, CellData>,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+    priority_policy: PriorityPolicy,
+) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
-    let release = match release::resolve(cells, relationships, active) {
+    let release = match if matches!(priority_policy, PriorityPolicy::Current) {
+        release::resolve(cells, relationships, active)
+    } else {
+        release::resolve_with_priority(cells, relationships, active, |id, cell| {
+            priority_for_cell(id, cell, priority_policy, &forced_outputs)
+        })
+    } {
         Ok(result) => result,
         Err(ReleaseFailure::NoAssignment) => {
             return Err(Error::Conflict {
