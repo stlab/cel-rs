@@ -14,6 +14,9 @@
 - [[knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md|CEL and Adam require strict LL1 with terminal commas only for singleton tuples]] (decision, 0.99) `grammar` `ll1` `parser` `trailing-comma` `project-policy`
 - [[knowledge/cel-cleanup-belongs-to-live-values-not-typed-instruction-plans.md|CEL cleanup belongs to live values, not typed instruction plans]] (decision, 0.98) `cel-runtime` `ownership` `unwinding` `allocation` `value-type` `unsafe`
 - [[knowledge/cel-closure-grouping-preserves-precedence-grammar.md|CEL Closure Grouping Preserves Precedence Grammar]] (decision, 1.00) `cel` `grammar` `closures` `ll1` `precedence` `design`
+- [[knowledge/cel-closures-bind-explicit-arguments-not-ambient-environments.md|CEL closures bind explicit arguments, not ambient environments]] (pattern, 0.99) `cel` `closures` `prepared-execution` `ownership`
+- [[knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md|CEL record emission preserves source field order through a schema permutation]] (pattern, 0.99) `cel` `records` `emission` `evaluation-order`
+- [[knowledge/cel-record-fields-use-typed-member-operation-dispatch.md|CEL record fields use typed member operation dispatch]] (pattern, 1.00) `records` `member-dispatch` `parity`
 - [[knowledge/celparser-and-parsercontext-dual-emission.md|CELParser and ParserContext Dual Emission]] (concept, 0.80) `cel-parser` `parser-context` `ast-context` `dyn-segment-context` `cel-expression`
 - [[knowledge/clippy-and-feature-flag-validation-matrix.md|Clippy and Feature Flag Validation Matrix]] (procedure, 0.85) `build` `clippy` `feature-flags` `validation` `cargo`
 - [[knowledge/conditional-construction-errors-need-native-identity-context-to-retain-the-failed-child-source.md|Conditional construction errors need native identity context to retain the failed child source]] (discovery, 0.98) `composition` `conditional` `provenance` `error-ownership` `source-identity`
@@ -28,6 +31,7 @@
 - [[knowledge/git-worktree-and-no-direct-commit-policy.md|Git Worktree and No-Direct-Commit Policy]] (procedure, 0.85) `git` `worktree` `githooks` `branching` `repository-policy`
 - [[knowledge/graph-channels-require-exclusive-container-ownership.md|Graph Channels Require Exclusive Container Ownership]] (discovery, 0.97) `graph` `ownership` `live-book` `bootstrap` `identity`
 - [[knowledge/issue-29-means-typed-parameterized-sheet-composition-not-equation-inference.md|Issue 29 means typed parameterized-sheet composition, not equation inference]] (decision, 0.99) `adam-lang` `adam-rs` `parameterized-sheets` `composition` `issue-29` `approved-design`
+- [[knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md|LexLexer compounds preserve first-punctuation spans and group-local adjacency]] (pattern, 1.00) `lexer` `source-spans` `parity`
 - [[knowledge/lsp-isolates-dependency-groups-before-whole-collection-module-checks.md|LSP isolates dependency groups before whole-collection module checks]] (discovery, 0.97) `lsp` `module-checking` `diagnostics` `configuration` `source-ownership`
 - [[knowledge/lsp-source-spans-require-original-text-utf-16-projection-in-both-diagnostic-paths.md|LSP source spans require original-text UTF-16 projection in both diagnostic paths]] (discovery, 0.99) `adam-lsp` `unicode` `diagnostics` `source-ownership` `parameterized-sheets`
 - [[knowledge/module-analysis-requires-output-backing-defaults-even-when-an-output-has-a-writer.md|Module analysis requires output backing defaults even when an output has a writer]] (discovery, 0.97) `module-checking` `outputs` `defaults` `nonexecuting-analysis`
@@ -36,7 +40,8 @@
 - [[knowledge/numeric-editor-capability-follows-the-complete-type-domain.md|Numeric Editor Capability Follows The Complete Type Domain]] (decision, 1.00) `ui` `numeric` `precision` `type-domain` `spectrum`
 - [[knowledge/oplookup-scoping-and-resolution-hierarchy.md|OpLookup Scoping and Resolution Hierarchy]] (concept, 0.80) `cel-parser` `op-lookup` `operator-resolution` `scope` `builtins`
 - [[knowledge/rawstack-ownership-release-requires-physical-frame-repair.md|RawStack Ownership Release Requires Physical Frame Repair]] (pattern, 0.98) `runtime` `ownership` `unsafe` `unwinding`
+- [[knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md|Shared Spectrum exports and live-embed assets constrain Begin widget migration]] (discovery, 0.99) `dioxus` `spectrum` `shared-assets`
 - [[knowledge/sheet-constraint-planning-and-method-selection-flow.md|Sheet Constraint Planning and Method Selection Flow]] (observation, 0.80) `adam-rs` `sheet` `planner` `multi-way-constraints` `method-selection`
+- [[knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md|SheetHandle reentrant outcomes require borrow-free FIFO delivery]] (pattern, 0.98) `dioxus` `bindings` `reentrancy`
 - [[knowledge/vendored-spectrum-bundle-maintenance-via-xtask.md|Vendored Spectrum Bundle Maintenance via xtask]] (procedure, 0.85) `xtask` `spectrum` `swc-js` `assets` `build-js`
 - [[knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md|VS Code module events must share canonical dependency ownership with the loader]] (pattern, 0.98) `vscode` `modules` `symlinks` `canonical-paths` `cache-invalidation` `source-ownership`
-

@@ -3,6 +3,7 @@
 .tokensave
 .claude/worktrees/
 .superpowers/
+/.playwright-mcp/
 /begin/node_modules
 /ez-adam/node_modules
 /editors/vscode-adam-lang/node_modules
