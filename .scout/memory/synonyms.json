@@ -104,6 +104,18 @@
       [
         "project-policy",
         1.0
+      ],
+      [
+        "diagnostics",
+        1.0
+      ],
+      [
+        "tuple-selector",
+        1.0
+      ],
+      [
+        "source-span",
+        1.0
       ]
     ],
     "no direct commit": [
@@ -1879,6 +1891,18 @@
       ],
       [
         "diagnostics_for_source",
+        0.5
+      ],
+      [
+        "tuple-selector",
+        0.5
+      ],
+      [
+        "parser",
+        0.5
+      ],
+      [
+        "source-span",
         0.5
       ]
     ],
@@ -8525,6 +8549,34 @@
         "bindings",
         1.0
       ]
+    ],
+    "tuple-selector": [
+      [
+        "parser",
+        1.0
+      ],
+      [
+        "source-span",
+        1.0
+      ],
+      [
+        "diagnostics",
+        1.0
+      ]
+    ],
+    "source-span": [
+      [
+        "parser",
+        1.0
+      ],
+      [
+        "tuple-selector",
+        1.0
+      ],
+      [
+        "diagnostics",
+        1.0
+      ]
     ]
   },
   "provenance": {
@@ -14593,8 +14645,44 @@
     ],
     "evaluation-order|records": [
       "knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md"
+    ],
+    "tuple-selector|parser": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "diagnostics|parser": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "parser|diagnostics": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "source-span|parser": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "source-span|diagnostics": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "diagnostics|tuple-selector": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "diagnostics|source-span": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "source-span|tuple-selector": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "tuple-selector|diagnostics": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "parser|source-span": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "tuple-selector|source-span": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
+    ],
+    "parser|tuple-selector": [
+      "knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md"
     ]
   },
-  "entries_processed": 43,
-  "built_at": "2026-11-12T18:52:21.682123+00:00"
+  "entries_processed": 44,
+  "built_at": "2026-11-17T03:42:14.058719+00:00"
 }
