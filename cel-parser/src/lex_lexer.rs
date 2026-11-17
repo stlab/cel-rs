@@ -5,7 +5,8 @@
 //! delimiters, booleans become literals, and adjacent punctuation combines into
 //! the supported operators. Documentation attributes become comment tokens.
 //! Decimal literals suffixed `f32` or `f64`, including `1f64`, become floating
-//! literals without changing their spelling or span.
+//! literals without changing their spelling or span. A floating exponent's
+//! optional sign follows `e` or `E` before any underscores.
 //!
 //! ```
 //! use cel_parser::lex_lexer::{LexLexer, Token};
@@ -22,9 +23,10 @@
 //! # Error Handling
 //!
 //! A `#` commits to a documentation attribute: `#[doc = "..."]` or `#![doc = "..."]`.
-//! Other attribute shapes and literals Syn cannot parse produce [`Token::Error`].
-//! Errors consume the inspected token trees; iteration may continue with the
-//! remaining input, but does not roll back a malformed attribute.
+//! Other attribute shapes, literals Syn cannot parse, and exponent signs after
+//! underscores produce [`Token::Error`]. Errors consume the inspected token
+//! trees; iteration may continue with the remaining input, but does not roll
+//! back a malformed attribute.
 
 use proc_macro2::{Delimiter, Ident, Spacing, Span, TokenTree};
 use syn::Lit;
@@ -181,13 +183,13 @@ impl LexLexer {
 
     /// Parses a literal while preserving its span.
     ///
-    /// Returns `Token::Error` if Syn cannot interpret the literal.
+    /// Returns `Token::Error` if the literal is malformed.
     ///
     /// - Complexity: O(n) time and space for a literal of n characters.
     fn convert_literal(literal: proc_macro2::Literal) -> Token {
         let span = literal.span();
-        match syn::parse2(TokenTree::Literal(literal).into()) {
-            Ok(literal) => Token::Literal(normalize_literal(literal)),
+        match syn::parse2(TokenTree::Literal(literal).into()).and_then(normalize_literal) {
+            Ok(literal) => Token::Literal(literal),
             Err(error) => Token::Error {
                 message: error.to_string(),
                 span,
@@ -374,12 +376,16 @@ impl LexLexer {
 /// ```
 pub type Literal = Lit;
 
-/// Classifies decimal integer-form float literals while retaining their tokens and spans.
+/// Classifies decimal integer-form floats and validates exponent sign placement.
 ///
-/// - Complexity: O(n) time and space for an integer-form literal with an `f32`
-///   or `f64` suffix, where n is its length.
-pub(crate) fn normalize_literal(literal: Literal) -> Literal {
-    match literal {
+/// # Errors
+///
+/// Returns an error when an exponent sign follows an underscore.
+///
+/// - Complexity: O(n) time for a literal with n characters, with O(n) auxiliary
+///   space for an exponent or integer-form float.
+pub(crate) fn normalize_literal(literal: Literal) -> syn::Result<Literal> {
+    let literal = match literal {
         Lit::Int(integer) if matches!(integer.suffix(), "f32" | "f64") => {
             // Syn classifies `1f64` as an integer, but radix-prefixed integers are not floats.
             let spelling = integer.to_string();
@@ -390,11 +396,26 @@ pub(crate) fn normalize_literal(literal: Literal) -> Literal {
             {
                 Lit::Int(integer)
             } else {
-                Lit::Float(syn::LitFloat::from(integer.token()))
+                Lit::Float(syn::LitFloat::new(&spelling, integer.span()))
             }
         }
         other => other,
+    };
+    if let Lit::Float(float) = &literal
+        && float.base10_digits().contains('e')
+    {
+        let spelling = float.to_string();
+        if let Some((_, exponent)) = spelling.split_once(['e', 'E']) {
+            let mut chars = exponent.chars();
+            if chars.next() == Some('_') && matches!(chars.find(|ch| *ch != '_'), Some('+' | '-')) {
+                return Err(syn::Error::new(
+                    float.span(),
+                    "an exponent sign must immediately follow `e` or `E`",
+                ));
+            }
+        }
     }
+    Ok(literal)
 }
 
 impl HasSpan for Literal {
@@ -943,6 +964,47 @@ mod tests {
         match token {
             Token::Literal(Lit::Float(..)) => {}
             _ => panic!("Expected float literal"),
+        }
+    }
+
+    /// Preserves valid signed and unsigned exponent spellings and spans.
+    #[test]
+    fn exponent_sign_precedes_underscores_in_float_tokens() {
+        for (source, expected) in [
+            ("1e+_2f64", 100.0),
+            ("1e__2f64", 100.0),
+            ("1e-__2f64", 0.01),
+            ("1.0E+__2f64", 100.0),
+            ("1e+_2f32", 100.0),
+        ] {
+            let mut lexer = LexLexer::new(TokenStream::from_str(source).unwrap().into_iter());
+            let Some(Token::Literal(Lit::Float(literal))) = lexer.next() else {
+                panic!("{source} must lex as a float");
+            };
+            assert_eq!(literal.base10_parse::<f64>().unwrap(), expected, "{source}");
+            assert_eq!(literal.to_string(), source);
+            assert_eq!(literal.span().source_text().as_deref(), Some(source));
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Rejects exponent signs preceded by underscores without losing the source span.
+    #[test]
+    fn exponent_sign_after_underscores_is_not_a_float_token() {
+        for source in [
+            "1e_+2f64",
+            "1e__-2f64",
+            "1e_+_2f64",
+            "1.0e_+2f64",
+            "1E__+2f64",
+            "1e_+2f32",
+            "1_e_+_2",
+        ] {
+            let mut lexer = LexLexer::new(TokenStream::from_str(source).unwrap().into_iter());
+            let Some(Token::Error { span, .. }) = lexer.next() else {
+                panic!("{source} must be a lexical error");
+            };
+            assert_eq!(span.source_text().as_deref(), Some(source));
         }
     }
 
