@@ -43,5 +43,6 @@
 - [[knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md|Shared Spectrum exports and live-embed assets constrain Begin widget migration]] (discovery, 0.99) `dioxus` `spectrum` `shared-assets`
 - [[knowledge/sheet-constraint-planning-and-method-selection-flow.md|Sheet Constraint Planning and Method Selection Flow]] (observation, 0.80) `adam-rs` `sheet` `planner` `multi-way-constraints` `method-selection`
 - [[knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md|SheetHandle reentrant outcomes require borrow-free FIFO delivery]] (pattern, 0.98) `dioxus` `bindings` `reentrancy`
+- [[knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md|Tuple selector conversion errors retain the original literal span]] (pattern, 0.99) `parser` `diagnostics` `tuple-selector` `source-span`
 - [[knowledge/vendored-spectrum-bundle-maintenance-via-xtask.md|Vendored Spectrum Bundle Maintenance via xtask]] (procedure, 0.85) `xtask` `spectrum` `swc-js` `assets` `build-js`
 - [[knowledge/vs-code-module-events-must-share-canonical-dependency-ownership-with-the-loader.md|VS Code module events must share canonical dependency ownership with the loader]] (pattern, 0.98) `vscode` `modules` `symlinks` `canonical-paths` `cache-invalidation` `source-ownership`
