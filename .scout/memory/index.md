@@ -40,7 +40,7 @@
 - [[knowledge/numeric-editor-capability-follows-the-complete-type-domain.md|Numeric Editor Capability Follows The Complete Type Domain]] (decision, 1.00) `ui` `numeric` `precision` `type-domain` `spectrum`
 - [[knowledge/oplookup-scoping-and-resolution-hierarchy.md|OpLookup Scoping and Resolution Hierarchy]] (concept, 0.80) `cel-parser` `op-lookup` `operator-resolution` `scope` `builtins`
 - [[knowledge/rawstack-ownership-release-requires-physical-frame-repair.md|RawStack Ownership Release Requires Physical Frame Repair]] (pattern, 0.98) `runtime` `ownership` `unsafe` `unwinding`
-- [[knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md|Shared Spectrum exports and live-embed assets constrain Begin widget migration]] (discovery, 0.99) `dioxus` `spectrum` `shared-assets`
+- [[knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md|Shared controls and live-embed assets constrain widget changes]] (discovery, 0.99) `dioxus` `spectrum` `shared-assets`
 - [[knowledge/sheet-constraint-planning-and-method-selection-flow.md|Sheet Constraint Planning and Method Selection Flow]] (observation, 0.80) `adam-rs` `sheet` `planner` `multi-way-constraints` `method-selection`
 - [[knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md|SheetHandle reentrant outcomes require borrow-free FIFO delivery]] (pattern, 0.98) `dioxus` `bindings` `reentrancy`
 - [[knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md|Tuple selector conversion errors retain the original literal span]] (pattern, 0.99) `parser` `diagnostics` `tuple-selector` `source-span`
