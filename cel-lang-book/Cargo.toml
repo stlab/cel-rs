@@ -4,12 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-[dependencies]
+[dev-dependencies]
 cel-parser = { path = "../cel-parser" }
 cel-runtime = { path = "../cel-runtime" }
 cel-euclid = { path = "../cel-euclid" }
-
-[dev-dependencies]
 cel-std = { path = "../cel-std" }
 
 [lints]
