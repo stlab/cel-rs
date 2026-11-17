@@ -1,7 +1,7 @@
 //! Support crate for *The Common Expression Language* book.
 //!
 //! This crate exists so the static mdBook can point at a real Rust package
-//! whose examples compile against [`cel_parser`] and [`cel_runtime`]. The
+//! whose examples compile against `cel-parser` and `cel-runtime`. The
 //! checked examples in `tests/examples.rs` are executable companions to the
 //! prose: they verify the concrete parser and runtime behavior that the book
 //! describes, and they must not present unsupported CEL dialect features as if
