@@ -711,6 +711,23 @@ mod tests {
         assert!(cursor.consume_literal_pattern().is_ok());
     }
 
+    /// Retains the float token and source span in literal patterns.
+    #[test]
+    fn integer_form_float_literal_patterns_preserve_the_token() {
+        for (source, expected, suffix, negated) in [
+            ("-1_f64", "1_f64", "f64", true),
+            ("1f32", "1f32", "f32", false),
+            ("-1f32", "1f32", "f32", true),
+        ] {
+            let stream = proc_macro2::TokenStream::from_str(source).unwrap();
+            let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+            let (is_negated, literal, _, span) = cursor.consume_literal_pattern().unwrap();
+            assert_eq!(is_negated, negated);
+            assert!(matches!(literal, Literal::Float(value) if value.suffix() == suffix));
+            assert_eq!(span.source_text().as_deref(), Some(expected));
+        }
+    }
+
     /// Rejects negation of an unsigned literal pattern.
     #[test]
     fn consume_literal_pattern_rejects_a_negated_unsigned_integer() {

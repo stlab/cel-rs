@@ -4,6 +4,8 @@
 //! it as an iterator of [`Token`] values. Groups emit matching opening and closing
 //! delimiters, booleans become literals, and adjacent punctuation combines into
 //! the supported operators. Documentation attributes become comment tokens.
+//! Decimal literals suffixed `f32` or `f64`, including `1f64`, become floating
+//! literals without changing their spelling or span.
 //!
 //! ```
 //! use cel_parser::lex_lexer::{LexLexer, Token};
@@ -185,7 +187,7 @@ impl LexLexer {
     fn convert_literal(literal: proc_macro2::Literal) -> Token {
         let span = literal.span();
         match syn::parse2(TokenTree::Literal(literal).into()) {
-            Ok(literal) => Token::Literal(literal),
+            Ok(literal) => Token::Literal(normalize_literal(literal)),
             Err(error) => Token::Error {
                 message: error.to_string(),
                 span,
@@ -371,6 +373,29 @@ impl LexLexer {
 /// # Ok::<(), syn::Error>(())
 /// ```
 pub type Literal = Lit;
+
+/// Classifies decimal integer-form float literals while retaining their tokens and spans.
+///
+/// - Complexity: O(n) time and space for an integer-form literal with an `f32`
+///   or `f64` suffix, where n is its length.
+pub(crate) fn normalize_literal(literal: Literal) -> Literal {
+    match literal {
+        Lit::Int(integer) if matches!(integer.suffix(), "f32" | "f64") => {
+            // Syn classifies `1f64` as an integer, but radix-prefixed integers are not floats.
+            let spelling = integer.to_string();
+            let unsigned = spelling.strip_prefix('-').unwrap_or(&spelling);
+            if unsigned.starts_with("0b")
+                || unsigned.starts_with("0o")
+                || unsigned.starts_with("0x")
+            {
+                Lit::Int(integer)
+            } else {
+                Lit::Float(syn::LitFloat::from(integer.token()))
+            }
+        }
+        other => other,
+    }
+}
 
 impl HasSpan for Literal {
     /// Returns the literal's span, including uninterpreted verbatim literals.
@@ -919,6 +944,73 @@ mod tests {
             Token::Literal(Lit::Float(..)) => {}
             _ => panic!("Expected float literal"),
         }
+    }
+
+    /// Recognizes suffixed decimal float tokens without changing their source.
+    #[test]
+    fn integer_form_float_tokens_preserve_spelling_and_span() {
+        for (source, suffix, expected) in [
+            ("1f64", "f64", 1.0),
+            ("1_f64", "f64", 1.0),
+            ("0f64", "f64", 0.0),
+            ("1__f64", "f64", 1.0),
+            ("1_000f64", "f64", 1000.0),
+            ("9007199254740993f64", "f64", 9007199254740992.0),
+            (
+                "340_282_366_920_938_463_463_374_607_431_768_211_456f64",
+                "f64",
+                2.0f64.powi(128),
+            ),
+            ("1f32", "f32", 1.0),
+        ] {
+            let mut lexer = LexLexer::new(TokenStream::from_str(source).unwrap().into_iter());
+            let Some(Token::Literal(Lit::Float(literal))) = lexer.next() else {
+                panic!("{source} must lex as a float");
+            };
+            assert_eq!(literal.suffix(), suffix, "{source}");
+            assert_eq!(literal.base10_parse::<f64>().unwrap(), expected, "{source}");
+            assert_eq!(literal.to_string(), source);
+            assert_eq!(literal.span().source_text().as_deref(), Some(source));
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Leaves nondecimal and differently suffixed tokens classified as integers.
+    #[test]
+    fn integer_form_float_tokens_preserve_integer_boundaries() {
+        for (source, suffix) in [
+            ("0x1f64", ""),
+            ("0b1f64", "f64"),
+            ("0o7_f64", "f64"),
+            ("0b1f32", "f32"),
+            ("0o7_f32", "f32"),
+            ("1f64x", "f64x"),
+            ("1f64_", "f64_"),
+            ("1f640", "f640"),
+            ("1f32x", "f32x"),
+        ] {
+            let mut lexer = LexLexer::new(TokenStream::from_str(source).unwrap().into_iter());
+            let Some(Token::Literal(Lit::Int(literal))) = lexer.next() else {
+                panic!("{source} must remain an integer token");
+            };
+            assert_eq!(literal.suffix(), suffix, "{source}");
+            assert_eq!(literal.to_string(), source);
+            assert_eq!(literal.span().source_text().as_deref(), Some(source));
+            assert!(lexer.next().is_none());
+        }
+    }
+
+    /// Keeps range punctuation separate from adjacent suffixed float tokens.
+    #[test]
+    fn integer_form_float_tokens_preserve_adjacent_range_punctuation() {
+        let input = TokenStream::from_str("1f64..=2f64").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        assert!(matches!(lexer.next(), Some(Token::Literal(Lit::Float(lit)))
+            if lit.to_string() == "1f64" && lit.span().source_text().as_deref() == Some("1f64")));
+        assert!(matches!(lexer.next(), Some(Token::Punct { op, .. }) if op == "..="));
+        assert!(matches!(lexer.next(), Some(Token::Literal(Lit::Float(lit)))
+            if lit.to_string() == "2f64" && lit.span().source_text().as_deref() == Some("2f64")));
+        assert!(lexer.next().is_none());
     }
 
     /// Preserves an identifier's spelling.
