@@ -11,7 +11,6 @@
 - [[knowledge/affine-vector-mapping-must-ignore-nonfinite-translation.md|Affine vector mapping must ignore nonfinite translation]] (pattern, 0.99) `geometry` `affine-transform` `floating-point` `portability`
 - [[knowledge/architecture-overview.md|Architecture Overview]] (concept, 0.72) `architecture` `cel-rs` `adam-rs` `cel-runtime` `cel-parser` `overview`
 - [[knowledge/avoid-reactive-self-subscription-in-binding-mutations.md|Avoid reactive self-subscription in binding mutations]] (discovery, 0.70) `dioxus` `bindings` `slider` `reactivity`
-- [[knowledge/begin-desktop-recovery-tests-share-the-examples-watcher.md|Begin desktop recovery tests share the examples watcher]] (discovery, 0.98) `begin` `desktop` `tests` `watcher` `recovery`
 - [[knowledge/canonical-container-value-persistence.md|Canonical Container Value Persistence]] (concept, 0.75) `cel-runtime` `canonical-values` `tuples` `arrays` `value-persistence`
 - [[knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md|CEL and Adam require strict LL1 with terminal commas only for singleton tuples]] (decision, 0.99) `grammar` `ll1` `parser` `trailing-comma` `project-policy`
 - [[knowledge/cel-cleanup-belongs-to-live-values-not-typed-instruction-plans.md|CEL cleanup belongs to live values, not typed instruction plans]] (decision, 0.98) `cel-runtime` `ownership` `unwinding` `allocation` `value-type` `unsafe`
