@@ -1817,6 +1817,30 @@ mod tests {
         assert_eq!(fmt("1i32"), "1i32");
     }
 
+    /// Retains float widths, spans, and notation through the syntax formatter.
+    #[test]
+    fn integer_form_float_retained_syntax_preserves_source() {
+        for (source, is_f32, expected) in [
+            ("1f64", false, 1.0),
+            ("1_f64", false, 1.0),
+            ("0f64", false, 0.0),
+            ("1f32", true, 1.0),
+        ] {
+            let expr = parse(source);
+            let Expr::Literal { value, span } = &expr else {
+                panic!("expected literal for {source}");
+            };
+            match value {
+                crate::Literal::F32(value) if is_f32 => assert_eq!(*value as f64, expected),
+                crate::Literal::F64(value) if !is_f32 => assert_eq!(*value, expected),
+                other => panic!("wrong literal type for {source}: {other:?}"),
+            }
+            assert_eq!(span.start.source_text().as_deref(), Some(source));
+            assert_eq!(span.end.source_text().as_deref(), Some(source));
+            assert_eq!(format_expr(&expr, source, 0), source);
+        }
+    }
+
     #[test]
     fn unary_minus_of_a_binary_expression_needs_parens() {
         assert_eq!(fmt("-(1i32 + 2i32)"), "-(1i32 + 2i32)");

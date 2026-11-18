@@ -366,11 +366,13 @@ impl TokenCursor {
     ///
     /// Returns `Err` if a leading `-` is not followed by a literal, if there is no literal at
     /// all, if the literal itself isn't one `cel_parser` can represent (unrecognized numeric
-    /// suffix, or a value out of range for its width), or if a leading `-` negates a literal
-    /// `cel_parser` has no unary `-` overload for (any non-numeric literal, or an integer
-    /// literal with an unsigned suffix) — mirroring the runtime parser's
+    /// suffix, misplaced exponent sign, or a numeric value that cannot be parsed as its type),
+    /// or if a leading `-` negates a literal `cel_parser` has no unary `-` overload for
+    /// (any non-numeric literal, or an integer literal with an unsigned suffix). This mirrors
     /// `cel_parser::Parser::parse_literal_pattern`, which rejects the same cases via
     /// `push_literal_token`/its operator table.
+    ///
+    /// - Complexity: O(n) time and space for a literal with n characters.
     pub(crate) fn consume_literal_pattern(&mut self) -> Result<(bool, Literal, Span, Span)> {
         let minus_span = self.peek_span();
         let negated = self.consume_punct("-");
@@ -709,6 +711,50 @@ mod tests {
         let stream = proc_macro2::TokenStream::from_str("-1.5f64").unwrap();
         let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
         assert!(cursor.consume_literal_pattern().is_ok());
+    }
+
+    /// Retains the float token and source span in literal patterns.
+    #[test]
+    fn integer_form_float_literal_patterns_preserve_the_token() {
+        for (source, expected, suffix, negated) in [
+            ("-1_f64", "1_f64", "f64", true),
+            ("1f32", "1f32", "f32", false),
+            ("-1f32", "1f32", "f32", true),
+        ] {
+            let stream = proc_macro2::TokenStream::from_str(source).unwrap();
+            let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+            let (is_negated, literal, _, span) = cursor.consume_literal_pattern().unwrap();
+            assert_eq!(is_negated, negated);
+            assert!(matches!(literal, Literal::Float(value) if value.suffix() == suffix));
+            assert_eq!(span.source_text().as_deref(), Some(expected));
+        }
+    }
+
+    /// Preserves valid exponent patterns and rejects signs after underscores.
+    #[test]
+    fn exponent_sign_literal_patterns_preserve_tokens_and_reject_misplaced_signs() {
+        for (source, spelling, negated) in [
+            ("1e+_2f64", "1e+_2f64", false),
+            ("-1e-__2f64", "1e-__2f64", true),
+            ("1e__2f32", "1e__2f32", false),
+        ] {
+            let stream = proc_macro2::TokenStream::from_str(source).unwrap();
+            let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+            let (is_negated, literal, _, span) = cursor.consume_literal_pattern().unwrap();
+            assert_eq!(is_negated, negated);
+            assert!(matches!(literal, Literal::Float(value) if value.to_string() == spelling));
+            assert_eq!(span.source_text().as_deref(), Some(spelling));
+        }
+        for (source, spelling) in [
+            ("1e_+2f64", "1e_+2f64"),
+            ("-1e__-2f64", "1e__-2f64"),
+            ("1e_+2f32", "1e_+2f32"),
+        ] {
+            let stream = proc_macro2::TokenStream::from_str(source).unwrap();
+            let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+            let error = cursor.consume_literal_pattern().unwrap_err();
+            assert_eq!(error.span().source_text().as_deref(), Some(spelling));
+        }
     }
 
     /// Rejects negation of an unsigned literal pattern.

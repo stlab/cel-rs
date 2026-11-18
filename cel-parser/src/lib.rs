@@ -385,9 +385,13 @@ pub type Result<T> = std::result::Result<T, ParseError>;
 ///
 /// # Errors
 ///
-/// Returns `Err` if the literal type is unsupported or if a suffixed numeric
-/// literal cannot be parsed.
+/// Returns `Err` if the literal type or numeric suffix is unsupported, the exponent
+/// sign is misplaced, or a numeric literal cannot be parsed as its type.
+///
+/// - Complexity: O(n) time and space for a literal with n characters.
 fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Result<()> {
+    let lit = lex_lexer::normalize_literal(lit)
+        .map_err(|error| ParseError::new(error.to_string(), error.span()))?;
     match lit {
         CelLiteral::Int(integer) => {
             let span = integer.span();
@@ -565,17 +569,14 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
     Ok(())
 }
 
-/// Validates that `lit` is a literal `cel_parser` can represent as a value: a recognized numeric
-/// suffix, and (for a suffixed or unsuffixed integer/float) a value in range for its width.
-/// Reuses the same literal-compiling checks the grammar itself applies to a literal token,
-/// against a throwaway context, for a caller (e.g. adam-lang's CST parser, which records a
-/// literal token without compiling it into a value) that needs to reject the same literals the
-/// runtime parser would, without needing a [`ParserContext`] of its own to push into.
+/// Validates a syntax literal using the expression parser's value rules.
+///
+/// Floating-point overflow produces infinity; unrepresentable integers are rejected.
 ///
 /// # Errors
 ///
-/// Returns `Err` for an unrecognized numeric suffix, or a numeric value out of range for its
-/// width.
+/// Returns `Err` for an unsupported literal kind or numeric suffix, a misplaced
+/// exponent sign, or a numeric value that cannot be parsed as its type.
 ///
 /// - Complexity: Includes literal-token cloning and value parsing for the token's text.
 ///
@@ -583,6 +584,8 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
 /// ```
 /// let literal: syn::Lit = syn::parse_str("42i32").unwrap();
 /// cel_parser::validate_literal(&literal).unwrap();
+/// let float: syn::Lit = syn::parse_str("1f64").unwrap();
+/// cel_parser::validate_literal(&float).unwrap();
 /// ```
 pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
     push_literal_token(&mut DynSegmentContext::new_context(), lit.clone())
@@ -591,10 +594,11 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
 /// Converts one syntax literal into retained expression syntax without executing code.
 ///
 /// Preserves the token's source span and concrete numeric width using the same validation
-/// as expression parsing.
+/// as expression parsing. Floating-point overflow produces infinity.
 ///
 /// # Errors
-/// Rejects unsupported literal kinds, invalid suffixes, and out-of-range values.
+/// Rejects unsupported literal kinds, invalid suffixes, misplaced exponent signs,
+/// and numeric values that cannot be parsed as their types.
 /// - Complexity: O(n) literal bytes.
 ///
 /// # Examples
@@ -602,6 +606,11 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
 /// let token: syn::Lit = syn::parse_str("42i32")?;
 /// assert!(matches!(cel_parser::literal_expr(&token)?,
 ///     cel_parser::Expr::Literal { value: cel_parser::Literal::I32(42), .. }));
+/// let overflow: syn::Lit = syn::parse_str("340282366920938463463374607431768211456f32")?;
+/// cel_parser::validate_literal(&overflow)?;
+/// assert!(matches!(cel_parser::literal_expr(&overflow)?,
+///     cel_parser::Expr::Literal { value: cel_parser::Literal::F32(value), .. }
+///     if value.is_infinite() && value.is_sign_positive()));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn literal_expr(lit: &CelLiteral) -> Result<Expr> {
@@ -2916,6 +2925,244 @@ mod tests {
         assert!((value - 42.14f32).abs() < 1e-6);
     }
 
+    /// Evaluates and retains valid exponent spellings through all literal entry points.
+    #[test]
+    fn exponent_sign_precedes_underscores_in_literal_values() {
+        for (source, expected) in [
+            ("1e+_2f64", 100.0),
+            ("1e__2f64", 100.0),
+            ("1e-__2f64", 0.01),
+            ("1.0E+__2f64", 100.0),
+        ] {
+            let literal: lex_lexer::Literal = syn::parse_str(source).unwrap();
+            validate_literal(&literal).unwrap();
+            let expression = literal_expr(&literal).unwrap();
+            assert!(matches!(
+                &expression,
+                Expr::Literal { value: Literal::F64(value), .. } if *value == expected
+            ));
+            assert_eq!(format_expr(&expression, source, 0), source);
+            let mut parser = CELParser::new(OpLookup::new());
+            assert_eq!(
+                parser.parse_str(source).unwrap().call0::<f64>().unwrap(),
+                expected,
+                "{source}"
+            );
+            parser.set_tokens(
+                source
+                    .parse::<proc_macro2::TokenStream>()
+                    .unwrap()
+                    .into_iter(),
+            );
+            assert_eq!(
+                parser
+                    .parse_literal_pattern()
+                    .unwrap()
+                    .call0::<f64>()
+                    .unwrap(),
+                expected,
+                "{source}"
+            );
+        }
+        let literal: lex_lexer::Literal = syn::parse_str("1e+_2f32").unwrap();
+        validate_literal(&literal).unwrap();
+        let expression = literal_expr(&literal).unwrap();
+        assert!(matches!(
+            &expression,
+            Expr::Literal {
+                value: Literal::F32(100.0),
+                ..
+            }
+        ));
+        assert_eq!(format_expr(&expression, "1e+_2f32", 0), "1e+_2f32");
+        let mut parser = CELParser::new(OpLookup::new());
+        assert_eq!(
+            parser
+                .parse_str("1e+_2f32")
+                .unwrap()
+                .call0::<f32>()
+                .unwrap(),
+            100.0
+        );
+        parser.set_tokens(
+            "1e+_2f32"
+                .parse::<proc_macro2::TokenStream>()
+                .unwrap()
+                .into_iter(),
+        );
+        assert_eq!(
+            parser
+                .parse_literal_pattern()
+                .unwrap()
+                .call0::<f32>()
+                .unwrap(),
+            100.0
+        );
+    }
+
+    /// Rejects misplaced exponent signs in validation, expressions, and patterns.
+    #[test]
+    fn exponent_sign_after_underscores_is_rejected_by_all_literal_entry_points() {
+        for source in [
+            "1e_+2f64",
+            "1e__-2f64",
+            "1e_+_2f64",
+            "1.0e_+2f64",
+            "1E__+2f64",
+            "1e_+2f32",
+            "1_e_+_2",
+        ] {
+            let literal: lex_lexer::Literal = syn::parse_str(source).unwrap();
+            let error = validate_literal(&literal).expect_err(source);
+            assert_eq!(error.span().source_text().as_deref(), Some(source));
+            assert!(literal_expr(&literal).is_err(), "{source}");
+            let mut parser = CELParser::new(OpLookup::new());
+            assert!(parser.parse_str(source).is_err(), "{source}");
+            parser.set_tokens(
+                source
+                    .parse::<proc_macro2::TokenStream>()
+                    .unwrap()
+                    .into_iter(),
+            );
+            assert!(parser.parse_literal_pattern().is_err(), "{source}");
+        }
+        let negative: lex_lexer::Literal = syn::parse_str("-1e_+2f64").unwrap();
+        assert!(validate_literal(&negative).is_err());
+        assert!(literal_expr(&negative).is_err());
+    }
+
+    /// Rejects exponent-form tuple indices and retains their diagnostic spans.
+    #[test]
+    fn exponent_sign_literals_do_not_become_tuple_indices() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let error = parser
+            .parse_str("(1.0,).0e+_0f64")
+            .err()
+            .expect("an exponent is not a tuple index");
+        assert_eq!(error.message(), "tuple index must be an unsuffixed integer");
+        assert_eq!(error.span().source_text().as_deref(), Some("0e+_0f64"));
+        assert!(parser.parse_str("(1.0,).0e_+0f64").is_err());
+    }
+
+    /// Evaluates decimal integer-form literals as f64 values.
+    #[test]
+    fn integer_form_float_f64_literals_evaluate() {
+        let mut parser = CELParser::new(OpLookup::new());
+        for (source, expected) in [
+            ("1f64", 1.0),
+            ("1_f64", 1.0),
+            ("0f64", 0.0),
+            ("1_000f64", 1000.0),
+            ("9007199254740993f64", 9007199254740992.0),
+            (
+                "340_282_366_920_938_463_463_374_607_431_768_211_456f64",
+                2.0f64.powi(128),
+            ),
+            ("1f64 + 2.0f64", 3.0),
+        ] {
+            let mut segment = parser.parse_str(source).unwrap();
+            assert_eq!(segment.call0::<f64>().unwrap(), expected, "{source}");
+        }
+        let mut negative_zero = parser.parse_str("-0f64").unwrap();
+        assert!(negative_zero.call0::<f64>().unwrap().is_sign_negative());
+    }
+
+    /// Evaluates decimal integer-form literals as f32 values.
+    #[test]
+    fn integer_form_float_f32_literals_evaluate() {
+        let mut parser = CELParser::new(OpLookup::new());
+        for (source, expected) in [
+            ("1f32", 1.0f32),
+            ("0_f32", 0.0),
+            ("16777217f32", 16777216.0),
+            (
+                "170_141_183_460_469_231_731_687_303_715_884_105_728f32",
+                2.0f32.powi(127),
+            ),
+            ("1f32 + 2.0f32", 3.0),
+        ] {
+            let mut segment = parser.parse_str(source).unwrap();
+            assert_eq!(segment.call0::<f32>().unwrap(), expected, "{source}");
+        }
+        let mut negative_zero = parser.parse_str("-0f32").unwrap();
+        assert!(negative_zero.call0::<f32>().unwrap().is_sign_negative());
+    }
+
+    /// Validates and retains the type of literal tokens supplied directly by Syn.
+    #[test]
+    fn integer_form_float_literals_validate_without_a_lexer() {
+        for (source, expected) in [
+            ("1f64", 1.0),
+            ("1_f64", 1.0),
+            ("0f64", 0.0),
+            ("-1_f64", -1.0),
+        ] {
+            let literal: lex_lexer::Literal = syn::parse_str(source).unwrap();
+            validate_literal(&literal).unwrap();
+            let original_span = lex_lexer::HasSpan::span(&literal);
+            let Expr::Literal {
+                value: Literal::F64(value),
+                span,
+            } = literal_expr(&literal).unwrap()
+            else {
+                panic!("{source} must retain an f64 value");
+            };
+            assert_eq!(value, expected);
+            assert_eq!(span.start.source_text(), original_span.source_text());
+            assert_eq!(span.end.source_text(), original_span.source_text());
+        }
+        let literal: lex_lexer::Literal = syn::parse_str("1f32").unwrap();
+        validate_literal(&literal).unwrap();
+        assert!(matches!(
+            literal_expr(&literal).unwrap(),
+            Expr::Literal {
+                value: Literal::F32(1.0),
+                ..
+            }
+        ));
+        for (source, message) in [
+            ("-0b1f64", "invalid integer literal suffix: `f64`"),
+            ("-0o7_f64", "invalid integer literal suffix: `f64`"),
+            ("-0b1f32", "invalid integer literal suffix: `f32`"),
+            ("-0o7_f32", "invalid integer literal suffix: `f32`"),
+        ] {
+            let literal: lex_lexer::Literal = syn::parse_str(source).unwrap();
+            let error = validate_literal(&literal).unwrap_err();
+            assert_eq!(error.message(), message);
+        }
+    }
+
+    /// Retains integer and selector boundaries around suffixed floating literals.
+    #[test]
+    fn integer_form_float_literals_preserve_numeric_boundaries() {
+        let mut parser = CELParser::new(OpLookup::new());
+        for (source, expected) in [("0x1f64", 8036), ("0b101", 5), ("0o77", 63)] {
+            let mut segment = parser.parse_str(source).unwrap();
+            assert_eq!(segment.call0::<i32>().unwrap(), expected, "{source}");
+        }
+        let mut cast = parser.parse_str("1 as f64").unwrap();
+        assert_eq!(cast.call0::<f64>().unwrap(), 1.0);
+        for source in [
+            "1f64x", "1f64_", "1f640", "0b1f64", "0o7_f64", "1f32x", "0b1f32", "0o7_f32",
+        ] {
+            assert!(parser.parse_str(source).is_err(), "{source}");
+        }
+        for (source, selector) in [
+            ("(10,20).0f64", "0f64"),
+            ("(10,20).1f32", "1f32"),
+            ("(10,20).0_f64", "0_f64"),
+        ] {
+            let error = parser
+                .parse_str(source)
+                .err()
+                .expect("suffix must be rejected");
+            assert_eq!(error.message(), "tuple index must be an unsuffixed integer");
+            assert_eq!(error.span().source_text().as_deref(), Some(selector));
+        }
+        let mut selected = parser.parse_str("(10,20).1").unwrap();
+        assert_eq!(selected.call0::<i32>().unwrap(), 20);
+    }
+
     #[test]
     fn invalid_float_suffix() {
         let mut parser = CELParser::new(OpLookup::new());
@@ -4103,6 +4350,29 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         assert_eq!(seg.call0::<f64>()?, -1.5);
         Ok(())
+    }
+
+    /// Compiles integer-form float literals in literal patterns.
+    #[test]
+    fn integer_form_float_literal_patterns_preserve_width_and_sign() {
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_tokens(
+            "-1_f64"
+                .parse::<proc_macro2::TokenStream>()
+                .unwrap()
+                .into_iter(),
+        );
+        let mut f64_pattern = parser.parse_literal_pattern().unwrap();
+        assert_eq!(f64_pattern.call0::<f64>().unwrap(), -1.0);
+
+        parser.set_tokens(
+            "1f32"
+                .parse::<proc_macro2::TokenStream>()
+                .unwrap()
+                .into_iter(),
+        );
+        let mut f32_pattern = parser.parse_literal_pattern().unwrap();
+        assert_eq!(f32_pattern.call0::<f32>().unwrap(), 1.0);
     }
 
     #[test]
