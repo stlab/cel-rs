@@ -320,10 +320,10 @@ fn ReloadHost(initial_name: String) -> Element {
     }
 }
 
-/// Reloads a repaired opened file after its initial example failed to load.
+/// Recovers from an initial build failure when reloading an opened file.
 #[cfg(feature = "desktop")]
 #[test]
-fn mounted_app_reloads_repaired_opened_file_after_initial_build_failure() {
+fn mounted_app_recovers_after_opened_file_initial_build_failure() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("recovery.adm2");
     std::fs::write(&path, "sheet broken { cell x }").unwrap();
@@ -353,7 +353,6 @@ fn mounted_app_reloads_repaired_opened_file_after_initial_build_failure() {
         origin: SourceOrigin::Opened(path.clone().into_os_string()),
     });
 
-    std::fs::write(&path, "sheet repaired { cell x: i64 = 10i64; }").unwrap();
     let click = edits
         .into_iter()
         .find_map(|edit| match edit {
@@ -362,6 +361,28 @@ fn mounted_app_reloads_repaired_opened_file_after_initial_build_failure() {
         })
         .expect("reload action is mounted");
     dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+    dom.runtime().handle_event(
+        "click",
+        Event::new(
+            Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                dioxus_html::SerializedMouseData::default(),
+            ))),
+            true,
+        )
+        .into_any(),
+        click,
+    );
+    dom.render_immediate_to_vec();
+
+    let failed_reload_html = dioxus_ssr::render(&dom);
+    assert!(failed_reload_html.contains("adam-live-error"));
+    assert!(
+        failed_reload_html.contains("expected"),
+        "{failed_reload_html}"
+    );
+    assert!(!failed_reload_html.contains("graph-container"));
+
+    std::fs::write(&path, "sheet repaired { cell x: i64 = 10i64; }").unwrap();
     dom.runtime().handle_event(
         "click",
         Event::new(
