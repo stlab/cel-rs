@@ -288,7 +288,7 @@ fn recovery_host() -> Element {
                     displayed,
                     Some(owner),
                     ActiveSource {
-                        name: "cycle".to_string(),
+                        name: "diamond".to_string(),
                         text: source.to_string(),
                         origin: SourceOrigin::Example,
                     },
@@ -320,45 +320,39 @@ fn ReloadHost(initial_name: String) -> Element {
     }
 }
 
-/// Removes a temporary example file created by a desktop reload test.
-#[cfg(feature = "desktop")]
-struct ExampleFileGuard(std::path::PathBuf);
-
-#[cfg(feature = "desktop")]
-impl Drop for ExampleFileGuard {
-    /// Removes the test fixture when its mounted app test exits.
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// Reloads a repaired on-disk example after its initial build failed.
+/// Recovers from an initial build failure when reloading an opened file.
 #[cfg(feature = "desktop")]
 #[test]
-fn mounted_app_reloads_repaired_example_after_initial_build_failure() {
-    let name = format!("__test_recovery_{}", std::process::id());
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join(format!("{name}.adm2"));
-    let _fixture = ExampleFileGuard(path.clone());
+fn mounted_app_recovers_after_opened_file_initial_build_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("recovery.adm2");
     std::fs::write(&path, "sheet broken { cell x }").unwrap();
 
     let observer: AppLifecycleObserver = Rc::new(RefCell::new(None));
     let mut dom = VirtualDom::new_with_props(
         ReloadHost,
         ReloadHostProps {
-            initial_name: name.clone(),
+            initial_name: "__missing_recovery_example".to_string(),
         },
     );
-    dom.provide_root_context(observer);
+    dom.provide_root_context(observer.clone());
     let edits = dom.rebuild_to_vec().edits;
     let initial_html = dioxus_ssr::render(&dom);
     assert!(initial_html.contains("adam-live-error"));
-    assert!(initial_html.contains("expected"), "{initial_html}");
+    assert!(initial_html.contains("failed to read"), "{initial_html}");
     assert!(!initial_html.contains("<input>"), "{initial_html}");
     assert!(!initial_html.contains("graph-container"));
+    let mut active_source = observer
+        .borrow()
+        .as_ref()
+        .expect("the app publishes state before the reload")
+        .2;
+    active_source.set(ActiveSource {
+        name: "recovery".to_string(),
+        text: "sheet broken { cell x }".to_string(),
+        origin: SourceOrigin::Opened(path.clone().into_os_string()),
+    });
 
-    std::fs::write(&path, "sheet repaired { cell x: i64 = 10i64; }").unwrap();
     let click = edits
         .into_iter()
         .find_map(|edit| match edit {
@@ -367,6 +361,28 @@ fn mounted_app_reloads_repaired_example_after_initial_build_failure() {
         })
         .expect("reload action is mounted");
     dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+    dom.runtime().handle_event(
+        "click",
+        Event::new(
+            Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                dioxus_html::SerializedMouseData::default(),
+            ))),
+            true,
+        )
+        .into_any(),
+        click,
+    );
+    dom.render_immediate_to_vec();
+
+    let failed_reload_html = dioxus_ssr::render(&dom);
+    assert!(failed_reload_html.contains("adam-live-error"));
+    assert!(
+        failed_reload_html.contains("expected"),
+        "{failed_reload_html}"
+    );
+    assert!(!failed_reload_html.contains("graph-container"));
+
+    std::fs::write(&path, "sheet repaired { cell x: i64 = 10i64; }").unwrap();
     dom.runtime().handle_event(
         "click",
         Event::new(

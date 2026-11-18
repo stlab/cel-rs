@@ -11,7 +11,6 @@
 - [[knowledge/affine-vector-mapping-must-ignore-nonfinite-translation.md|Affine vector mapping must ignore nonfinite translation]] (pattern, 0.99) `geometry` `affine-transform` `floating-point` `portability`
 - [[knowledge/architecture-overview.md|Architecture Overview]] (concept, 0.72) `architecture` `cel-rs` `adam-rs` `cel-runtime` `cel-parser` `overview`
 - [[knowledge/avoid-reactive-self-subscription-in-binding-mutations.md|Avoid reactive self-subscription in binding mutations]] (discovery, 0.70) `dioxus` `bindings` `slider` `reactivity`
-- [[knowledge/begin-desktop-recovery-tests-share-the-examples-watcher.md|Begin desktop recovery tests share the examples watcher]] (discovery, 0.98) `begin` `desktop` `tests` `watcher` `recovery`
 - [[knowledge/canonical-container-value-persistence.md|Canonical Container Value Persistence]] (concept, 0.75) `cel-runtime` `canonical-values` `tuples` `arrays` `value-persistence`
 - [[knowledge/cel-and-adam-require-strict-ll1-with-terminal-commas-only-for-singleton-tuples.md|CEL and Adam require strict LL1 with terminal commas only for singleton tuples]] (decision, 0.99) `grammar` `ll1` `parser` `trailing-comma` `project-policy`
 - [[knowledge/cel-cleanup-belongs-to-live-values-not-typed-instruction-plans.md|CEL cleanup belongs to live values, not typed instruction plans]] (decision, 0.98) `cel-runtime` `ownership` `unwinding` `allocation` `value-type` `unsafe`
@@ -34,6 +33,7 @@
 - [[knowledge/git-worktree-and-no-direct-commit-policy.md|Git Worktree and No-Direct-Commit Policy]] (procedure, 0.85) `git` `worktree` `githooks` `branching` `repository-policy`
 - [[knowledge/graph-channels-require-exclusive-container-ownership.md|Graph Channels Require Exclusive Container Ownership]] (discovery, 0.97) `graph` `ownership` `live-book` `bootstrap` `identity`
 - [[knowledge/issue-29-means-typed-parameterized-sheet-composition-not-equation-inference.md|Issue 29 means typed parameterized-sheet composition, not equation inference]] (decision, 0.99) `adam-lang` `adam-rs` `parameterized-sheets` `composition` `issue-29` `approved-design`
+- [[knowledge/keep-begin-test-fixtures-out-of-examples.md|Keep Begin test fixtures out of examples/]] (pattern, 0.80)
 - [[knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md|LexLexer compounds preserve first-punctuation spans and group-local adjacency]] (pattern, 1.00) `lexer` `source-spans` `parity`
 - [[knowledge/lsp-isolates-dependency-groups-before-whole-collection-module-checks.md|LSP isolates dependency groups before whole-collection module checks]] (discovery, 0.97) `lsp` `module-checking` `diagnostics` `configuration` `source-ownership`
 - [[knowledge/lsp-source-spans-require-original-text-utf-16-projection-in-both-diagnostic-paths.md|LSP source spans require original-text UTF-16 projection in both diagnostic paths]] (discovery, 0.99) `adam-lsp` `unicode` `diagnostics` `source-ownership` `parameterized-sheets`
