@@ -15,6 +15,9 @@ sources:
   - "begin/src/recovery.rs:193-216"
 tags: ["begin", "desktop", "tests", "watcher", "recovery"]
 tier: knowledge
+votes_up: 1
+votes_down: 0
+last_voted: 2026-11-18T06:57:59Z
 ---
 
 # Begin desktop recovery tests share the examples watcher

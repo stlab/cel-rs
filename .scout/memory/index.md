@@ -34,6 +34,7 @@
 - [[knowledge/git-worktree-and-no-direct-commit-policy.md|Git Worktree and No-Direct-Commit Policy]] (procedure, 0.85) `git` `worktree` `githooks` `branching` `repository-policy`
 - [[knowledge/graph-channels-require-exclusive-container-ownership.md|Graph Channels Require Exclusive Container Ownership]] (discovery, 0.97) `graph` `ownership` `live-book` `bootstrap` `identity`
 - [[knowledge/issue-29-means-typed-parameterized-sheet-composition-not-equation-inference.md|Issue 29 means typed parameterized-sheet composition, not equation inference]] (decision, 0.99) `adam-lang` `adam-rs` `parameterized-sheets` `composition` `issue-29` `approved-design`
+- [[knowledge/keep-begin-test-fixtures-out-of-examples.md|Keep Begin test fixtures out of examples/]] (pattern, 0.80)
 - [[knowledge/lexlexer-compounds-preserve-first-punctuation-spans-and-group-local-adjacency.md|LexLexer compounds preserve first-punctuation spans and group-local adjacency]] (pattern, 1.00) `lexer` `source-spans` `parity`
 - [[knowledge/lsp-isolates-dependency-groups-before-whole-collection-module-checks.md|LSP isolates dependency groups before whole-collection module checks]] (discovery, 0.97) `lsp` `module-checking` `diagnostics` `configuration` `source-ownership`
 - [[knowledge/lsp-source-spans-require-original-text-utf-16-projection-in-both-diagnostic-paths.md|LSP source spans require original-text UTF-16 projection in both diagnostic paths]] (discovery, 0.99) `adam-lsp` `unicode` `diagnostics` `source-ownership` `parameterized-sheets`
