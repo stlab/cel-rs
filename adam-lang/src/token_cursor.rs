@@ -366,9 +366,9 @@ impl TokenCursor {
     ///
     /// Returns `Err` if a leading `-` is not followed by a literal, if there is no literal at
     /// all, if the literal itself isn't one `cel_parser` can represent (unrecognized numeric
-    /// suffix, misplaced exponent sign, or a value out of range for its width), or if a leading
-    /// `-` negates a literal `cel_parser` has no unary `-` overload for (any non-numeric literal,
-    /// or an integer literal with an unsigned suffix) — mirroring the runtime parser's
+    /// suffix, misplaced exponent sign, or a numeric value that cannot be parsed as its type),
+    /// or if a leading `-` negates a literal `cel_parser` has no unary `-` overload for
+    /// (any non-numeric literal, or an integer literal with an unsigned suffix). This mirrors
     /// `cel_parser::Parser::parse_literal_pattern`, which rejects the same cases via
     /// `push_literal_token`/its operator table.
     ///

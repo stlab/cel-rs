@@ -569,12 +569,9 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
     Ok(())
 }
 
-/// Validates that `lit` is a literal `cel_parser` can represent as a value: a recognized numeric
-/// suffix, and (for a suffixed or unsuffixed integer/float) a value in range for its width.
-/// Reuses the same literal-compiling checks the grammar itself applies to a literal token,
-/// against a throwaway context, for a caller (e.g. adam-lang's CST parser, which records a
-/// literal token without compiling it into a value) that needs to reject the same literals the
-/// runtime parser would, without needing a [`ParserContext`] of its own to push into.
+/// Validates a syntax literal using the expression parser's value rules.
+///
+/// Floating-point overflow produces infinity; unrepresentable integers are rejected.
 ///
 /// # Errors
 ///
@@ -597,11 +594,11 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
 /// Converts one syntax literal into retained expression syntax without executing code.
 ///
 /// Preserves the token's source span and concrete numeric width using the same validation
-/// as expression parsing.
+/// as expression parsing. Floating-point overflow produces infinity.
 ///
 /// # Errors
 /// Rejects unsupported literal kinds, invalid suffixes, misplaced exponent signs,
-/// and out-of-range values.
+/// and numeric values that cannot be parsed as their types.
 /// - Complexity: O(n) literal bytes.
 ///
 /// # Examples
@@ -609,6 +606,11 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
 /// let token: syn::Lit = syn::parse_str("42i32")?;
 /// assert!(matches!(cel_parser::literal_expr(&token)?,
 ///     cel_parser::Expr::Literal { value: cel_parser::Literal::I32(42), .. }));
+/// let overflow: syn::Lit = syn::parse_str("340282366920938463463374607431768211456f32")?;
+/// cel_parser::validate_literal(&overflow)?;
+/// assert!(matches!(cel_parser::literal_expr(&overflow)?,
+///     cel_parser::Expr::Literal { value: cel_parser::Literal::F32(value), .. }
+///     if value.is_infinite() && value.is_sign_positive()));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn literal_expr(lit: &CelLiteral) -> Result<Expr> {
