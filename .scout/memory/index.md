@@ -8,6 +8,7 @@
 - [[knowledge/adam-lsp-server-loop-and-diagnostic-publishing-flow.md|Adam-lsp Server Loop and Diagnostic Publishing Flow]] (observation, 0.75) `adam-lsp` `lsp` `diagnostics` `formatting` `server-loop`
 - [[knowledge/adam-slides-flexible-authoring-and-live-preview-publication-order.md|Adam slides flexible authoring and live preview publication order]] (pattern, 0.99) `adam-slides` `marp` `live-preview` `authoring` `manifest`
 - [[knowledge/adam-slides-graph-baseline-overflow-and-pagination-margin-sizing.md|Adam slides graph baseline overflow and pagination margin sizing]] (discovery, 0.99) `adam-slides` `marp` `css` `svg` `layout` `scrollbars`
+- [[knowledge/affine-vector-mapping-must-ignore-nonfinite-translation.md|Affine vector mapping must ignore nonfinite translation]] (pattern, 0.99) `geometry` `affine-transform` `floating-point` `portability`
 - [[knowledge/architecture-overview.md|Architecture Overview]] (concept, 0.72) `architecture` `cel-rs` `adam-rs` `cel-runtime` `cel-parser` `overview`
 - [[knowledge/avoid-reactive-self-subscription-in-binding-mutations.md|Avoid reactive self-subscription in binding mutations]] (discovery, 0.70) `dioxus` `bindings` `slider` `reactivity`
 - [[knowledge/canonical-container-value-persistence.md|Canonical Container Value Persistence]] (concept, 0.75) `cel-runtime` `canonical-values` `tuples` `arrays` `value-persistence`
@@ -18,6 +19,7 @@
 - [[knowledge/cel-record-emission-preserves-source-field-order-through-a-schema-permutation.md|CEL record emission preserves source field order through a schema permutation]] (pattern, 0.99) `cel` `records` `emission` `evaluation-order`
 - [[knowledge/cel-record-fields-use-typed-member-operation-dispatch.md|CEL record fields use typed member operation dispatch]] (pattern, 1.00) `records` `member-dispatch` `parity`
 - [[knowledge/celparser-and-parsercontext-dual-emission.md|CELParser and ParserContext Dual Emission]] (concept, 0.80) `cel-parser` `parser-context` `ast-context` `dyn-segment-context` `cel-expression`
+- [[knowledge/checked-geometry-inverse-distinguishes-exact-zero-from-coefficient-underflow.md|Checked geometry inverse distinguishes exact zero from coefficient underflow]] (discovery, 1.00) `cel-euclid` `geometry` `inverse` `floating-point`
 - [[knowledge/clippy-and-feature-flag-validation-matrix.md|Clippy and Feature Flag Validation Matrix]] (procedure, 0.85) `build` `clippy` `feature-flags` `validation` `cargo`
 - [[knowledge/conditional-construction-errors-need-native-identity-context-to-retain-the-failed-child-source.md|Conditional construction errors need native identity context to retain the failed child source]] (discovery, 0.98) `composition` `conditional` `provenance` `error-ownership` `source-identity`
 - [[knowledge/conditional-evaluation-failure-must-not-activate-the-default-branch.md|Conditional Evaluation Failure Must Not Activate The Default Branch]] (pattern, 0.99) `graph` `conditionals` `error-handling` `ui`
@@ -37,12 +39,15 @@
 - [[knowledge/module-analysis-requires-output-backing-defaults-even-when-an-output-has-a-writer.md|Module analysis requires output backing defaults even when an output has a writer]] (discovery, 0.97) `module-checking` `outputs` `defaults` `nonexecuting-analysis`
 - [[knowledge/module-checking-selects-registered-source-identity-and-checks-the-whole-collection.md|Module checking selects registered source identity and checks the whole collection]] (decision, 0.97) `parameterized-sheets` `module-checking` `source-identity` `ownership` `nonexecution`
 - [[knowledge/native-template-preflight-caches-successful-full-source-specializations-not-inclusion-occurrences.md|Native template preflight caches successful full-source specializations, not inclusion occurrences]] (discovery, 0.97) `parameterized-sheets` `preflight` `dag` `source-specialization`
+- [[knowledge/normalize-syn-integer-form-floats-at-both-cel-literal-entry-points.md|Normalize Syn integer-form floats at both CEL literal entry points]] (discovery, 0.70) `cel-parser` `literals` `syn`
 - [[knowledge/numeric-editor-capability-follows-the-complete-type-domain.md|Numeric Editor Capability Follows The Complete Type Domain]] (decision, 1.00) `ui` `numeric` `precision` `type-domain` `spectrum`
 - [[knowledge/oplookup-scoping-and-resolution-hierarchy.md|OpLookup Scoping and Resolution Hierarchy]] (concept, 0.80) `cel-parser` `op-lookup` `operator-resolution` `scope` `builtins`
+- [[knowledge/outer-geometry-bounds-preserve-first-equal-extrema.md|Outer geometry bounds preserve first equal extrema]] (discovery, 0.70) `cel-euclid` `geometry` `floating-point`
 - [[knowledge/rawstack-ownership-release-requires-physical-frame-repair.md|RawStack Ownership Release Requires Physical Frame Repair]] (pattern, 0.98) `runtime` `ownership` `unsafe` `unwinding`
 - [[knowledge/shared-spectrum-exports-and-live-embed-assets-constrain-begin-widget-migration.md|Shared controls and live-embed assets constrain widget changes]] (discovery, 0.99) `dioxus` `spectrum` `shared-assets`
 - [[knowledge/sheet-constraint-planning-and-method-selection-flow.md|Sheet Constraint Planning and Method Selection Flow]] (observation, 0.80) `adam-rs` `sheet` `planner` `multi-way-constraints` `method-selection`
 - [[knowledge/sheethandle-reentrant-outcomes-require-borrow-free-fifo-delivery.md|SheetHandle reentrant outcomes require borrow-free FIFO delivery]] (pattern, 0.98) `dioxus` `bindings` `reentrancy`
+- [[knowledge/transformed-outer-bounds-must-enclose-corners-without-claiming-interior-coverage.md|Transformed outer bounds must enclose corners without claiming interior coverage]] (discovery, 1.00) `cel-euclid` `geometry` `bounds` `floating-point`
 - [[knowledge/tuple-selector-conversion-errors-retain-the-original-literal-span.md|Tuple selector conversion errors retain the original literal span]] (pattern, 0.99) `parser` `diagnostics` `tuple-selector` `source-span`
 - [[knowledge/validate-float-exponent-signs-from-the-original-literal-spelling.md|Validate float exponent signs from the original literal spelling]] (discovery, 0.70) `lexer` `literals` `syn` `grammar`
 - [[knowledge/vendored-spectrum-bundle-maintenance-via-xtask.md|Vendored Spectrum Bundle Maintenance via xtask]] (procedure, 0.85) `xtask` `spectrum` `swc-js` `assets` `build-js`
